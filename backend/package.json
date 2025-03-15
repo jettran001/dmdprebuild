@@ -1,0 +1,22 @@
+{
+    "name": "diamond-backend",
+    "version": "1.1.0",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.17.1",
+        "pg": "^8.7.3",
+        "mongodb": "^4.5.0",
+        "kafkajs": "^2.0.0",
+        "ws": "^8.5.0",
+        "express-rate-limit": "^6.4.0",
+        "web3": "^1.7.0",
+        "jsonwebtoken": "^9.0.0",
+        "helmet": "^7.0.0",
+        "csurf": "^1.11.0",
+        "express-validator": "^7.0.1",
+        "cors": "^2.8.5",
+        "redis": "^4.6.5"
+    }
+}

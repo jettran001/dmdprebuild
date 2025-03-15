@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package diamond;
+
+service Diamond {
+    rpc GetPrice (PriceRequest) returns (PriceResponse) {}
+}
+
+message PriceRequest {}
+
+message PriceResponse {
+    int64 price = 1;
+}

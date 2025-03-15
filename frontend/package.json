@@ -1,0 +1,17 @@
+{
+    "name": "diamond-frontend",
+    "version": "1.1.0",
+    "scripts": {
+        "start": "react-scripts start"
+    },
+    "dependencies": {
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+        "react-router-dom": "^5.3.0",
+        "react-bootstrap": "^2.5.0",
+        "leaflet": "^1.9.3"
+    },
+    "devDependencies": {
+        "react-scripts": "^5.0.1"
+    }
+}

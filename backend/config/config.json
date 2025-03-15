@@ -1,0 +1,13 @@
+{
+    "db": {
+        "host": "localhost",
+        "port": 5432,
+        "name": "diamond_db"
+    },
+    "mongo": {
+        "url": "mongodb://localhost:27017"
+    },
+    "kafka": {
+        "broker": "localhost:9092"
+    }
+}
