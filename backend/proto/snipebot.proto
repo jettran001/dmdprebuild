@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package snipebot;
+
+service SnipebotService {
+    rpc TriggerManualBuy (ManualBuyRequest) returns (Response);
+    rpc TriggerSnipeMEV (SnipeMEVRequest) returns (Response);
+}
+
+message ManualBuyRequest {
+    string chain = 1;
+    string tokenAddress = 2;
+    string amount = 3;
+    string poolId = 4;
+}
+
+message SnipeMEVRequest {
+    string chain = 1;
+    string tokenAddress = 2;
+}
+
+message Response {
+    string status = 1;
+}

@@ -1,0 +1,8 @@
+{
+    "contractName": "Staking",
+    "abi": [
+        {"inputs": [{"internalType": "address", "name": "token", "type": "address"}], "stateMutability": "nonpayable", "type": "constructor"},
+        {"inputs": [{"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "stake", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
+    ],
+    "address": "0x2222..."
+}
