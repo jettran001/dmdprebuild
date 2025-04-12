@@ -1,0 +1,222 @@
+{
+  "mandatory_requirements": {
+    "priority": "MANDATORY",
+    "description": "Các quy tắc bắt buộc phải tuân thủ trước khi sửa code hoặc phát triển dự án",
+    "enforcement": {
+      "read_manifest": {
+        "priority": "HIGHEST",
+        "description": "BẮT BUỘC đọc kỹ src/registry/manifest.rs trước khi sửa code",
+        "rules": [
+          "Đọc toàn bộ manifest.rs để hiểu tổ chức module",
+          "Hiểu rõ thứ tự ưu tiên module: api, services, traits, utils",
+          "Tham khảo manifest.rs để biết tương tác giữa các domain"
+        ]
+      },
+      "project_entry": {
+        "priority": "HIGHEST",
+        "description": "BẮT BUỘC kiểm tra và điều hướng dự án dựa trên manifest.rs trước khi sửa code",
+        "entry_points": ["src/registry/manifest.rs"],
+        "module_resolver": {
+          "type": "rust",
+          "manifest_file": "src/registry/manifest.rs",
+          "priority_order": ["api", "services", "traits", "utils"]
+        },
+        "rules": [
+          "Kiểm tra cấu trúc module và dependencies dựa trên manifest.rs",
+          "Xác định quy tắc về import order, thread safety, async patterns, error handling, type handling, caching, testing",
+          "Không vi phạm bất kỳ quy tắc nào trong .cursorrc",
+          "Duy trì thứ tự ưu tiên module như trong manifest.rs"
+        ]
+      },
+      "during_edit": {
+        "priority": "HIGH",
+        "description": "BẮT BUỘC tuân thủ khi chỉnh sửa code",
+        "rules": [
+          "Duy trì cấu trúc module như trong manifest.rs",
+          "Tuân thủ các mẫu thiết kế đã thiết lập"
+        ]
+      },
+      "post_check": {
+        "priority": "HIGH",
+        "description": "BẮT BUỘC kiểm tra sau khi chỉnh sửa",
+        "rules": [
+          "Kiểm tra tính toàn vẹn module sau khi chỉnh sửa",
+          "Cập nhật tài liệu khi thay đổi chức năng"
+        ]
+      },
+      "module_synchronization": {
+        "priority": "HIGH",
+        "description": "BẮT BUỘC đảm bảo đồng bộ giữa các module",
+        "rules": [
+          "Cập nhật tài liệu khi thay đổi module, tham khảo manifest.rs",
+          "Đảm bảo trait definitions thống nhất giữa các module",
+          "Cập nhật module phụ thuộc khi thay đổi interface",
+          "Đảm bảo event handlers đăng ký đầy đủ",
+          "Đảm bảo thread safety khi truy cập shared state"
+        ]
+      },
+      "doc_mode": {
+        "priority": "MANDATORY",
+        "comment": "AI bắt buộc đọc doc comment trước khi phân tích code.",
+        "rules": [
+          "Không sửa code nếu chưa đọc doc comment",
+          "Ưu tiên sửa theo doc nếu mâu thuẫn giữa code và comment"
+        ]
+      }
+    }
+  },
+  "project": {
+    "name": "Diamondchain - SnipeBot DeFi",
+    "description": "Bot giao dịch DeFi thông minh hỗ trợ đa blockchain với các tính năng cao cấp",
+    "version": "0.1.0",
+    "authors": ["Diamond Chain Team"],
+    "license": "MIT",
+    "year": "2023"
+  },
+  "rust": {
+    "toolchain": "stable-1.76.0"
+  },
+  "clippy": {
+    "warns": ["all"],
+    "denies": [
+      "unsafe_code",
+      "unwrap_used",
+      "expect_used",
+      "missing_docs",
+      "unused_must_use"
+    ]
+  },
+  "format": {
+    "enable": true,
+    "onSave": true,
+    "indentation": 4,
+    "line_length": 100,
+    "trailing_comma": true
+  },
+  "hooks": {
+    "pre-commit": [
+      "cargo fmt -- --check",
+      "cargo clippy -- -D warnings",
+      "cargo test"
+    ]
+  },
+  "workspace": {
+    "autoDiscover": true,
+    "ignore": ["target/", "node_modules/", "dist/", ".git/", "logs/"],
+    "modules": {
+      "common": { "description": "Thư viện chung và utilities" },
+      "blockchain": { "description": "Tương tác với blockchain, Quản lý EIP-2535" },
+      "wallet": { "description": "Quản lý ví an toàn" },
+      "snipebot": { "description": "Core logic của bot" },
+      "network/wasm": { "description": "WebAssembly cho giao tiếp mạng" },
+      "diamond_manager": { "description": "Quản trị hệ thống" },
+      "frontend": { "description": "Giao diện người dùng web" },
+      "ai_modules": { "description": "Các module AI cho phân tích và tối ưu hóa giao dịch" }
+    }
+  },
+  "editor": {
+    "tab_size": 4,
+    "ruler": 100,
+    "formatOnSave": true,
+    "match_extensions": [".rs", ".toml"],
+    "ignored_folders": ["target/", "node_modules/", "dist/", ".git/", "logs/"]
+  },
+  "hints": {
+    "explain_module_structure": true,
+    "preferred_entry_comment": "🧭 BẮT BUỘC đọc src/registry/manifest.rs trước khi sửa code. Đây là bản đồ nhỏ cho từng domain, giúp hiểu tổ chức module và tương tác trong dự án."
+  },
+  "development_workflow": {
+    "code_review": {
+      "checklist": [
+        "Kiểm tra quy tắc đặt tên",
+        "Kiểm tra thread safety",
+        "Kiểm tra error handling",
+        "Kiểm tra async patterns",
+        "Kiểm tra documentation"
+      ]
+    },
+    "testing": {
+      "unit_tests": "Viết unit test cho hàm quan trọng",
+      "integration_tests": "Viết integration test cho module",
+      "benchmarks": "Thêm benchmarks cho hàm performance-critical"
+    },
+    "documentation": {
+      "code_comments": "Cập nhật tài liệu dựa trên cấu trúc trong manifest.rs"
+    }
+  },
+  "commands": {
+    "cargo": {
+      "clippy": "cd {directory}; cargo clippy --package {package} --lib -- -D warnings",
+      "clippy_all": "cargo clippy -- -D warnings",
+      "build": "cd {directory}; cargo build",
+      "test": "cd {directory}; cargo test",
+      "run": "cd {directory}; cargo run",
+      "check": "cd {directory}; cargo check",
+      "fmt": "cd {directory}; cargo fmt",
+      "fix": "cd {directory}; cargo fix --allow-dirty"
+    }
+  },
+  "patterns": {
+    "naming": {
+      "variables": "snake_case",
+      "functions": "snake_case",
+      "types": "PascalCase",
+      "constants": "SCREAMING_SNAKE_CASE",
+      "modules": "snake_case",
+      "context_flow": {
+      "enabled": true,
+      "comment": "Dữ liệu và flow giữa các module nên được annotate rõ ràng bằng doc-comment + macro marker.",
+      "rules": [
+        "Luôn thêm #[flow_from(...)] trên các trait/fn nhận dữ liệu từ module khác",
+        "Annotate luồng giữa các domain bằng doc comment dạng: /// Flow từ snipebot -> wallet -> blockchain"
+      ]
+    }
+    },
+    "imports": {
+      "order": [
+        "// External imports",
+        "use ethers::{...};",
+        "",
+        "// Standard library imports",
+        "use std::{...};",
+        "",
+        "// Internal imports",
+        "use crate::{...};",
+        "",
+        "// Third party imports",
+        "use anyhow::{...};",
+        "use tracing::{...};"
+      ]
+    },
+    "error_handling": {
+      "unwrap": "Tránh dùng .unwrap(), .expect() trừ khi có lý do chính đáng",
+      "result_type": "Sử dụng anyhow::Result và ? operator",
+      "context": "Sử dụng context() hoặc with_context() cho lỗi"
+    },
+    "async": {
+      "thread_safety": {
+        "trait_bounds": "Thêm Send + Sync + 'static cho trait objects trong async",
+        "rwlock_usage": "Sử dụng tokio::sync::RwLock trong async context"
+      }
+    },
+    "feature_flags": {
+      "rules": [
+        "Sử dụng feature flags trong Cargo.toml để bật/tắt tính năng",
+        "Sử dụng #[cfg(feature = \"...\")] cho conditional compilation",
+        "Cung cấp lỗi rõ ràng khi tính năng bị vô hiệu hóa"
+      ]
+    }
+  },
+  "types": {
+    "blockchain": [
+      "Address - ethers::types::Address",
+      "U256 - ethers::types::U256",
+      "H256 - ethers::types::H256"
+    ],
+    "custom": [
+      "ChainConfig - Cấu hình cho blockchain",
+      "WalletConfig - Cấu hình ví",
+      "ApiResponse<T> - Cấu trúc chung cho API Response"
+    ]
+  }
+}

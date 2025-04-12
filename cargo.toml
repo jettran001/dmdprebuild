@@ -1,0 +1,10 @@
+[workspace]
+members = [
+  "common",
+  "wallet",
+  "snipebot",
+  "network",
+  "blockchain",
+  "ai",
+  "frontend"
+]
