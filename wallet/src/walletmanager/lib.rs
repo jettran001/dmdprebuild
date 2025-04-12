@@ -2,4 +2,3 @@
 
 pub use api::*;
 pub use types::*;
-pub use walletlogic::WalletManager;

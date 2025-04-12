@@ -1,6 +1,7 @@
 // wallet/main.rs
 
-use wallet::walletmanager::{WalletConfig, WalletManager, SeedLength};
+use wallet::walletlogic::init::WalletManager;
+use wallet::walletmanager::types::{WalletConfig, SeedLength};
 
 #[tokio::main]
 async fn main() {
@@ -9,7 +10,7 @@ async fn main() {
     let mut manager = WalletManager::new();
 
     // Ví dụ: Tạo ví mới
-    let result = manager.create_wallet(SeedLength::Twelve, 1);
+    let result = manager.create_wallet_internal(SeedLength::Twelve, 1);
     if let Ok((address, seed_phrase, user_id)) = result {
         println!("Created wallet: {}, user_id: {}, seed: {}", address, user_id, seed_phrase);
     }
@@ -20,7 +21,7 @@ async fn main() {
         chain_id: 1,
         seed_length: None,
     };
-    let result = manager.import_wallet(config);
+    let result = manager.import_wallet_internal(config);
     if let Ok((address, user_id)) = result {
         println!("Imported wallet: {}, user_id: {}", address, user_id);
     }

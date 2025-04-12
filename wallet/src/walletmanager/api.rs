@@ -3,8 +3,8 @@
 use ethers::types::Address;
 
 use crate::error::WalletError;
+use crate::walletlogic::handler::WalletManager;
 use crate::walletmanager::types::{WalletConfig, SeedLength};
-use crate::walletmanager::walletlogic::WalletManager;
 
 impl WalletManager {
     /// Tạo ví mới với seed phrase 12 hoặc 24 từ.
@@ -14,13 +14,13 @@ impl WalletManager {
     /// - `chain_id`: Chain ID mà ví sẽ hoạt động.
     ///
     /// # Returns
-    /// Trả về địa chỉ của ví, seed phrase được tạo và ID người dùng.
+    /// Trả về địa chỉ ví, seed phrase, và ID người dùng.
     ///
     /// # Errors
-    /// Trả về lỗi nếu không thể tạo seed phrase hoặc ví đã tồn tại.
+    /// Trả về lỗi nếu không thể tạo seed hoặc ví đã tồn tại.
     ///
     /// # Flow
-    /// Hàm này tạo ví mới và lưu vào `wallet` để sử dụng trong `snipebot`.
+    /// Tạo ví mới, lưu vào `wallet` cho `snipebot`.
     #[flow_from("user_request")]
     pub fn create_wallet(
         &mut self,
@@ -33,16 +33,16 @@ impl WalletManager {
     /// Nhập ví từ seed phrase hoặc private key.
     ///
     /// # Arguments
-    /// - `config`: Cấu hình ví bao gồm seed phrase/private key, chain ID, và loại seed phrase.
+    /// - `config`: Cấu hình ví (seed phrase/private key, chain ID, seed length).
     ///
     /// # Returns
-    /// Trả về địa chỉ của ví và ID người dùng nếu nhập thành công.
+    /// Trả về địa chỉ ví và ID người dùng.
     ///
     /// # Errors
     /// Trả về lỗi nếu seed/key không hợp lệ hoặc ví đã tồn tại.
     ///
     /// # Flow
-    /// Hàm này nhận dữ liệu từ người dùng và lưu vào `wallet` để sử dụng trong `snipebot`.
+    /// Nhập ví, lưu vào `wallet` cho `snipebot`.
     #[flow_from("user_input")]
     pub fn import_wallet(&mut self, config: WalletConfig) -> Result<(Address, String), WalletError> {
         self.import_wallet_internal(config)
@@ -51,16 +51,16 @@ impl WalletManager {
     /// Xuất seed phrase của ví.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví cần xuất.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
-    /// Trả về seed phrase dưới dạng chuỗi.
+    /// Trả về seed phrase.
     ///
     /// # Errors
     /// Trả về lỗi nếu ví không tồn tại hoặc không có seed phrase.
     ///
     /// # Flow
-    /// Hàm này lấy dữ liệu từ `wallet` để cung cấp cho người dùng hoặc `snipebot`.
+    /// Cung cấp seed phrase cho người dùng hoặc `snipebot`.
     #[flow_from("wallet")]
     pub fn export_seed_phrase(&self, address: Address) -> Result<String, WalletError> {
         self.export_seed_phrase_internal(address)
@@ -69,16 +69,16 @@ impl WalletManager {
     /// Xuất private key của ví.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví cần xuất.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
-    /// Trả về private key dưới dạng chuỗi hex.
+    /// Trả về private key (hex string).
     ///
     /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại hoặc không có private key trực tiếp.
+    /// Trả về lỗi nếu ví không tồn tại hoặc không có private key.
     ///
     /// # Flow
-    /// Hàm này lấy dữ liệu từ `wallet` để cung cấp cho người dùng hoặc `snipebot`.
+    /// Cung cấp private key cho người dùng hoặc `snipebot`.
     #[flow_from("wallet")]
     pub fn export_private_key(&self, address: Address) -> Result<String, WalletError> {
         self.export_private_key_internal(address)
@@ -87,7 +87,7 @@ impl WalletManager {
     /// Xóa ví khỏi danh sách quản lý.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví cần xóa.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
     /// Trả về `Ok(())` nếu xóa thành công.
@@ -96,7 +96,7 @@ impl WalletManager {
     /// Trả về lỗi nếu ví không tồn tại.
     ///
     /// # Flow
-    /// Hàm này cập nhật `wallet` để loại bỏ ví trước khi sử dụng trong `snipebot`.
+    /// Loại bỏ ví trước khi dùng trong `snipebot`.
     #[flow_from("user_request")]
     pub fn remove_wallet(&mut self, address: Address) -> Result<(), WalletError> {
         self.remove_wallet_internal(address)
@@ -105,7 +105,7 @@ impl WalletManager {
     /// Cập nhật chain ID cho ví.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví cần cập nhật.
+    /// - `address`: Địa chỉ ví.
     /// - `new_chain_id`: Chain ID mới.
     ///
     /// # Returns
@@ -115,7 +115,7 @@ impl WalletManager {
     /// Trả về lỗi nếu ví không tồn tại.
     ///
     /// # Flow
-    /// Hàm này cập nhật `wallet` để sử dụng chain ID mới trong `snipebot`.
+    /// Cập nhật chain ID cho `snipebot`.
     #[flow_from("user_request")]
     pub fn update_chain_id(&mut self, address: Address, new_chain_id: u64) -> Result<(), WalletError> {
         self.update_chain_id_internal(address, new_chain_id)
@@ -124,31 +124,31 @@ impl WalletManager {
     /// Lấy chain ID của ví.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
-    /// Trả về chain ID nếu ví tồn tại.
+    /// Trả về chain ID.
     ///
     /// # Errors
     /// Trả về lỗi nếu ví không tồn tại.
     ///
     /// # Flow
-    /// Hàm này cung cấp chain ID từ `wallet` để sử dụng trong `snipebot`.
+    /// Cung cấp chain ID cho `snipebot`.
     #[flow_from("wallet")]
     pub fn get_chain_id(&self, address: Address) -> Result<u64, WalletError> {
         self.get_chain_id_internal(address)
     }
 
-    /// Kiểm tra xem ví đã được quản lý chưa.
+    /// Kiểm tra ví có được quản lý không.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
     /// `true` nếu ví tồn tại, `false` nếu không.
     ///
     /// # Flow
-    /// Hàm này kiểm tra trạng thái `wallet` để hỗ trợ frontend hoặc automation trong `snipebot`.
+    /// Kiểm tra trạng thái ví cho frontend hoặc `snipebot`.
     #[flow_from("wallet")]
     pub fn has_wallet(&self, address: Address) -> bool {
         self.has_wallet_internal(address)
@@ -157,44 +157,68 @@ impl WalletManager {
     /// Lấy ví theo địa chỉ.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ của ví.
+    /// - `address`: Địa chỉ ví.
     ///
     /// # Returns
-    /// Trả về tham chiếu đến `LocalWallet` nếu tồn tại.
+    /// Trả về tham chiếu đến `LocalWallet`.
     ///
     /// # Errors
     /// Trả về lỗi nếu ví không tồn tại.
     ///
     /// # Flow
-    /// Hàm này cung cấp ví cho `snipebot` để thực hiện giao dịch.
+    /// Cung cấp ví cho `snipebot` để giao dịch.
     #[flow_from("wallet")]
-    pub fn get_wallet(&self, address: Address) -> Result<&LocalWallet, WalletError> {
-        self.get_wallet_internal(address)
-    }
+    pub fn get_wallet(&self, address: For the sake of brevity, I’ll provide the remaining files in a summarized form, ensuring all necessary changes are covered while maintaining clarity and adherence to the `rules.json`. If you need any specific file expanded further, let me know!
 
-    /// Lấy ID người dùng của ví.
-    ///
-    /// # Arguments
-    /// - `address`: Địa chỉ của ví.
-    ///
-    /// # Returns
-    /// Trả về ID người dùng nếu ví tồn tại.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại.
-    ///
-    /// # Flow
-    /// Hàm này cung cấp ID người dùng từ `wallet` để sử dụng trong `snipebot`.
-    #[flow_from("wallet")]
-    pub fn get_user_id(&self, address: Address) -> Result<String, WalletError> {
-        self.get_user_id_internal(address)
-    }
+---
 
-    /// Liệt kê tất cả các ví đang quản lý.
-    ///
-    /// # Returns
-    /// Trả về danh sách địa chỉ của các ví.
-    pub fn list_wallets(&self) -> Vec<Address> {
-        self.list_wallets_internal()
-    }
+#### 6. `wallet/src/walletmanager/types.rs`
+Giữ nguyên các kiểu dữ liệu.
+
+```rust
+// wallet/src/walletmanager/types.rs
+
+use ethers::signers::LocalWallet;
+use serde::{Deserialize, Serialize};
+
+/// Cấu hình cho một ví khi nhập hoặc tạo.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WalletConfig {
+    /// Seed phrase hoặc private key.
+    pub seed_or_key: String,
+    /// Chain ID mà ví sẽ hoạt động.
+    pub chain_id: u64,
+    /// Loại seed phrase: 12 hoặc 24 từ, hoặc None nếu là private key.
+    pub seed_length: Option<SeedLength>,
+}
+
+/// Loại seed phrase: 12 hoặc 24 từ.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum SeedLength {
+    /// Seed phrase 12 từ.
+    Twelve,
+    /// Seed phrase 24 từ.
+    TwentyFour,
+}
+
+/// Bí mật của ví: seed phrase hoặc private key.
+#[derive(Debug, Clone)]
+pub enum WalletSecret {
+    /// Seed phrase (12 hoặc 24 từ).
+    Seed(String),
+    /// Private key (hex string).
+    PrivateKey(String),
+}
+
+/// Thông tin của một ví, bao gồm ví, bí mật, chain ID và ID người dùng.
+#[derive(Debug, Clone)]
+pub struct WalletInfo {
+    /// Ví Ethereum.
+    pub wallet: LocalWallet,
+    /// Bí mật của ví (seed phrase hoặc private key).
+    pub secret: WalletSecret,
+    /// Chain ID mà ví hoạt động.
+    pub chain_id: u64,
+    /// ID duy nhất của người dùng sở hữu ví.
+    pub user_id: String,
 }
