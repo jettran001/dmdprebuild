@@ -1,5 +1,6 @@
 // wallet/src/walletmanager/types.rs
 
+use ethers::signers::LocalWallet;
 use serde::{Deserialize, Serialize};
 
 /// Cấu hình cho một ví khi nhập hoặc tạo.
@@ -29,4 +30,17 @@ pub enum WalletSecret {
     Seed(String),
     /// Private key (hex string).
     PrivateKey(String),
+}
+
+/// Thông tin của một ví, bao gồm ví, bí mật, chain ID và ID người dùng.
+#[derive(Debug, Clone)]
+pub struct WalletInfo {
+    /// Ví Ethereum.
+    pub wallet: LocalWallet,
+    /// Bí mật của ví (seed phrase hoặc private key).
+    pub secret: WalletSecret,
+    /// Chain ID mà ví hoạt động.
+    pub chain_id: u64,
+    /// ID duy nhất của người dùng sở hữu ví.
+    pub user_id: String,
 }

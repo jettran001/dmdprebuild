@@ -1,6 +1,6 @@
 // wallet/main.rs
 
-use wallet::walletmanager::walletlogic::{WalletConfig, WalletManager, SeedLength};
+use wallet::walletmanager::{WalletConfig, WalletManager, SeedLength};
 
 #[tokio::main]
 async fn main() {
