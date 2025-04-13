@@ -5,46 +5,50 @@
 
 /*
     wallet/
-    ├── error.rs                    -> Định nghĩa Error dùng chung (WalletError)
-    ├── lib.rs                      -> Khai báo các module cấp cao của wallet
-    ├── main.rs                     -> Điểm chạy chính, ví dụ sử dụng walletlogic
-    ├── registry/                   -> Chứa manifest và registry config
-    │   └── manifest.rs             -> Tài liệu tham chiếu cho module path
-    ├── src/walletlogic/            -> Logic cốt lõi về ví, dùng rộng cho các module
-    │   ├── mod.rs                  -> Khai báo submodule của walletlogic
-    │   ├── init.rs                 -> Khởi tạo WalletManager, tạo/nhập ví
-    │   ├── handler.rs              -> Xử lý transaction/wallet ops (xuất, xóa, truy xuất)
-    │   ├── utils.rs                -> Hàm helper (validate, gen seed, ký)
-    ├── src/walletmanager/          -> Xử lý riêng cho UI/API wallet
-    │   ├── api.rs                  -> Hàm công khai gọi walletlogic (UI/API)
-    │   ├── config.rs               -> Cấu hình ví (hiện để trống)
-    │   ├── lib.rs                  -> Re-export các thành phần công khai
-    │   ├── mod.rs                  -> Khai báo submodule của walletmanager
-    │   ├── types.rs                -> Các kiểu dữ liệu (WalletConfig, WalletInfo)
-    ├── src/defi/                   -> Chức năng DeFi (farming, staking)
-    │   ├── api.rs                  -> API công khai cho DeFi
-    │   ├── farm.rs                 -> Logic farming
-    │   ├── stake.rs                -> Logic staking
-    │   ├── lib.rs                  -> Re-export các thành phần công khai
-    │   └── mod.rs                  -> Khai báo submodule của defi
-    ├── src/users/                  -> Quản lý người dùng (free, premium, vip)
-    │   ├── free_user.rs            -> Logic cho người dùng miễn phí
-    │   ├── premium_user.rs         -> Logic cho người dùng premium
-    │   ├── vip_user.rs             -> Logic cho người dùng VIP
-    │   ├── lib.rs                  -> Re-export các thành phần công khai
-    │   └── mod.rs                  -> Khai báo submodule của users
+    ├── Cargo.toml                  -> Cấu hình dependencies
+    ├── error.rs                   -> Định nghĩa Error (WalletError)
+    ├── lib.rs                     -> Khai báo module cấp cao
+    ├── main.rs                    -> Điểm chạy chính, demo WalletManagerApi
+    ├── config.rs                  -> Cấu hình ví (chain_id, chain_type, max_wallets)
+    ├── manifest.rs                -> Tài liệu tham chiếu module path
+    ├── src/walletlogic/           -> Logic cốt lõi ví
+    │   ├── mod.rs                 -> Khai báo submodule
+    │   ├── init.rs                -> Khởi tạo WalletManager, tạo/nhập ví
+    │   ├── handler.rs             -> Xử lý ví, ký/gửi giao dịch, số dư
+    │   ├── utils.rs               -> Hàm helper (validate, gen seed, ký)
+    │   ├── crypto.rs              -> Mã hóa seed/private key bằng mật khẩu
+    ├── src/walletmanager/         -> API/UI cho ví
+    │   ├── api.rs                 -> API công khai gọi walletlogic
+    │   ├── lib.rs                 -> Re-export api, types
+    │   ├── mod.rs                 -> Khai báo submodule
+    │   ├── types.rs               -> Kiểu dữ liệu (WalletConfig, WalletInfo)
+    │   ├── chain.rs               -> Quản lý chain (EVM, Solana, TON, v.v.)
+    ├── src/defi/                  -> Chức năng DeFi (farming, staking)
+    │   ├── api.rs                 -> API công khai cho DeFi
+    │   ├── farm.rs                -> Logic farming
+    │   ├── stake.rs               -> Logic staking
+    │   ├── lib.rs                 -> Re-export
+    │   └── mod.rs                 -> Khai báo submodule
+    ├── src/users/                 -> Quản lý người dùng
+    │   ├── free_user.rs           -> Logic người dùng miễn phí
+    │   ├── premium_user.rs        -> Logic người dùng premium
+    │   ├── vip_user.rs            -> Logic người dùng VIP
+    │   ├── lib.rs                 -> Re-export
+    │   └── mod.rs                 -> Khai báo submodule
 
     Mối liên kết:
     - walletlogic phụ thuộc error (dùng WalletError)
-    - walletmanager::api gọi walletlogic::init và walletlogic::handler
-    - walletmanager dùng walletmanager::types
+    - walletlogic::crypto được dùng bởi init.rs để mã hóa khóa
+    - walletmanager::api gọi walletlogic::init, handler, dùng config, chain
+    - walletmanager dùng walletmanager::types, chain
     - defi có thể dùng walletlogic::handler để truy xuất ví
-    - users có thể liên kết với walletlogic qua user_id trong WalletInfo
-    - main.rs dùng walletlogic để demo chức năng
+    - users có thể liên kết với walletlogic qua user_id
+    - main.rs dùng walletmanager và config để demo
 */
 
 // Khai báo các module cấp cao
 pub mod error;
+pub mod config;
 pub mod walletlogic;
 pub mod walletmanager;
 pub mod defi;

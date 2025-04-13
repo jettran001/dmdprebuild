@@ -1,105 +1,172 @@
-// wallet/src/walletmanager/api.rs
-
+// External imports
+use ethers::core::types::{TransactionRequest, U256};
+use ethers::signers::LocalWallet;
 use ethers::types::Address;
 
+// Standard library imports
+use std::sync::Arc;
+
+// Internal imports
 use crate::error::WalletError;
-use crate::walletlogic::handler::WalletManager;
+use crate::config::WalletSystemConfig;
+use crate::walletlogic::handler::WalletManagerHandler;
+use crate::walletlogic::init::WalletManager;
+use crate::walletmanager::chain::{ChainConfig, ChainManager, ChainType, DefaultChainManager};
 use crate::walletmanager::types::{WalletConfig, SeedLength};
 
-impl WalletManager {
-    /// Tạo ví mới với seed phrase 12 hoặc 24 từ.
+// Third party imports
+use anyhow::Context;
+use tracing::{debug, info};
+
+// Hằng số cho thông báo lỗi
+const ERR_MAX_WALLET_LIMIT: &str = "Max wallet limit reached";
+const ERR_INVALID_ADDRESS_FORMAT: &str = "Invalid address format";
+
+/// API công khai cho quản lý ví.
+pub struct WalletManagerApi {
+    manager: WalletManager,
+    config: WalletSystemConfig,
+    chain_manager: Box<dyn ChainManager + Send + Sync + 'static>,
+}
+
+impl WalletManagerApi {
+    /// Khởi tạo API quản lý ví mới.
     ///
     /// # Arguments
-    /// - `seed_length`: Loại seed phrase (12 hoặc 24 từ).
-    /// - `chain_id`: Chain ID mà ví sẽ hoạt động.
+    /// - `config`: Cấu hình hệ thống ví.
+    pub fn new(config: WalletSystemConfig) -> Self {
+        Self {
+            manager: WalletManager::new(),
+            config,
+            chain_manager: Box::new(DefaultChainManager::new()),
+        }
+    }
+
+    /// Tạo ví mới.
+    ///
+    /// # Arguments
+    /// - `seed_length`: Độ dài seed phrase.
+    /// - `chain_id`: ID của blockchain (nếu None sẽ dùng default_chain_id).
+    /// - `chain_type`: Loại blockchain.
+    /// - `password`: Mật khẩu để mã hóa seed.
     ///
     /// # Returns
-    /// Trả về địa chỉ ví, seed phrase, và ID người dùng.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu không thể tạo seed hoặc ví đã tồn tại.
-    ///
-    /// # Flow
-    /// Tạo ví mới, lưu vào `wallet` cho `snipebot`.
-    #[flow_from("user_request")]
-    pub fn create_wallet(
+    /// Tuple (địa chỉ ví, seed phrase, user_id).
+    #[flow_from("common::gateway")]
+    pub async fn create_wallet(
         &mut self,
         seed_length: SeedLength,
-        chain_id: u64,
-    ) -> Result<(Address, String, String), WalletError> {
-        self.create_wallet_internal(seed_length, chain_id)
+        chain_id: Option<u64>,
+        chain_type: ChainType,
+        password: &str,
+    ) -> Result<(Address, String, String), WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        if !self.config.can_add_wallet(self.manager.wallets.read().await.len()) {
+            return Err(WalletError::InvalidSeedOrKey(ERR_MAX_WALLET_LIMIT.to_string()));
+        }
+        let chain_id = chain_id.unwrap_or(self.config.default_chain_id);
+        self.manager.create_wallet_internal(seed_length, chain_id, chain_type, password)
+            .await
+            .context("Lỗi khi tạo ví mới")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::SeedGenerationFailed(e.to_string()),
+            })
     }
 
     /// Nhập ví từ seed phrase hoặc private key.
     ///
     /// # Arguments
-    /// - `config`: Cấu hình ví (seed phrase/private key, chain ID, seed length).
+    /// - `config`: Cấu hình ví.
     ///
     /// # Returns
-    /// Trả về địa chỉ ví và ID người dùng.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu seed/key không hợp lệ hoặc ví đã tồn tại.
-    ///
-    /// # Flow
-    /// Nhập ví, lưu vào `wallet` cho `snipebot`.
-    #[flow_from("user_input")]
-    pub fn import_wallet(&mut self, config: WalletConfig) -> Result<(Address, String), WalletError> {
-        self.import_wallet_internal(config)
+    /// Tuple (địa chỉ ví, user_id).
+    #[flow_from("common::gateway")]
+    pub async fn import_wallet(&mut self, config: WalletConfig) -> Result<(Address, String), WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        if !self.config.can_add_wallet(self.manager.wallets.read().await.len()) {
+            return Err(WalletError::InvalidSeedOrKey(ERR_MAX_WALLET_LIMIT.to_string()));
+        }
+        
+        // Kiểm tra địa chỉ hợp lệ và ví đã tồn tại
+        let maybe_address = config.seed_or_key.parse::<Address>()
+            .context("Không thể phân tích chuỗi thành địa chỉ")
+            .map_err(|_| WalletError::InvalidSeedOrKey(ERR_INVALID_ADDRESS_FORMAT.to_string()));
+            
+        if let Ok(address) = maybe_address {
+            if !self.config.allow_wallet_overwrite && self.manager.has_wallet_internal(address).await {
+                return Err(WalletError::WalletExists(address));
+            }
+        }
+        
+        self.manager.import_wallet_internal(config)
+            .await
+            .context("Lỗi khi nhập ví")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::InvalidSeedOrKey(e.to_string()),
+            })
     }
 
-    /// Xuất seed phrase của ví.
+    /// Xuất seed phrase từ ví.
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
+    /// - `password`: Mật khẩu để giải mã.
     ///
     /// # Returns
-    /// Trả về seed phrase.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại hoặc không có seed phrase.
-    ///
-    /// # Flow
-    /// Cung cấp seed phrase cho người dùng hoặc `snipebot`.
-    #[flow_from("wallet")]
-    pub fn export_seed_phrase(&self, address: Address) -> Result<String, WalletError> {
-        self.export_seed_phrase_internal(address)
+    /// Seed phrase gốc.
+    #[flow_from("common::gateway")]
+    pub async fn export_seed_phrase(&self, address: Address, password: &str) -> Result<String, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.export_seed_phrase_internal(address, password)
+            .await
+            .context("Lỗi khi xuất seed phrase")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::DecryptionError(e.to_string()),
+            })
     }
 
-    /// Xuất private key của ví.
+    /// Xuất private key từ ví.
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
+    /// - `password`: Mật khẩu để giải mã.
     ///
     /// # Returns
-    /// Trả về private key (hex string).
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại hoặc không có private key.
-    ///
-    /// # Flow
-    /// Cung cấp private key cho người dùng hoặc `snipebot`.
-    #[flow_from("wallet")]
-    pub fn export_private_key(&self, address: Address) -> Result<String, WalletError> {
-        self.export_private_key_internal(address)
+    /// Private key gốc.
+    #[flow_from("common::gateway")]
+    pub async fn export_private_key(&self, address: Address, password: &str) -> Result<String, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.export_private_key_internal(address, password)
+            .await
+            .context("Lỗi khi xuất private key")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::DecryptionError(e.to_string()),
+            })
     }
 
-    /// Xóa ví khỏi danh sách quản lý.
+    /// Xóa ví.
     ///
     /// # Arguments
-    /// - `address`: Địa chỉ ví.
-    ///
-    /// # Returns
-    /// Trả về `Ok(())` nếu xóa thành công.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại.
-    ///
-    /// # Flow
-    /// Loại bỏ ví trước khi dùng trong `snipebot`.
-    #[flow_from("user_request")]
-    pub fn remove_wallet(&mut self, address: Address) -> Result<(), WalletError> {
-        self.remove_wallet_internal(address)
+    /// - `address`: Địa chỉ ví cần xóa.
+    #[flow_from("common::gateway")]
+    pub async fn remove_wallet(&mut self, address: Address) -> Result<(), WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.remove_wallet_internal(address)
+            .await
+            .context("Lỗi khi xóa ví")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::WalletNotFound(address),
+            })
     }
 
     /// Cập nhật chain ID cho ví.
@@ -107,118 +174,341 @@ impl WalletManager {
     /// # Arguments
     /// - `address`: Địa chỉ ví.
     /// - `new_chain_id`: Chain ID mới.
-    ///
-    /// # Returns
-    /// Trả về `Ok(())` nếu cập nhật thành công.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại.
-    ///
-    /// # Flow
-    /// Cập nhật chain ID cho `snipebot`.
-    #[flow_from("user_request")]
-    pub fn update_chain_id(&mut self, address: Address, new_chain_id: u64) -> Result<(), WalletError> {
-        self.update_chain_id_internal(address, new_chain_id)
+    /// - `new_chain_type`: Loại chain mới.
+    #[flow_from("common::gateway")]
+    pub async fn update_chain_id(&mut self, address: Address, new_chain_id: u64, new_chain_type: ChainType) -> Result<(), WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.update_chain_id_internal(address, new_chain_id, new_chain_type)
+            .await
+            .context("Lỗi khi cập nhật chain ID")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::WalletNotFound(address),
+            })
     }
 
     /// Lấy chain ID của ví.
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
-    ///
-    /// # Returns
-    /// Trả về chain ID.
-    ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại.
-    ///
-    /// # Flow
-    /// Cung cấp chain ID cho `snipebot`.
-    #[flow_from("wallet")]
-    pub fn get_chain_id(&self, address: Address) -> Result<u64, WalletError> {
-        self.get_chain_id_internal(address)
+    #[flow_from("common::gateway")]
+    pub async fn get_chain_id(&self, address: Address) -> Result<u64, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.get_chain_id_internal(address)
+            .await
+            .context("Lỗi khi lấy chain ID")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::WalletNotFound(address),
+            })
     }
 
-    /// Kiểm tra ví có được quản lý không.
+    /// Kiểm tra xem ví có tồn tại không.
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
-    ///
-    /// # Returns
-    /// `true` nếu ví tồn tại, `false` nếu không.
-    ///
-    /// # Flow
-    /// Kiểm tra trạng thái ví cho frontend hoặc `snipebot`.
-    #[flow_from("wallet")]
-    pub fn has_wallet(&self, address: Address) -> bool {
-        self.has_wallet_internal(address)
+    #[flow_from("common::gateway")]
+    pub async fn has_wallet(&self, address: Address) -> bool 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.has_wallet_internal(address).await
     }
 
-    /// Lấy ví theo địa chỉ.
+    /// Lấy đối tượng ví.
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
+    #[flow_from("common::gateway")]
+    pub async fn get_wallet(&self, address: Address) -> Result<LocalWallet, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.get_wallet_internal(address)
+            .await
+            .context("Lỗi khi lấy thông tin ví")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::WalletNotFound(address),
+            })
+    }
+
+    /// Lấy user ID của ví.
     ///
-    /// # Returns
-    /// Trả về tham chiếu đến `LocalWallet`.
+    /// # Arguments
+    /// - `address`: Địa chỉ ví.
+    #[flow_from("common::gateway")]
+    pub async fn get_user_id(&self, address: Address) -> Result<String, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.get_user_id_internal(address)
+            .await
+            .context("Lỗi khi lấy user ID")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::WalletNotFound(address),
+            })
+    }
+
+    /// Liệt kê tất cả các ví.
+    #[flow_from("common::gateway")]
+    pub async fn list_wallets(&self) -> Vec<Address> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.list_wallets_internal().await
+    }
+
+    /// Thêm chain mới.
     ///
-    /// # Errors
-    /// Trả về lỗi nếu ví không tồn tại.
+    /// # Arguments
+    /// - `config`: Cấu hình chain.
+    #[flow_from("common::gateway")]
+    pub async fn add_chain(&mut self, config: ChainConfig) -> Result<(), WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.chain_manager.add_chain(config)
+            .await
+            .context("Lỗi khi thêm chain mới")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::ChainNotSupported(e.to_string()),
+            })
+    }
+
+    /// Ký giao dịch.
     ///
-    /// # Flow
-    /// Cung cấp ví cho `snipebot` để giao dịch.
-    #[flow_from("wallet")]
-    pub fn get_wallet(&self, address: For the sake of brevity, I’ll provide the remaining files in a summarized form, ensuring all necessary changes are covered while maintaining clarity and adherence to the `rules.json`. If you need any specific file expanded further, let me know!
+    /// # Arguments
+    /// - `address`: Địa chỉ ví dùng để ký.
+    /// - `tx`: Giao dịch cần ký.
+    #[flow_from("common::gateway")]
+    pub async fn sign_transaction(&self, address: Address, tx: TransactionRequest) -> Result<Vec<u8>, WalletError> 
+    where Self: Send + Sync + 'static
+    {
+        self.manager.sign_transaction(address, tx, self.chain_manager.as_ref())
+            .await
+            .context("Lỗi khi ký giao dịch")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::TransactionFailed(e.to_string()),
+            })
+    }
 
----
+    /// Gửi giao dịch.
+    ///
+    /// # Arguments
+    /// - `address`: Địa chỉ ví gửi giao dịch.
+    /// - `tx`: Giao dịch cần gửi.
+    #[flow_from("common::gateway")]
+    pub async fn send_transaction(&self, address: Address, tx: TransactionRequest) -> Result<String, WalletError> 
+    where Self: Send + Sync + 'static 
+    {
+        self.manager.send_transaction(address, tx, self.chain_manager.as_ref())
+            .await
+            .context("Lỗi khi gửi giao dịch")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::TransactionFailed(e.to_string()),
+            })
+    }
 
-#### 6. `wallet/src/walletmanager/types.rs`
-Giữ nguyên các kiểu dữ liệu.
-
-```rust
-// wallet/src/walletmanager/types.rs
-
-use ethers::signers::LocalWallet;
-use serde::{Deserialize, Serialize};
-
-/// Cấu hình cho một ví khi nhập hoặc tạo.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WalletConfig {
-    /// Seed phrase hoặc private key.
-    pub seed_or_key: String,
-    /// Chain ID mà ví sẽ hoạt động.
-    pub chain_id: u64,
-    /// Loại seed phrase: 12 hoặc 24 từ, hoặc None nếu là private key.
-    pub seed_length: Option<SeedLength>,
+    /// Lấy số dư của ví.
+    ///
+    /// # Arguments
+    /// - `address`: Địa chỉ ví.
+    #[flow_from("common::gateway")]
+    pub async fn get_balance(&self, address: Address) -> Result<U256, WalletError> 
+    where Self: Send + Sync + 'static 
+    {
+        self.manager.get_balance(address, self.chain_manager.as_ref())
+            .await
+            .context("Lỗi khi lấy số dư")
+            .map_err(|e| match e.downcast::<WalletError>() {
+                Ok(wallet_err) => wallet_err,
+                Err(e) => WalletError::ProviderError(e.to_string()),
+            })
+    }
 }
 
-/// Loại seed phrase: 12 hoặc 24 từ.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum SeedLength {
-    /// Seed phrase 12 từ.
-    Twelve,
-    /// Seed phrase 24 từ.
-    TwentyFour,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walletmanager::types::{SeedLength, WalletConfig};
+    use crate::walletmanager::chain::ChainType;
 
-/// Bí mật của ví: seed phrase hoặc private key.
-#[derive(Debug, Clone)]
-pub enum WalletSecret {
-    /// Seed phrase (12 hoặc 24 từ).
-    Seed(String),
-    /// Private key (hex string).
-    PrivateKey(String),
-}
+    #[tokio::test]
+    async fn test_create_wallet() {
+        let config = WalletSystemConfig::default();
+        let mut api = WalletManagerApi::new(config);
+        
+        let result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        assert!(result.is_ok(), "Should create wallet successfully");
+        
+        let (address, _, user_id) = result
+            .expect("Should return valid wallet information");
+            
+        assert!(api.has_wallet(address).await, "API should have the created wallet");
+        assert_eq!(
+            api.get_user_id(address).await.expect("Should get user ID"),
+            user_id, 
+            "User ID should match"
+        );
+    }
 
-/// Thông tin của một ví, bao gồm ví, bí mật, chain ID và ID người dùng.
-#[derive(Debug, Clone)]
-pub struct WalletInfo {
-    /// Ví Ethereum.
-    pub wallet: LocalWallet,
-    /// Bí mật của ví (seed phrase hoặc private key).
-    pub secret: WalletSecret,
-    /// Chain ID mà ví hoạt động.
-    pub chain_id: u64,
-    /// ID duy nhất của người dùng sở hữu ví.
-    pub user_id: String,
+    #[tokio::test]
+    async fn test_import_wallet_seed() {
+        let config = WalletSystemConfig::default();
+        let mut api = WalletManagerApi::new(config);
+        let seed = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        
+        let wallet_config = WalletConfig {
+            seed_or_key: seed.to_string(),
+            chain_id: 1,
+            chain_type: ChainType::EVM,
+            seed_length: Some(SeedLength::Twelve),
+            password: "password".to_string(),
+        };
+        
+        let result = api.import_wallet(wallet_config).await;
+        assert!(result.is_ok(), "Should import wallet successfully");
+        
+        let (address, user_id) = result
+            .expect("Should return valid wallet information");
+            
+        assert_eq!(
+            api.get_user_id(address).await.expect("Should get user ID"),
+            user_id, 
+            "User ID should match"
+        );
+        
+        assert_eq!(
+            api.export_seed_phrase(address, "password").await.expect("Should export seed phrase"),
+            seed,
+            "Exported seed phrase should match original"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_wallets_limit() {
+        let config = WalletSystemConfig {
+            default_chain_id: 1,
+            default_chain_type: ChainType::EVM,
+            max_wallets: 1,
+            allow_wallet_overwrite: false,
+        };
+        
+        let mut api = WalletManagerApi::new(config);
+        
+        let first_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        assert!(first_result.is_ok(), "Should create first wallet successfully");
+        first_result.expect("Should have valid first wallet result");
+        
+        let second_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        assert!(second_result.is_err(), "Should fail to create second wallet due to limit");
+    }
+
+    #[test]
+    fn test_add_chain() {
+        let config = WalletSystemConfig::default();
+        let mut api = WalletManagerApi::new(config);
+        
+        let chain_config = ChainConfig {
+            chain_id: 999,
+            chain_type: ChainType::EVM,
+            name: "Test Chain".to_string(),
+            rpc_url: "https://test-rpc.com".to_string(),
+            native_token: "TEST".to_string(),
+        };
+        
+        assert!(
+            api.add_chain(chain_config).is_ok(),
+            "Should add chain successfully"
+        );
+    }
+
+    // Unit tests
+    #[test]
+    fn test_new() {
+        let config = WalletSystemConfig {
+            max_wallets: 5,
+            default_chain_id: 1,
+            allow_wallet_overwrite: false,
+        };
+        let api = WalletManagerApi::new(config);
+        assert_eq!(api.config.max_wallets, 5);
+        assert_eq!(api.config.default_chain_id, 1);
+        assert_eq!(api.config.allow_wallet_overwrite, false);
+    }
+    
+    // Integration tests
+    #[tokio::test]
+    async fn test_wallet_creation_and_export() {
+        let config = WalletSystemConfig {
+            max_wallets: 5,
+            default_chain_id: 1,
+            allow_wallet_overwrite: false,
+        };
+        let mut api = WalletManagerApi::new(config);
+        
+        // Tạo ví mới
+        let result = api.create_wallet(
+            SeedLength::Twelve,
+            None,
+            ChainType::EVM,
+            "password123"
+        ).await;
+        
+        assert!(result.is_ok(), "Không thể tạo ví mới");
+        let (address, seed_phrase, user_id) = result.unwrap();
+        
+        // Kiểm tra xuất seed phrase
+        let export_result = api.export_seed_phrase(address, "password123").await;
+        assert!(export_result.is_ok(), "Không thể xuất seed phrase");
+        assert_eq!(export_result.unwrap(), seed_phrase, "Seed phrase không khớp");
+        
+        // Kiểm tra xuất private key
+        let private_key_result = api.export_private_key(address, "password123").await;
+        assert!(private_key_result.is_ok(), "Không thể xuất private key");
+        
+        // Kiểm tra xóa ví
+        let remove_result = api.remove_wallet(address).await;
+        assert!(remove_result.is_ok(), "Không thể xóa ví");
+        
+        // Kiểm tra ví đã bị xóa
+        let export_after_remove = api.export_seed_phrase(address, "password123").await;
+        assert!(export_after_remove.is_err(), "Ví vẫn tồn tại sau khi xóa");
+    }
+    
+    #[tokio::test]
+    async fn test_max_wallet_limit() {
+        let config = WalletSystemConfig {
+            max_wallets: 1,
+            default_chain_id: 1,
+            allow_wallet_overwrite: false,
+        };
+        let mut api = WalletManagerApi::new(config);
+        
+        // Tạo ví đầu tiên
+        let result1 = api.create_wallet(
+            SeedLength::Twelve,
+            None,
+            ChainType::EVM,
+            "password123"
+        ).await;
+        assert!(result1.is_ok(), "Không thể tạo ví đầu tiên");
+        
+        // Thử tạo ví thứ hai (vượt quá giới hạn)
+        let result2 = api.create_wallet(
+            SeedLength::Twelve,
+            None,
+            ChainType::EVM,
+            "password123"
+        ).await;
+        assert!(result2.is_err(), "Tạo được ví vượt quá giới hạn");
+        
+        if let Err(WalletError::InvalidSeedOrKey(msg)) = result2 {
+            assert_eq!(msg, ERR_MAX_WALLET_LIMIT.to_string());
+        } else {
+            panic!("Lỗi không phải InvalidSeedOrKey");
+        }
+    }
 }

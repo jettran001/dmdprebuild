@@ -3,6 +3,15 @@
     "priority": "MANDATORY",
     "description": "Các quy tắc bắt buộc phải tuân thủ trước khi sửa code hoặc phát triển dự án",
     "enforcement": {
+      "code_quality_check": {
+        "priority": "HIGHEST", 
+        "description": "BẮT BUỘC kiểm tra chất lượng code theo từng bước phát triển",
+        "rules": [
+          "Sau khi tạo xong 1 hàm, check lại syntax mới qua hàm kế tiếp",
+          "Sau khi tạo xong 1 file, quét lại có vi phạm nguyên tắc không, nếu có thì sửa lại cho phù hợp",
+          "Nếu không tìm thấy file cần tìm, quay lại quét manifest"
+        ]
+      },
       "read_manifest": {
         "priority": "HIGHEST",
         "description": "BẮT BUỘC đọc kỹ src/registry/manifest.rs trước khi sửa code",
@@ -12,10 +21,19 @@
           "Tham khảo manifest.rs để biết tương tác giữa các domain"
         ]
       },
+      "scan_structure": {
+        "priority": "HIGHEST",
+        "description": "BẮT BUỘC ưu tiên quét manifest.rs của module khi quét cấu trúc dữ liệu",
+        "rules": [
+          "Mỗi khi yêu cầu quét cấu trúc dữ liệu, LUÔN đọc manifest.rs đầu tiên",
+          "Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs để xác định vị trí chính xác",
+          "Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm"
+        ]
+      },
       "project_entry": {
         "priority": "HIGHEST",
         "description": "BẮT BUỘC kiểm tra và điều hướng dự án dựa trên manifest.rs trước khi sửa code",
-        "entry_points": ["src/registry/manifest.rs"],
+        "entry_points": ["src/registry/manifest.rs", "{module}/manifest.rs"],
         "module_resolver": {
           "type": "rust",
           "manifest_file": "src/registry/manifest.rs",
@@ -26,6 +44,14 @@
           "Xác định quy tắc về import order, thread safety, async patterns, error handling, type handling, caching, testing",
           "Không vi phạm bất kỳ quy tắc nào trong .cursorrc",
           "Duy trì thứ tự ưu tiên module như trong manifest.rs"
+        ]
+      },
+      "doc_mode": {
+        "priority": "MANDATORY",
+        "comment": "AI bắt buộc đọc doc comment trước khi phân tích code.",
+        "rules": [
+          "Không sửa code nếu chưa đọc doc comment",
+          "Ưu tiên sửa theo doc nếu mâu thuẫn giữa code và comment"
         ]
       },
       "during_edit": {
@@ -55,14 +81,7 @@
           "Đảm bảo thread safety khi truy cập shared state"
         ]
       },
-      "doc_mode": {
-        "priority": "MANDATORY",
-        "comment": "AI bắt buộc đọc doc comment trước khi phân tích code.",
-        "rules": [
-          "Không sửa code nếu chưa đọc doc comment",
-          "Ưu tiên sửa theo doc nếu mâu thuẫn giữa code và comment"
-        ]
-      }
+      
     }
   },
   "project": {
@@ -124,6 +143,22 @@
   "hints": {
     "explain_module_structure": true,
     "preferred_entry_comment": "🧭 BẮT BUỘC đọc src/registry/manifest.rs trước khi sửa code. Đây là bản đồ nhỏ cho từng domain, giúp hiểu tổ chức module và tương tác trong dự án."
+  },
+  "file_discovery": {
+    "priority": "HIGH",
+    "description": "Hướng dẫn tìm kiếm file trong cấu trúc dự án",
+    "rules": [
+      "Luôn bắt đầu từ manifest.rs của module khi quét cấu trúc hoặc tìm kiếm file",
+      "Ưu tiên tìm kiếm file thông qua thông tin trong manifest.rs trước khi dùng tìm kiếm tổng quát",
+      "Khi cần xác định vị trí của một module hoặc file cụ thể, tham khảo manifest.rs của domain tương ứng"
+    ],
+    "module_manifest_paths": {
+      "wallet": "wallet/manifest.rs",
+      "snipebot": "snipebot/src/registry/manifest.rs",
+      "blockchain": "blockchain/manifest.rs",
+      "network": "network/manifest.rs",
+      "common": "common/src/manifest.rs"
+    }
   },
   "development_workflow": {
     "code_review": {

@@ -1,46 +1,62 @@
-// wallet/src/walletmanager/types.rs
-
+// External imports
 use ethers::signers::LocalWallet;
 use serde::{Deserialize, Serialize};
 
-/// Cấu hình cho một ví khi nhập hoặc tạo.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WalletConfig {
-    /// Seed phrase hoặc private key.
-    pub seed_or_key: String,
-    /// Chain ID mà ví sẽ hoạt động.
-    pub chain_id: u64,
-    /// Loại seed phrase: 12 hoặc 24 từ, hoặc None nếu là private key.
-    pub seed_length: Option<SeedLength>,
-}
+// Internal imports
+use crate::walletmanager::chain::ChainType;
 
-/// Loại seed phrase: 12 hoặc 24 từ.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+/// Độ dài của seed phrase.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SeedLength {
-    /// Seed phrase 12 từ.
+    /// Seed phrase 12 từ (khuyến nghị).
     Twelve,
-    /// Seed phrase 24 từ.
+    /// Seed phrase 24 từ (bảo mật cao hơn).
     TwentyFour,
 }
 
-/// Bí mật của ví: seed phrase hoặc private key.
-#[derive(Debug, Clone)]
+/// Loại dữ liệu bí mật của ví.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalletSecret {
-    /// Seed phrase (12 hoặc 24 từ).
+    /// Seed phrase - CHỈ sử dụng cho logic tạm thời, không lưu trữ.
     Seed(String),
-    /// Private key (hex string).
+    /// Private key - CHỈ sử dụng cho logic tạm thời, không lưu trữ.
     PrivateKey(String),
+    /// Dữ liệu đã được mã hóa, không lưu trữ bản rõ.
+    Encrypted,
 }
 
-/// Thông tin của một ví, bao gồm ví, bí mật, chain ID và ID người dùng.
+/// Cấu hình khi tạo hoặc nhập ví.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletConfig {
+    /// Seed phrase hoặc private key.
+    pub seed_or_key: String,
+    /// Chain ID của blockchain.
+    pub chain_id: u64,
+    /// Loại blockchain.
+    pub chain_type: ChainType,
+    /// Độ dài seed phrase (nếu có).
+    pub seed_length: Option<SeedLength>,
+    /// Mật khẩu để mã hóa dữ liệu.
+    pub password: String,
+}
+
+/// Thông tin ví được lưu trữ.
 #[derive(Debug, Clone)]
 pub struct WalletInfo {
-    /// Ví Ethereum.
+    /// Đối tượng ví từ thư viện ethers.
     pub wallet: LocalWallet,
-    /// Bí mật của ví (seed phrase hoặc private key).
+    /// Loại dữ liệu bí mật (thường sẽ là Encrypted).
     pub secret: WalletSecret,
-    /// Chain ID mà ví hoạt động.
+    /// Chain ID của blockchain.
     pub chain_id: u64,
-    /// ID duy nhất của người dùng sở hữu ví.
+    /// Loại blockchain.
+    pub chain_type: ChainType,
+    /// ID người dùng liên kết với ví.
     pub user_id: String,
+    /// Dữ liệu bí mật đã được mã hóa.
+    pub encrypted_secret: Vec<u8>,
+    /// Nonce dùng trong quá trình mã hóa.
+    pub nonce: Vec<u8>,
+    /// Salt dùng trong quá trình mã hóa.
+    pub salt: Vec<u8>, 
 }

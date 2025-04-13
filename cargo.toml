@@ -1,10 +1,25 @@
-[workspace]
-members = [
-  "common",
-  "wallet",
-  "snipebot",
-  "network",
-  "blockchain",
-  "ai",
-  "frontend"
-]
+[package]
+name = "wallet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ethers = "2.0"
+hdkey = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+tracing = "0.1"
+uuid = { version = "1.8", features = ["v4"] }
+tokio = { version = "1.0", features = ["full"] }
+aes-gcm = "0.10"           # Mã hóa khóa
+pbkdf2 = "0.12"           # Tạo khóa từ mật khẩu
+rand = "0.8"              # Random nonce
+solana-sdk = "1.18"       # Hỗ trợ Solana
+ton-client = "0.5"        # Hỗ trợ TON
+near-sdk = "4.1"          # Hỗ trợ NEAR
+stellar-sdk = "0.3"       # Hỗ trợ Stellar
+sui-sdk = "0.2"           # Hỗ trợ Sui
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
