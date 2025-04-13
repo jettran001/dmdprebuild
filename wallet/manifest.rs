@@ -30,11 +30,36 @@
     │   ├── lib.rs                 -> Re-export
     │   └── mod.rs                 -> Khai báo submodule
     ├── src/users/                 -> Quản lý người dùng
-    │   ├── free_user.rs           -> Logic người dùng miễn phí
+    │   ├── mod.rs                 -> Khai báo submodule
+    │   ├── free_user/             -> Module người dùng miễn phí
+    │   │   ├── mod.rs             -> Khai báo submodule
+    │   │   ├── types.rs           -> Định nghĩa kiểu dữ liệu
+    │   │   ├── manager.rs         -> Quản lý tổng thể
+    │   │   ├── auth.rs            -> Xác thực người dùng
+    │   │   ├── limits.rs          -> Kiểm tra và áp dụng giới hạn
+    │   │   ├── records.rs         -> Ghi nhận hoạt động
+    │   │   ├── queries.rs         -> Truy vấn dữ liệu
+    │   │   └── test_utils.rs      -> Công cụ kiểm thử
+    │   ├── subscription/          -> Module quản lý đăng ký người dùng
+    │   │   ├── mod.rs             -> Khai báo submodule
+    │   │   ├── manager.rs         -> Quản lý tổng thể đăng ký
+    │   │   ├── user_subscription.rs -> Cấu trúc dữ liệu đăng ký
+    │   │   ├── types.rs           -> Kiểu dữ liệu đăng ký
+    │   │   ├── constants.rs       -> Hằng số và tham số cấu hình
+    │   │   ├── auto_trade.rs      -> Quản lý thời gian auto-trade
+    │   │   ├── nft.rs             -> Kiểm tra và xác thực NFT
+    │   │   ├── payment.rs         -> Xử lý thanh toán đăng ký
+    │   │   ├── events.rs          -> Phát và quản lý sự kiện đăng ký
+    │   │   └── tests.rs          -> Unit tests cho subscription
     │   ├── premium_user.rs        -> Logic người dùng premium
     │   ├── vip_user.rs            -> Logic người dùng VIP
-    │   ├── lib.rs                 -> Re-export
-    │   └── mod.rs                 -> Khai báo submodule
+    │   └── subscription.rs        -> (Sắp di chuyển sang thư mục subscription)
+    ├── tests/                     -> Integration tests
+    │   ├── mod.rs                 -> Khai báo các test modules
+    │   ├── integration.rs         -> Integration tests cho wallet
+    │   ├── auth_tests.rs          -> Tests cho xác thực người dùng
+    │   ├── limits_tests.rs        -> Tests cho kiểm tra giới hạn
+    │   └── records_tests.rs       -> Tests cho ghi nhận hoạt động
 
     Mối liên kết:
     - walletlogic phụ thuộc error (dùng WalletError)
@@ -43,13 +68,36 @@
     - walletmanager dùng walletmanager::types, chain
     - defi có thể dùng walletlogic::handler để truy xuất ví
     - users có thể liên kết với walletlogic qua user_id
+    - users::subscription::manager phụ thuộc vào các user manager khác
+    - users::subscription::nft phụ thuộc vào walletmanager để kiểm tra NFT
+    - users::subscription::payment phụ thuộc vào blockchain để xác minh giao dịch
+    - users::subscription::events gửi thông báo khi có thay đổi subscription
     - main.rs dùng walletmanager và config để demo
 */
 
-// Khai báo các module cấp cao
-pub mod error;
-pub mod config;
-pub mod walletlogic;
-pub mod walletmanager;
-pub mod defi;
-pub mod users;
+// Module structure của dự án wallet
+pub mod error;         // Định nghĩa WalletError và các utility function
+pub mod config;        // Cấu hình chung cho ví
+pub mod walletlogic;   // Core logic cho ví blockchain
+pub mod walletmanager; // API/UI layer để tương tác với ví
+pub mod defi;          // DeFi functionality (farming, staking)
+pub mod users;         // Quản lý người dùng và đăng ký
+
+/**
+ * Hướng dẫn import:
+ * 
+ * 1. Import từ internal crates:
+ * - use crate::walletlogic::handler::WalletHandler;
+ * - use crate::walletmanager::api::WalletManagerApi;
+ * - use crate::users::subscription::manager::SubscriptionManager;
+ * 
+ * 2. Import từ external crates (từ snipebot hoặc blockchain):
+ * - use wallet::walletmanager::api::WalletManagerApi;
+ * - use wallet::users::subscription::manager::SubscriptionManager;
+ * 
+ * 3. Import error types:
+ * - use crate::error::{WalletError, Result};
+ * 
+ * 4. Import các events:
+ * - use crate::users::subscription::events::{SubscriptionEvent, EventType};
+ */

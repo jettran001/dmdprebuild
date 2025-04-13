@@ -19,6 +19,8 @@ ton-client = "0.5"
 near-sdk = "4.1"
 stellar-sdk = "0.3"
 sui-sdk = "0.2"
+chrono = "0.4"
+anyhow = "1.0"
 
 [[test]]
 name = "integration"

@@ -13,7 +13,7 @@ use tracing::{info, warn};
 // Internal imports
 use crate::error::WalletError;
 use crate::walletlogic::crypto::{encrypt_data, decrypt_data};
-use crate::walletlogic::utils::{generate_user_id, is_seed_phrase};
+use crate::walletlogic::utils::{generate_user_id, generate_default_user_id, UserType, is_seed_phrase};
 use crate::walletmanager::chain::ChainType;
 use crate::walletmanager::types::{WalletConfig, SeedLength, WalletInfo, WalletSecret};
 
@@ -38,6 +38,7 @@ impl WalletManager {
     /// - `chain_id`: ID của blockchain.
     /// - `chain_type`: Loại blockchain (EVM, Solana, v.v.).
     /// - `password`: Mật khẩu để mã hóa seed phrase.
+    /// - `user_type`: Loại người dùng (mặc định là Free).
     ///
     /// # Returns
     /// Tuple (địa chỉ ví, seed phrase, user_id).
@@ -51,6 +52,7 @@ impl WalletManager {
         chain_id: u64,
         chain_type: ChainType,
         password: &str,
+        user_type: Option<UserType>,
     ) -> Result<(Address, String, String), WalletError> {
         let entropy_size = match seed_length {
             SeedLength::Twelve => 128,
@@ -84,7 +86,11 @@ impl WalletManager {
         let (encrypted_secret, nonce, salt) = encrypt_data(&seed_phrase, password)
             .context("Không thể mã hóa seed phrase")?;
         
-        let user_id = generate_user_id();
+        // Tạo user_id với loại người dùng cụ thể hoặc mặc định là Free
+        let user_id = match user_type {
+            Some(utype) => generate_user_id(utype),
+            None => generate_default_user_id(),
+        };
         
         self.wallets.write().await.insert(
             address,
@@ -108,6 +114,7 @@ impl WalletManager {
     ///
     /// # Arguments
     /// - `config`: Cấu hình ví bao gồm seed/key, chain_id và password.
+    /// - `user_type`: Loại người dùng (mặc định là Free).
     ///
     /// # Returns
     /// Tuple (địa chỉ ví, user_id).
@@ -118,6 +125,7 @@ impl WalletManager {
     pub async fn import_wallet_internal(
         &mut self,
         config: WalletConfig,
+        user_type: Option<UserType>,
     ) -> Result<(Address, String), WalletError> {
         info!("Importing wallet with chain_id: {}", config.chain_id);
 
@@ -153,7 +161,11 @@ impl WalletManager {
         let (encrypted_secret, nonce, salt) = encrypt_data(&config.seed_or_key, &config.password)
             .context("Không thể mã hóa seed phrase hoặc private key")?;
         
-        let user_id = generate_user_id();
+        // Tạo user_id với loại người dùng cụ thể hoặc mặc định là Free
+        let user_id = match user_type {
+            Some(utype) => generate_user_id(utype),
+            None => generate_default_user_id(),
+        };
         
         self.wallets.write().await.insert(
             address,
@@ -179,11 +191,14 @@ mod tests {
     use super::*;
     use crate::walletmanager::types::{SeedLength, WalletConfig};
     use crate::walletmanager::chain::ChainType;
+    use crate::walletlogic::utils::UserType;
 
     #[tokio::test]
     async fn test_create_wallet() {
         let mut manager = WalletManager::new();
-        let result = manager.create_wallet_internal(SeedLength::Twelve, 1, ChainType::EVM, "password").await;
+        let result = manager.create_wallet_internal(
+            SeedLength::Twelve, 1, ChainType::EVM, "password", Some(UserType::Free)
+        ).await;
         assert!(result.is_ok(), "Failed to create wallet");
         
         let (address, seed_phrase, user_id) = result
@@ -194,6 +209,7 @@ mod tests {
         let wallets = manager.wallets.read().await;
         let wallet_info = wallets.get(&address).unwrap();
         assert_eq!(wallet_info.user_id, user_id, "User IDs should match");
+        assert!(user_id.starts_with("FREE_"), "User ID should have FREE prefix");
     }
 
     #[tokio::test]
@@ -208,7 +224,7 @@ mod tests {
             password: "password".to_string(),
         };
         
-        let result = manager.import_wallet_internal(config).await;
+        let result = manager.import_wallet_internal(config, Some(UserType::Free)).await;
         assert!(result.is_ok(), "Failed to import wallet");
         
         let (address, user_id) = result

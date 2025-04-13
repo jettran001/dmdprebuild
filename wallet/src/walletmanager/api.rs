@@ -11,6 +11,7 @@ use crate::error::WalletError;
 use crate::config::WalletSystemConfig;
 use crate::walletlogic::handler::WalletManagerHandler;
 use crate::walletlogic::init::WalletManager;
+use crate::walletlogic::utils::UserType;
 use crate::walletmanager::chain::{ChainConfig, ChainManager, ChainType, DefaultChainManager};
 use crate::walletmanager::types::{WalletConfig, SeedLength};
 
@@ -49,6 +50,7 @@ impl WalletManagerApi {
     /// - `chain_id`: ID của blockchain (nếu None sẽ dùng default_chain_id).
     /// - `chain_type`: Loại blockchain.
     /// - `password`: Mật khẩu để mã hóa seed.
+    /// - `user_type`: Loại người dùng (mặc định là Free).
     ///
     /// # Returns
     /// Tuple (địa chỉ ví, seed phrase, user_id).
@@ -59,6 +61,7 @@ impl WalletManagerApi {
         chain_id: Option<u64>,
         chain_type: ChainType,
         password: &str,
+        user_type: Option<UserType>,
     ) -> Result<(Address, String, String), WalletError> 
     where Self: Send + Sync + 'static
     {
@@ -66,7 +69,7 @@ impl WalletManagerApi {
             return Err(WalletError::InvalidSeedOrKey(ERR_MAX_WALLET_LIMIT.to_string()));
         }
         let chain_id = chain_id.unwrap_or(self.config.default_chain_id);
-        self.manager.create_wallet_internal(seed_length, chain_id, chain_type, password)
+        self.manager.create_wallet_internal(seed_length, chain_id, chain_type, password, user_type)
             .await
             .context("Lỗi khi tạo ví mới")
             .map_err(|e| match e.downcast::<WalletError>() {
@@ -79,11 +82,16 @@ impl WalletManagerApi {
     ///
     /// # Arguments
     /// - `config`: Cấu hình ví.
+    /// - `user_type`: Loại người dùng (mặc định là Free).
     ///
     /// # Returns
     /// Tuple (địa chỉ ví, user_id).
     #[flow_from("common::gateway")]
-    pub async fn import_wallet(&mut self, config: WalletConfig) -> Result<(Address, String), WalletError> 
+    pub async fn import_wallet(
+        &mut self, 
+        config: WalletConfig,
+        user_type: Option<UserType>
+    ) -> Result<(Address, String), WalletError> 
     where Self: Send + Sync + 'static
     {
         if !self.config.can_add_wallet(self.manager.wallets.read().await.len()) {
@@ -101,7 +109,7 @@ impl WalletManagerApi {
             }
         }
         
-        self.manager.import_wallet_internal(config)
+        self.manager.import_wallet_internal(config, user_type)
             .await
             .context("Lỗi khi nhập ví")
             .map_err(|e| match e.downcast::<WalletError>() {
@@ -340,7 +348,7 @@ mod tests {
         let config = WalletSystemConfig::default();
         let mut api = WalletManagerApi::new(config);
         
-        let result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        let result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None).await;
         assert!(result.is_ok(), "Should create wallet successfully");
         
         let (address, _, user_id) = result
@@ -368,7 +376,7 @@ mod tests {
             password: "password".to_string(),
         };
         
-        let result = api.import_wallet(wallet_config).await;
+        let result = api.import_wallet(wallet_config, None).await;
         assert!(result.is_ok(), "Should import wallet successfully");
         
         let (address, user_id) = result
@@ -398,11 +406,11 @@ mod tests {
         
         let mut api = WalletManagerApi::new(config);
         
-        let first_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        let first_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None).await;
         assert!(first_result.is_ok(), "Should create first wallet successfully");
         first_result.expect("Should have valid first wallet result");
         
-        let second_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password").await;
+        let second_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None).await;
         assert!(second_result.is_err(), "Should fail to create second wallet due to limit");
     }
 
@@ -454,7 +462,8 @@ mod tests {
             SeedLength::Twelve,
             None,
             ChainType::EVM,
-            "password123"
+            "password123",
+            None
         ).await;
         
         assert!(result.is_ok(), "Không thể tạo ví mới");
@@ -492,7 +501,8 @@ mod tests {
             SeedLength::Twelve,
             None,
             ChainType::EVM,
-            "password123"
+            "password123",
+            None
         ).await;
         assert!(result1.is_ok(), "Không thể tạo ví đầu tiên");
         
@@ -501,7 +511,8 @@ mod tests {
             SeedLength::Twelve,
             None,
             ChainType::EVM,
-            "password123"
+            "password123",
+            None
         ).await;
         assert!(result2.is_err(), "Tạo được ví vượt quá giới hạn");
         

@@ -1,0 +1,269 @@
+//! Định nghĩa các kiểu dữ liệu liên quan đến NFT.
+
+// Standard library imports
+use std::fmt;
+
+// External imports
+use chrono::{DateTime, Duration, Utc};
+use ethers::types::{Address, U256};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::blockchain::types::NftInfo;
+use crate::error::AppResult;
+use crate::users::subscription::constants::{NFT_SUBSCRIPTION_DAYS, VIP_NFT_COLLECTION_ADDRESS};
+use crate::users::subscription::types::SubscriptionType;
+
+/// Trạng thái của VIP user
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum VipUserStatus {
+    /// Đang hoạt động bình thường
+    Active,
+    /// Tạm dừng (không có NFT)
+    Suspended,
+    /// Đã hết hạn
+    Expired,
+}
+
+/// Trạng thái khi VIP không còn NFT trong ví
+#[derive(Debug, Clone, PartialEq)]
+pub enum NonNftVipStatus {
+    /// Còn NFT, không có vấn đề gì
+    Valid,
+    /// Đang chờ người dùng xử lý khi mất NFT
+    Pending,
+    /// Người dùng chọn hạ cấp xuống Premium
+    Downgrade,
+    /// Người dùng chọn tạm dừng đăng ký
+    Pause,
+}
+
+impl Default for NonNftVipStatus {
+    fn default() -> Self {
+        NonNftVipStatus::Valid
+    }
+}
+
+/// Thông tin về NFT của VIP user
+#[derive(Debug, Clone)]
+pub struct VipNftInfo {
+    /// ID duy nhất của NFT trong database
+    pub nft_id: String,
+    /// Địa chỉ contract của NFT
+    pub contract_address: Address,
+    /// Token ID của NFT
+    pub token_id: U256,
+    /// Thời điểm kiểm tra cuối
+    pub last_checked: DateTime<Utc>,
+    /// NFT có tồn tại trong ví không
+    pub exists_in_wallet: bool,
+}
+
+impl VipNftInfo {
+    /// Tạo mới thông tin NFT
+    ///
+    /// # Arguments
+    /// * `nft_id` - ID duy nhất của NFT
+    /// * `contract_address` - Địa chỉ contract của NFT
+    /// * `token_id` - Token ID của NFT
+    ///
+    /// # Returns
+    /// Trả về đối tượng VipNftInfo mới
+    pub fn new(nft_id: &str, contract_address: Address, token_id: U256) -> Self {
+        Self {
+            nft_id: nft_id.to_string(),
+            contract_address,
+            token_id,
+            last_checked: Utc::now(),
+            exists_in_wallet: true,
+        }
+    }
+
+    /// Cập nhật trạng thái NFT
+    ///
+    /// # Arguments
+    /// * `exists` - NFT có tồn tại trong ví không
+    pub fn update_status(&mut self, exists: bool) {
+        self.exists_in_wallet = exists;
+        self.last_checked = Utc::now();
+    }
+
+    /// Kiểm tra xem NFT có cần xác minh lại không (sau 24h)
+    ///
+    /// # Arguments
+    /// * `current_time` - Thời điểm hiện tại
+    ///
+    /// # Returns
+    /// Trả về true nếu cần xác minh lại
+    pub fn needs_verification(&self, current_time: DateTime<Utc>) -> bool {
+        let time_diff = current_time.signed_duration_since(self.last_checked);
+        time_diff > Duration::hours(24)
+    }
+}
+
+/// Thông tin về NFT VIP
+#[derive(Debug, Clone)]
+pub struct NftInfo {
+    /// Địa chỉ hợp đồng NFT
+    pub contract_address: Address,
+    /// Token ID của NFT
+    pub token_id: U256,
+    /// Thời gian kiểm tra gần nhất
+    pub last_verified: DateTime<Utc>,
+    /// NFT có còn hợp lệ không
+    pub is_valid: bool,
+}
+
+impl NftInfo {
+    /// Tạo mới thông tin NFT
+    pub fn new(contract_address: Address, token_id: U256) -> Self {
+        Self {
+            contract_address,
+            token_id,
+            last_verified: Utc::now(),
+            is_valid: true,
+        }
+    }
+    
+    /// Cập nhật trạng thái của NFT
+    pub fn update_status(&mut self, is_valid: bool, timestamp: DateTime<Utc>) {
+        self.is_valid = is_valid;
+        self.last_verified = timestamp;
+    }
+    
+    /// Kiểm tra xem NFT có cần được xác minh lại không
+    /// Mặc định là sau mỗi 24 giờ
+    pub fn needs_verification(&self, now: DateTime<Utc>) -> bool {
+        now.signed_duration_since(self.last_verified).num_hours() >= 24
+    }
+}
+
+/// Trạng thái của người dùng không có NFT
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NonNftUserStatus {
+    /// Tiếp tục sử dụng Premium
+    UsePremium,
+    /// Tạm dừng đến khi có NFT
+    Paused,
+}
+
+/// Thông tin về NFT VIP và trạng thái kích hoạt
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VipNftInfo {
+    /// ID của NFT
+    pub nft_id: Uuid,
+    /// ID người dùng sở hữu
+    pub user_id: Uuid,
+    /// Địa chỉ ví chứa NFT
+    pub wallet_address: String,
+    /// Thông tin về NFT từ blockchain
+    pub nft_data: NftInfo,
+    /// Đã kích hoạt chưa
+    pub is_activated: bool,
+    /// Ngày kích hoạt
+    pub activation_date: Option<DateTime<Utc>>,
+    /// Ngày hết hạn
+    pub expiry_date: Option<DateTime<Utc>>,
+    /// Ngày tạo bản ghi
+    pub created_at: DateTime<Utc>,
+    /// Ngày cập nhật bản ghi
+    pub updated_at: DateTime<Utc>,
+}
+
+impl VipNftInfo {
+    /// Tạo một đối tượng NFT VIP mới
+    pub fn new(user_id: Uuid, wallet_address: String, nft_data: NftInfo) -> Self {
+        let now = Utc::now();
+        Self {
+            nft_id: Uuid::new_v4(),
+            user_id,
+            wallet_address,
+            nft_data,
+            is_activated: false,
+            activation_date: None,
+            expiry_date: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Kích hoạt NFT để nhận gói đăng ký VIP
+    pub fn activate(&mut self) -> AppResult<()> {
+        if self.is_activated {
+            return Err("NFT đã được kích hoạt".into());
+        }
+
+        let now = Utc::now();
+        self.is_activated = true;
+        self.activation_date = Some(now);
+        self.expiry_date = Some(now + Duration::days(NFT_SUBSCRIPTION_DAYS));
+        self.updated_at = now;
+
+        Ok(())
+    }
+
+    /// Kiểm tra xem NFT có đang hoạt động không
+    pub fn is_active(&self) -> bool {
+        if !self.is_activated {
+            return false;
+        }
+
+        match self.expiry_date {
+            Some(expiry) => Utc::now() < expiry,
+            None => false,
+        }
+    }
+
+    /// Kiểm tra xem NFT có phải từ bộ sưu tập VIP không
+    pub fn is_vip_collection(&self) -> bool {
+        self.nft_data.collection_address.eq_ignore_ascii_case(VIP_NFT_COLLECTION_ADDRESS)
+    }
+
+    /// Lấy loại đăng ký từ NFT
+    pub fn get_subscription_type(&self) -> Option<SubscriptionType> {
+        if self.is_active() && self.is_vip_collection() {
+            Some(SubscriptionType::Vip)
+        } else {
+            None
+        }
+    }
+}
+
+/// Quản lý NFT VIP của người dùng
+#[derive(Debug)]
+pub struct NftManager {
+    /// Danh sách NFT của người dùng
+    pub user_nfts: Vec<VipNftInfo>,
+}
+
+impl NftManager {
+    /// Tạo manager mới với danh sách NFT
+    pub fn new(user_nfts: Vec<VipNftInfo>) -> Self {
+        Self { user_nfts }
+    }
+
+    /// Kiểm tra người dùng có NFT VIP đang hoạt động không
+    pub fn has_active_vip_nft(&self) -> bool {
+        self.user_nfts.iter().any(|nft| nft.is_active() && nft.is_vip_collection())
+    }
+
+    /// Lấy thông tin NFT VIP đang hoạt động
+    pub fn get_active_vip_nft(&self) -> Option<&VipNftInfo> {
+        self.user_nfts
+            .iter()
+            .find(|nft| nft.is_active() && nft.is_vip_collection())
+    }
+
+    /// Thêm NFT mới vào danh sách
+    pub fn add_nft(&mut self, nft: VipNftInfo) {
+        self.user_nfts.push(nft);
+    }
+
+    /// Kích hoạt NFT theo ID
+    pub fn activate_nft(&mut self, nft_id: Uuid) -> AppResult<()> {
+        match self.user_nfts.iter_mut().find(|nft| nft.nft_id == nft_id) {
+            Some(nft) => nft.activate(),
+            None => Err("Không tìm thấy NFT".into()),
+        }
+    }
+} 

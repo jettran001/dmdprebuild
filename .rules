@@ -7,14 +7,16 @@
         "priority": "HIGHEST", 
         "description": "BẮT BUỘC kiểm tra chất lượng code theo từng bước phát triển",
         "rules": [
-          "Sau khi tạo xong 1 hàm, check lại syntax mới qua hàm kế tiếp",
-          "Sau khi tạo xong 1 file, quét lại có vi phạm nguyên tắc không, nếu có thì sửa lại cho phù hợp",
-          "Nếu không tìm thấy file cần tìm, quay lại quét manifest"
+          "Bắt buộc không tự ý sửa .rules và luôn tuân thủ các quy tắc trong .rules",
+          "Bắt buộc Sau khi tạo xong 1 hàm, check lại syntax mới qua hàm kế tiếp",
+          "Bắt buộc Sau khi tạo xong 1 file, quét lại có vi phạm nguyên tắc không, nếu có thì sửa lại cho phù hợp",
+          "Nếu không tìm thấy file cần tìm, quay lại quét manifest",
+          "Bắt buộc phải đọc doc comment trước khi sửa code"
         ]
       },
       "read_manifest": {
         "priority": "HIGHEST",
-        "description": "BẮT BUỘC đọc kỹ src/registry/manifest.rs trước khi sửa code",
+        "description": "BẮT BUỘC đọc kỹ ./manifest.rs trước khi sửa code",
         "rules": [
           "Đọc toàn bộ manifest.rs để hiểu tổ chức module",
           "Hiểu rõ thứ tự ưu tiên module: api, services, traits, utils",
@@ -33,10 +35,10 @@
       "project_entry": {
         "priority": "HIGHEST",
         "description": "BẮT BUỘC kiểm tra và điều hướng dự án dựa trên manifest.rs trước khi sửa code",
-        "entry_points": ["src/registry/manifest.rs", "{module}/manifest.rs"],
+        "entry_points": ["./manifest.rs"],
         "module_resolver": {
           "type": "rust",
-          "manifest_file": "src/registry/manifest.rs",
+          "manifest_file": "./manifest.rs",
           "priority_order": ["api", "services", "traits", "utils"]
         },
         "rules": [
@@ -59,7 +61,9 @@
         "description": "BẮT BUỘC tuân thủ khi chỉnh sửa code",
         "rules": [
           "Duy trì cấu trúc module như trong manifest.rs",
-          "Tuân thủ các mẫu thiết kế đã thiết lập"
+          "Tuân thủ các mẫu thiết kế đã thiết lập",
+          "Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác",
+          "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo"
         ]
       },
       "post_check": {
@@ -80,7 +84,7 @@
           "Đảm bảo event handlers đăng ký đầy đủ",
           "Đảm bảo thread safety khi truy cập shared state"
         ]
-      },
+      }
       
     }
   },
@@ -154,10 +158,10 @@
     ],
     "module_manifest_paths": {
       "wallet": "wallet/manifest.rs",
-      "snipebot": "snipebot/src/registry/manifest.rs",
+      "snipebot": "snipebot/manifest.rs",
       "blockchain": "blockchain/manifest.rs",
       "network": "network/manifest.rs",
-      "common": "common/src/manifest.rs"
+      "common": "common/manifest.rs"
     }
   },
   "development_workflow": {
