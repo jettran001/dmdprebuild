@@ -1,3 +1,20 @@
+//! Module quản lý thông tin đăng ký người dùng và các chức năng chuyển đổi giữa 
+//! các loại gói đăng ký trong hệ thống DiamondChain.
+//!
+//! Module này cung cấp các chức năng:
+//! * Định nghĩa cấu trúc dữ liệu UserSubscription cốt lõi cho đăng ký của người dùng
+//! * Quản lý trạng thái đăng ký (đang hoạt động, hết hạn, đang chờ, đã hủy)
+//! * Cập nhật và theo dõi thông tin về NFT cho đăng ký VIP
+//! * Thực hiện nâng cấp giữa các loại đăng ký (Free → Premium → VIP)
+//! * Xử lý hạ cấp khi hết hạn đăng ký hoặc theo yêu cầu người dùng
+//! * Quản lý thông tin thanh toán liên quan đến đăng ký
+//! * Gia hạn đăng ký và tính toán thời hạn mới
+//!
+//! Module này đóng vai trò trung tâm trong hệ thống đăng ký, cung cấp các cấu trúc dữ liệu
+//! và chức năng được sử dụng bởi nhiều module khác như manager, payment, staking, và auto_trade.
+//! Nó định nghĩa trait SubscriptionConverter cho phép chuyển đổi linh hoạt giữa các loại
+//! đăng ký, hỗ trợ nhiều luồng nâng cấp/hạ cấp khác nhau trong hệ thống.
+
 //! Triển khai logic quản lý đăng ký cụ thể cho người dùng.
 
 use chrono::{DateTime, Duration, Utc};

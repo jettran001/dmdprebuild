@@ -7,10 +7,10 @@
         "priority": "HIGHEST", 
         "description": "BẮT BUỘC kiểm tra chất lượng code theo từng bước phát triển",
         "rules": [
-          "Bắt buộc không tự ý sửa .rules và luôn tuân thủ các quy tắc trong .rules",
+          "Bắt buộc không tự ý sửa .rules và BĂT BUỘC tuân thủ các quy tắc trong .rules",
           "Bắt buộc Sau khi tạo xong 1 hàm, check lại syntax mới qua hàm kế tiếp",
           "Bắt buộc Sau khi tạo xong 1 file, quét lại có vi phạm nguyên tắc không, nếu có thì sửa lại cho phù hợp",
-          "Nếu không tìm thấy file cần tìm, quay lại quét manifest",
+          "Nếu không tìm thấy file cần tìm, quay lại quét manifest của domain hiện tại",
           "Bắt buộc phải đọc doc comment trước khi sửa code"
         ]
       },
@@ -18,7 +18,7 @@
         "priority": "HIGHEST",
         "description": "BẮT BUỘC đọc kỹ ./manifest.rs trước khi sửa code",
         "rules": [
-          "Đọc toàn bộ manifest.rs để hiểu tổ chức module",
+          "Đọc toàn bộ manifest.rs của domain hiện tại để hiểu tổ chức module",
           "Hiểu rõ thứ tự ưu tiên module: api, services, traits, utils",
           "Tham khảo manifest.rs để biết tương tác giữa các domain"
         ]
@@ -63,6 +63,7 @@
         "rules": [
           "Duy trì cấu trúc module như trong manifest.rs",
           "Tuân thủ các mẫu thiết kế đã thiết lập",
+          "Khi tạo các folder hoặc file mới, luôn dùng các command cho powershell để tạo",
           "Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác",
           "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo",
           "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp",
@@ -75,6 +76,7 @@
           "Kiểm tra tính toàn vẹn module sau khi chỉnh sửa",
           "Cập nhật tài liệu khi thay đổi chức năng",
           "Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs"
+          "Cập nhật lại các thay đổi vào file manifest.rs của domain hiện tại"
         ]
       },
       "module_synchronization": {

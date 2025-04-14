@@ -13,9 +13,19 @@
 - [x] Xử lý không nhất quán với NonNftVipStatus
 - [x] Sử dụng unwrap() trực tiếp trong tests
 - [x] Thiếu unit test cho chức năng staking và verify NFT
+- [x] Thiếu doc comments cho module payment.rs
+- [x] Thiếu doc comments cho một số module khác
+- [x] Đã bổ sung đầy đủ tài liệu cho module user_subscription.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module nft.rs
+- [x] Đã chuyển logic từ subscription/vip.rs vào vip_user.rs
+- [x] Đã chuyển logic từ subscription/premium_user.rs vào premium_user.rs
+- [x] Đã sửa API, import/export và annotations cho vip_user.rs
+- [x] Đã sửa API, import/export và annotations cho premium_user.rs
+- [x] Đã cập nhật mod.rs để tránh xung đột re-export
 
 ## Lỗi đang chờ sửa
-- [ ] Thiếu doc comments cho một số module
+- [ ] Cache layer chưa được tối ưu hóa
+- [ ] Thiếu tests cho các module
 
 # Fixed Issues
 - [x] Unsafe `unwrap_or_else()` ở manager.rs
@@ -25,8 +35,21 @@
 - [x] Tài liệu chưa đầy đủ cho các module premium.rs và vip.rs
 - [x] Thiếu xử lý lỗi cho các kết quả trả về từ blockchain trong payment.rs
 - [x] Đã thêm trạng thái StakedDMD cho gói VIP khi người dùng stake DMD token
+- [x] Đã bổ sung đầy đủ tài liệu cho module payment.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module staking.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module auto_trade.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module utils.rs 
+- [x] Đã bổ sung đầy đủ tài liệu cho module manager.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module free.rs và premium_user.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module user_subscription.rs
+- [x] Đã bổ sung đầy đủ tài liệu cho module nft.rs
+- [x] Đã xử lý trùng lặp logic quản lý người dùng VIP và Premium
+- [x] Đã nâng cấp file vip_user.rs và premium_user.rs với logic từ thư mục subscription
+- [x] Đã cập nhật API và flow annotations cho module vip_user.rs và premium_user.rs
+- [x] Đã sửa mod.rs để tránh xung đột re-exports và cải thiện cách import
+- [x] Đã thêm API mới cho vip_user: load_vip_user và upgrade_with_staking
+- [x] Đã thêm API mới cho premium_user: load_premium_user và update_auto_renew
 
 # Pending Issues
-- [ ] Tài liệu chưa đầy đủ cho các hàm public
 - [ ] Cache layer chưa được tối ưu hóa
 - [ ] Thiếu tests cho các module

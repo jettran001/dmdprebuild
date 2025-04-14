@@ -4,22 +4,24 @@
 //! Module này bao gồm các submodule sau:
 //! - free_user: Quản lý người dùng miễn phí
 //! - premium_user: Quản lý người dùng premium
+//! - vip_user: Quản lý người dùng VIP với các tính năng cao cấp
 //! - subscription: Quản lý đăng ký và nâng cấp tài khoản
 
 pub mod free_user;
 pub mod premium_user;
+pub mod vip_user;
 pub mod subscription;
 
 // Re-exports
 pub use free_user::{FreeUserData, FreeUserManager, UserStatus};
-pub use premium_user::{PremiumUserData, PremiumUserManager};
+pub use premium_user::{PremiumUserData, PremiumUserManager, PremiumUserStatus, PaymentRecord};
+pub use vip_user::{VipUserData, VipUserManager, VipUserStatus};
 
 // Re-export các thành phần chính từ subscription
 pub use subscription::{
     // Manager classes
     manager::SubscriptionManager,
     auto_trade::AutoTradeManager,
-    vip::VipManager,
     
     // Core types
     types::{
@@ -32,7 +34,6 @@ pub use subscription::{
     
     // NFT related
     nft::{VipNftInfo, NftInfo, NonNftVipStatus},
-    vip::{VipUserStatus, VipUserData},
     
     // Auto-trade related
     auto_trade::{AutoTradeUsage, AutoTradeStatus},

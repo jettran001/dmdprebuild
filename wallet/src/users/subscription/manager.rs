@@ -1,4 +1,22 @@
-//! Module quản lý đăng ký và subscription của người dùng.
+//! Module quản lý đăng ký người dùng (SubscriptionManager) cung cấp chức năng trung tâm 
+//! cho việc quản lý các gói đăng ký và quyền của người dùng trong hệ thống.
+//!
+//! Module này cung cấp các chức năng:
+//! * Quản lý các gói đăng ký (Premium, VIP, VIP 12 tháng)
+//! * Tạo và cập nhật đăng ký cho người dùng
+//! * Xác thực quyền truy cập vào các tính năng dựa trên loại đăng ký
+//! * Nâng cấp và hạ cấp đăng ký dựa trên thanh toán hoặc hết hạn
+//! * Tích hợp với hệ thống sở hữu NFT để xác minh trạng thái VIP
+//! * Tích hợp với hệ thống staking cho các đăng ký VIP không có NFT
+//! * Quản lý tính năng giao dịch tự động (AutoTrade) cho người dùng
+//! * Xử lý hệ thống thanh toán và xác minh trạng thái giao dịch
+//!
+//! SubscriptionManager được thiết kế để là trung tâm tích hợp cho tất cả các chức năng
+//! liên quan đến đăng ký, tương tác với các module như payment, staking, auto_trade, và nft
+//! để cung cấp trải nghiệm liền mạch cho người dùng.
+//!
+//! Module này sử dụng các kỹ thuật đồng bộ hóa như RwLock và Arc để đảm bảo an toàn
+//! trong các ngữ cảnh đa luồng và tránh các vấn đề deadlock tiềm ẩn khi truy cập dữ liệu.
 
 // Standard library imports
 use std::collections::HashMap;

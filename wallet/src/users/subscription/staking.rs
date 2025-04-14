@@ -1,4 +1,20 @@
-//! Module quản lý stake token DMD cho các gói đăng ký 12 tháng
+//! Module staking quản lý việc đặt cọc (staking) token DMD cho các đăng ký VIP.
+//! 
+//! Module này cung cấp các chức năng:
+//! * Đặt cọc token DMD để nâng cấp hoặc duy trì tư cách VIP
+//! * Quản lý thông tin đặt cọc của người dùng (StakeInfo)
+//! * Tính toán phần thưởng dựa trên số lượng token đặt cọc và thời gian
+//! * Hoàn thành quá trình đặt cọc và rút token sau khi hết hạn
+//! * Theo dõi thời gian còn lại cho mỗi khoản đặt cọc
+//! * Xử lý lỗi cho các tương tác với blockchain
+//! * Xác minh số dư tối thiểu cho việc đặt cọc
+//! 
+//! Module này tương tác với các hợp đồng thông minh trên blockchain để 
+//! thực hiện các hành động đặt cọc và rút token, đồng thời duy trì
+//! trạng thái của người dùng VIP mà không cần NFT.
+//! 
+//! Tất cả các phương thức đều cung cấp xử lý lỗi toàn diện và kiểm tra 
+//! đầu vào để đảm bảo tính toàn vẹn của dữ liệu và hệ thống.
 
 // External imports
 use ethers::types::{Address, U256};

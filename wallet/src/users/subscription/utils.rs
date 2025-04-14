@@ -1,3 +1,17 @@
+//! Module utils cung cấp các hàm tiện ích và công cụ hỗ trợ cho hệ thống quản lý đăng ký.
+//! 
+//! Module này bao gồm:
+//! * Các hàm tính toán thời gian và ngày đăng ký (reset time, ngày hết hạn)
+//! * Các công cụ xác thực giao dịch blockchain
+//! * Hàm tính toán số lượng token thanh toán dựa trên loại đăng ký
+//! * Các công cụ ghi log và theo dõi sự kiện đăng ký
+//! * Công cụ lập lịch và chạy các tác vụ định kỳ liên quan đến đăng ký
+//! * Các tiện ích xử lý ngày tháng và mã hóa
+//! 
+//! Module này đóng vai trò hỗ trợ cho toàn bộ hệ thống đăng ký, cung cấp các 
+//! chức năng cơ bản được sử dụng bởi các module khác như auto_trade, 
+//! payment, vip, premium, và manager.
+
 //! Các hàm tiện ích cho module subscription.
 
 use chrono::{DateTime, Duration, Utc};

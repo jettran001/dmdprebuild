@@ -1,4 +1,17 @@
-//! Định nghĩa các kiểu dữ liệu và phương thức liên quan đến tính năng giao dịch tự động (Auto Trade).
+//! Module auto_trade cung cấp chức năng giao dịch tự động dựa trên gói đăng ký
+//! của người dùng trong hệ thống DiamondChain.
+//! 
+//! Module này cung cấp các chức năng:
+//! * Theo dõi và quản lý hạn mức giao dịch tự động của người dùng
+//! * Xác minh quyền sử dụng chức năng giao dịch tự động dựa trên loại đăng ký
+//! * Theo dõi số lượng giao dịch đã thực hiện và giới hạn còn lại
+//! * Thiết lập các giới hạn giao dịch tự động khác nhau cho mỗi loại đăng ký
+//! * Cập nhật và làm mới hạn mức giao dịch khi chu kỳ đăng ký mới bắt đầu
+//!
+//! Module này tương tác với SubscriptionManager và tập trung vào việc duy trì
+//! sự an toàn khi truy cập trong môi trường bất đồng bộ và đa luồng, tránh
+//! các vấn đề như deadlock và race condition thông qua việc sử dụng thích hợp
+//! các cơ chế đồng bộ hóa như Weak reference, Arc và RwLock.
 
 // External imports
 use chrono::{DateTime, Duration, Utc};

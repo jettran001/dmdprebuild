@@ -1,4 +1,15 @@
 //! Module quản lý thanh toán cho các gói đăng ký.
+//!
+//! Module này cung cấp các chức năng liên quan đến việc xử lý thanh toán cho các gói đăng ký,
+//! bao gồm:
+//! - Xử lý giao dịch thanh toán từ người dùng
+//! - Kiểm tra trạng thái giao dịch trên blockchain
+//! - Xác minh số tiền thanh toán và loại token phù hợp với gói đăng ký
+//! - Xử lý lỗi liên quan đến blockchain
+//! - Quản lý việc gia hạn đăng ký
+//!
+//! Module này tương tác với các module khác như user_subscription và staking, cũng như
+//! các dịch vụ blockchain bên ngoài để đảm bảo quá trình thanh toán diễn ra trơn tru và an toàn.
 
 use chrono::{DateTime, Utc};
 use ethers::types::{Address, H256, TransactionReceipt, U256};

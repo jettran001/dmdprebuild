@@ -1,3 +1,18 @@
+//! Module quản lý NFT liên quan đến đăng ký VIP trong hệ thống DiamondChain.
+//!
+//! Module này cung cấp các chức năng:
+//! * Định nghĩa và quản lý thông tin về NFT VIP (địa chỉ hợp đồng, token ID)
+//! * Theo dõi trạng thái sở hữu NFT của người dùng VIP
+//! * Xác minh tính hợp lệ của NFT thông qua tương tác với blockchain
+//! * Quản lý trạng thái của người dùng VIP khi không có NFT (Pending, Downgrade, Pause)
+//! * Hỗ trợ trạng thái StakedDMD cho người dùng VIP không cần NFT (stake token)
+//! * Xử lý quá trình kích hoạt và hết hạn của NFT VIP
+//!
+//! Module này cung cấp các cấu trúc dữ liệu và chức năng cần thiết để xác minh tư cách
+//! VIP của người dùng thông qua sở hữu NFT, đồng thời hỗ trợ các trường hợp đặc biệt
+//! như sử dụng stake token để thay thế NFT. Module làm việc chặt chẽ với các
+//! module vip và user_subscription để đảm bảo trải nghiệm liền mạch cho người dùng VIP.
+
 //! Định nghĩa các kiểu dữ liệu liên quan đến NFT.
 
 // Standard library imports
