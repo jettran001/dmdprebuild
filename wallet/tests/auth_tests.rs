@@ -30,14 +30,22 @@ async fn test_verify_free_user() {
     // Kiểm tra verify_free_user
     let result = manager.verify_free_user(&handler, address).await;
     assert!(result.is_ok(), "Verify free user thất bại: {:?}", result);
-    assert!(result.unwrap(), "Ví phải được xác minh là free user");
+    
+    if let Ok(is_verified) = result {
+        assert!(is_verified, "Ví phải được xác minh là free user");
+    } else {
+        panic!("Kiểm tra xác minh free user thất bại");
+    }
     
     // Kiểm tra dữ liệu người dùng
     let user_data = manager.get_user_data(&user_id).await;
     assert!(user_data.is_ok(), "Không thể lấy dữ liệu user: {:?}", user_data);
-    let data = user_data.unwrap();
     
-    assert_eq!(data.user_id, user_id, "User ID không khớp");
-    assert_eq!(data.status, UserStatus::Active, "Trạng thái không đúng");
-    assert!(data.wallet_addresses.contains(&address), "Địa chỉ ví không được lưu");
+    if let Ok(data) = user_data {
+        assert_eq!(data.user_id, user_id, "User ID không khớp");
+        assert_eq!(data.status, UserStatus::Active, "Trạng thái không đúng");
+        assert!(data.wallet_addresses.contains(&address), "Địa chỉ ví không được lưu");
+    } else {
+        panic!("Không thể lấy dữ liệu người dùng");
+    }
 }

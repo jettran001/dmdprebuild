@@ -179,17 +179,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_add_chain() {
-        let mut manager = ChainManager::new();
+    fn test_add_and_get_chain() {
+        let manager = DefaultChainManager::new();
         let config = ChainConfig {
             chain_id: 999,
             chain_type: ChainType::EVM,
             name: "Test Chain".to_string(),
-            rpc_url: "https://test-rpc.com".to_string(),
+            rpc_url: "https://test.rpc".to_string(),
             native_token: "TEST".to_string(),
         };
+        
         assert!(manager.add_chain(config.clone()).is_ok());
-        assert_eq!(manager.get_chain_config(999).unwrap(), &config);
+        
+        match manager.get_chain_config(999) {
+            Ok(retrieved_config) => assert_eq!(retrieved_config, &config),
+            Err(_) => panic!("Should be able to retrieve chain config"),
+        }
     }
 
     #[test]

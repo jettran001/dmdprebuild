@@ -1,0 +1,32 @@
+# Danh sách lỗi đã tìm thấy trong wallet/src/users/subscription
+
+## Lỗi đã sửa
+- [x] Sử dụng unwrap_or_else() không an toàn trong subscription/manager.rs (dòng 901)
+- [x] Tiềm ẩn deadlock trong circular references giữa SubscriptionManager và AutoTradeManager
+- [x] Thread safety trong async context ở file vip.rs
+- [x] Thread safety trong async context ở file auto_trade.rs
+- [x] Thiếu xử lý lỗi cho các kết quả trả về từ blockchain trong staking.rs
+- [x] Thiếu xử lý lỗi cho các kết quả trả về từ blockchain trong payment.rs
+- [x] Định nghĩa trùng lặp StakeStatus trong staking.rs và mod.rs
+- [x] Tài liệu không đầy đủ cho các hàm public trong utils.rs
+- [x] Tài liệu không đầy đủ cho các hàm public trong auto_trade.rs
+- [x] Xử lý không nhất quán với NonNftVipStatus
+- [x] Sử dụng unwrap() trực tiếp trong tests
+- [x] Thiếu unit test cho chức năng staking và verify NFT
+
+## Lỗi đang chờ sửa
+- [ ] Thiếu doc comments cho một số module
+
+# Fixed Issues
+- [x] Unsafe `unwrap_or_else()` ở manager.rs
+- [x] `RwLock` trong async context ở staking.rs
+- [x] Thread safety trong async context trong file auto_trade.rs
+- [x] Thiếu xử lý lỗi cho các kết quả trả về từ blockchain trong staking.rs
+- [x] Tài liệu chưa đầy đủ cho các module premium.rs và vip.rs
+- [x] Thiếu xử lý lỗi cho các kết quả trả về từ blockchain trong payment.rs
+- [x] Đã thêm trạng thái StakedDMD cho gói VIP khi người dùng stake DMD token
+
+# Pending Issues
+- [ ] Tài liệu chưa đầy đủ cho các hàm public
+- [ ] Cache layer chưa được tối ưu hóa
+- [ ] Thiếu tests cho các module

@@ -26,7 +26,7 @@ pub enum VipUserStatus {
 }
 
 /// Trạng thái khi VIP không còn NFT trong ví
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NonNftVipStatus {
     /// Còn NFT, không có vấn đề gì
     Valid,
@@ -36,6 +36,8 @@ pub enum NonNftVipStatus {
     Downgrade,
     /// Người dùng chọn tạm dừng đăng ký
     Pause,
+    /// Người dùng đã stake DMD token cho gói VIP 12 tháng, không cần NFT
+    StakedDMD,
 }
 
 impl Default for NonNftVipStatus {

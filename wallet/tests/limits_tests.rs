@@ -42,7 +42,12 @@ async fn test_transaction_limits() {
     // Kiểm tra có thể giao dịch không
     let can_tx = manager.can_perform_transaction(&user_id).await;
     assert!(can_tx.is_ok(), "Kiểm tra giới hạn giao dịch lỗi");
-    assert!(!can_tx.unwrap(), "Người dùng vượt quá giới hạn giao dịch vẫn có thể giao dịch");
+    
+    if let Ok(can_transact) = can_tx {
+        assert!(!can_transact, "Người dùng vượt quá giới hạn giao dịch vẫn có thể giao dịch");
+    } else {
+        panic!("Kiểm tra khả năng giao dịch thất bại");
+    }
 }
 
 #[tokio::test]
@@ -76,7 +81,12 @@ async fn test_snipebot_limits() {
     // Kiểm tra có thể sử dụng snipebot không
     let can_snipe = manager.can_use_snipebot(&user_id).await;
     assert!(can_snipe.is_ok(), "Kiểm tra giới hạn snipebot lỗi");
-    assert!(!can_snipe.unwrap(), "Người dùng vượt quá giới hạn snipebot vẫn có thể snipe");
+    
+    if let Ok(can_use) = can_snipe {
+        assert!(!can_use, "Người dùng vượt quá giới hạn snipebot vẫn có thể snipe");
+    } else {
+        panic!("Kiểm tra khả năng sử dụng snipebot thất bại");
+    }
 }
 
 #[tokio::test]

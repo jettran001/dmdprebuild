@@ -30,6 +30,7 @@
           "Mỗi khi yêu cầu quét cấu trúc dữ liệu, LUÔN đọc manifest.rs đầu tiên",
           "Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs để xác định vị trí chính xác",
           "Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm"
+          "Khi được yêu cầu quét cấu trúc và tìm lỗi, các lỗi tìm thấy sẽ được cập nhật nội dung có kèm path file và dòng lỗi vào file .bugs "
         ]
       },
       "project_entry": {
@@ -44,7 +45,7 @@
         "rules": [
           "Kiểm tra cấu trúc module và dependencies dựa trên manifest.rs",
           "Xác định quy tắc về import order, thread safety, async patterns, error handling, type handling, caching, testing",
-          "Không vi phạm bất kỳ quy tắc nào trong .cursorrc",
+          "Không vi phạm bất kỳ quy tắc nào trong .rules",
           "Duy trì thứ tự ưu tiên module như trong manifest.rs"
         ]
       },
@@ -63,7 +64,8 @@
           "Duy trì cấu trúc module như trong manifest.rs",
           "Tuân thủ các mẫu thiết kế đã thiết lập",
           "Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác",
-          "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo"
+          "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo",
+          "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp",
         ]
       },
       "post_check": {
@@ -71,7 +73,8 @@
         "description": "BẮT BUỘC kiểm tra sau khi chỉnh sửa",
         "rules": [
           "Kiểm tra tính toàn vẹn module sau khi chỉnh sửa",
-          "Cập nhật tài liệu khi thay đổi chức năng"
+          "Cập nhật tài liệu khi thay đổi chức năng",
+          "Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs"
         ]
       },
       "module_synchronization": {

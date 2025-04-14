@@ -6,7 +6,14 @@
 //! - Xác thực và quản lý NFT VIP
 //! - Quản lý Auto Trade
 //! - Tính năng của từng gói đăng ký
+//! - Quản lý token staking (DMD ERC-1155) với 30% APY hàng năm
+//! - Yêu cầu NFT cho gói VIP (30 ngày) và gói VIP (12 tháng)
+//! - Gói 12 tháng stake token không cần kiểm tra NFT sau khi đăng ký
+//! 
+//! Module này là trung tâm quản lý tất cả các đăng ký người dùng, và cung cấp
+//! giao diện thống nhất cho việc nâng cấp, hạ cấp, kiểm tra các tính năng.
 
+// Private modules
 mod auto_trade;
 mod constants;
 mod manager;
@@ -15,23 +22,31 @@ mod types;
 mod user_subscription;
 mod utils;
 mod vip;
-pub mod payment;
-pub mod events;
+mod staking;
+mod events;
+mod payment;
 
+// Test modules
 #[cfg(test)]
 mod tests;
 
 // Re-export tất cả public items từ các module con
-pub use auto_trade::*;
+// Cấu trúc re-export tuân theo thứ tự ưu tiên trong manifest
+pub use manager::SubscriptionManager;
+pub use staking::{StakingManager, TokenStake, StakeStatus, StakingError};
+pub use events::{EventType, EventEmitter, SubscriptionEvent};
+pub use payment::PaymentProcessor;
+pub use types::{
+    SubscriptionType, SubscriptionStatus, Feature, 
+    PaymentToken, SubscriptionPlan, TransactionCheckResult, 
+    SubscriptionRecord
+};
+pub use user_subscription::UserSubscription;
+pub use nft::{NftInfo, VipNftInfo, NonNftVipStatus};
+pub use auto_trade::{AutoTradeManager, AutoTradeUsage, AutoTradeStatus};
 pub use constants::*;
-pub use manager::*;
-pub use nft::*;
-pub use types::{SubscriptionType, SubscriptionStatus, Feature, PaymentToken, SubscriptionPlan, TransactionCheckResult, SubscriptionRecord};
-pub use user_subscription::*;
 pub use utils::*;
 pub use vip::*;
-pub use payment::*;
-pub use events::*;
 
 // Các type alias và utility functions
 pub type SubscriptionResult<T> = Result<T, SubscriptionError>;
@@ -62,6 +77,9 @@ pub enum SubscriptionError {
     
     #[error("Lỗi khi xử lý Auto Trade: {0}")]
     AutoTradeError(String),
+    
+    #[error("Lỗi khi xử lý Staking: {0}")]
+    StakingError(String),
     
     #[error("Lỗi cơ sở dữ liệu: {0}")]
     DatabaseError(String),

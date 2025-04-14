@@ -39,12 +39,15 @@ async fn test_record_transaction() {
     // Kiểm tra lịch sử giao dịch
     let tx_history = manager.get_transaction_history(&user_id).await;
     assert!(tx_history.is_ok(), "Lấy lịch sử giao dịch thất bại");
-    let history = tx_history.unwrap();
     
-    assert_eq!(history.len(), 1, "Lịch sử giao dịch phải có đúng 1 mục");
-    assert_eq!(history[0].tx_id, tx_id, "ID giao dịch không khớp");
-    assert_eq!(history[0].wallet_address, address, "Địa chỉ ví không khớp");
-    assert_eq!(history[0].tx_type, TransactionType::Send, "Loại giao dịch không khớp");
+    if let Ok(history) = tx_history {
+        assert_eq!(history.len(), 1, "Lịch sử giao dịch phải có đúng 1 mục");
+        assert_eq!(history[0].tx_id, tx_id, "ID giao dịch không khớp");
+        assert_eq!(history[0].wallet_address, address, "Địa chỉ ví không khớp");
+        assert_eq!(history[0].tx_type, TransactionType::Send, "Loại giao dịch không khớp");
+    } else {
+        panic!("Không thể lấy lịch sử giao dịch");
+    }
 }
 
 #[tokio::test]
@@ -76,10 +79,13 @@ async fn test_record_snipebot_attempt() {
     // Kiểm tra lịch sử snipebot
     let snipe_history = manager.get_snipebot_history(&user_id).await;
     assert!(snipe_history.is_ok(), "Lấy lịch sử snipebot thất bại");
-    let history = snipe_history.unwrap();
     
-    assert_eq!(history.len(), 1, "Lịch sử snipebot phải có đúng 1 mục");
-    assert_eq!(history[0].attempt_id, attempt_id, "ID lần thử không khớp");
-    assert_eq!(history[0].wallet_address, address, "Địa chỉ ví không khớp");
-    assert_eq!(history[0].result, SnipeResult::Success, "Kết quả không khớp");
+    if let Ok(history) = snipe_history {
+        assert_eq!(history.len(), 1, "Lịch sử snipebot phải có đúng 1 mục");
+        assert_eq!(history[0].attempt_id, attempt_id, "ID lần thử không khớp");
+        assert_eq!(history[0].wallet_address, address, "Địa chỉ ví không khớp");
+        assert_eq!(history[0].result, SnipeResult::Success, "Kết quả không khớp");
+    } else {
+        panic!("Không thể lấy lịch sử snipebot");
+    }
 }

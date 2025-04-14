@@ -42,7 +42,11 @@ pub const SUBSCRIPTION_EXPIRY_WARNING_DAYS: i64 = 7;
 /// Định nghĩa thời gian auto trade
 pub const FREE_USER_AUTO_TRADE_MINUTES: i64 = 30;
 pub const PREMIUM_USER_AUTO_TRADE_HOURS: i64 = 6;
-pub const VIP_USER_AUTO_TRADE_HOURS: i64 = 24;
+pub const VIP_USER_AUTO_TRADE_HOURS: i64 = 12;
+/// Thời gian auto trade bổ sung cho người dùng VIP gói 12 tháng (giờ)
+pub const VIP_STAKE_BONUS_AUTO_TRADE_HOURS: i64 = 3;
+/// Tổng thời gian auto trade cho người dùng VIP gói 12 tháng (giờ)
+pub const VIP_STAKE_TOTAL_AUTO_TRADE_HOURS: i64 = VIP_USER_AUTO_TRADE_HOURS + VIP_STAKE_BONUS_AUTO_TRADE_HOURS;
 
 /// Số ngày reset cho người dùng miễn phí
 pub const FREE_USER_RESET_DAYS: i64 = 7;
@@ -259,4 +263,65 @@ pub const LIFETIME_AUTO_TRADE_COUNT: usize = 1000;
 pub const FREE_AUTO_TRADE_BOT_LIMIT: u32 = 0;
 pub const PREMIUM_AUTO_TRADE_BOT_LIMIT: u32 = 1;
 pub const VIP_AUTO_TRADE_BOT_LIMIT: u32 = 3;
-pub const LIFETIME_AUTO_TRADE_BOT_LIMIT: u32 = 5; 
+pub const LIFETIME_AUTO_TRADE_BOT_LIMIT: u32 = 5;
+
+/// Phần trăm giảm giá cho gói đăng ký 12 tháng 
+pub const TWELVE_MONTH_DISCOUNT_PERCENTAGE: u8 = 20;
+
+/// Thời gian khóa token DMD trong gói 12 tháng (ngày)
+pub const TWELVE_MONTH_STAKE_DAYS: i64 = 365;
+
+/// Phần trăm lợi nhuận cho token DMD được stake (hàng năm)
+pub const STAKED_DMD_APY_PERCENTAGE: Decimal = Decimal::new(3000, 2); // 30%
+
+/// Số lượng tối thiểu DMD cần khóa trong pool stake
+pub const MIN_DMD_STAKE_AMOUNT: Decimal = Decimal::new(100000, 2); // 1000 DMD
+
+/// Địa chỉ hợp đồng staking pool DMD
+pub const DMD_STAKING_POOL_ADDRESS: &str = "0x89a456789bcdef123456789abcdef123456789ab";
+
+/// Thời gian giữa hai lần tính lợi nhuận staking (ngày)
+pub const STAKING_REWARD_INTERVAL_DAYS: i64 = 30;
+
+/// Giá cho việc nâng cấp từ Free lên Premium (USDC)
+pub const FREE_TO_PREMIUM_UPGRADE_PRICE_USDC: Decimal = Decimal::new(10000, 2); // $100.00
+
+/// Giá cho việc nâng cấp từ Premium lên VIP (USDC)
+pub const PREMIUM_TO_VIP_UPGRADE_PRICE_USDC: Decimal = Decimal::new(30000, 2); // $300.00
+
+/// Giá cho việc nâng cấp từ Free lên VIP trực tiếp (USDC)
+pub const FREE_TO_VIP_UPGRADE_PRICE_USDC: Decimal = Decimal::new(40000, 2); // $400.00
+
+/// Giá cho việc nâng cấp từ Free lên VIP trực tiếp (DMD)
+pub const FREE_TO_VIP_UPGRADE_PRICE_DMD: Decimal = Decimal::new(100000, 2); // 1000 DMD
+
+/// Giá gốc gói VIP 12 tháng trước khi giảm giá (USDC)
+pub const VIP_TWELVE_MONTH_BASE_PRICE_USDC: Decimal = Decimal::new(480000, 2); // $4800.00
+
+/// Giá cho gói đăng ký VIP 12 tháng (USDC)
+pub const VIP_TWELVE_MONTH_PRICE_USDC: Decimal = Decimal::new(384000, 2); // $3840.00 (giảm 20% từ $4800)
+
+/// Giá cho gói đăng ký VIP 12 tháng (DMD)
+pub const VIP_TWELVE_MONTH_PRICE_DMD: Decimal = Decimal::new(800000, 2); // 8000 DMD (giảm 20%)
+
+/// Loại token ERC-1155 dùng cho staking
+pub const DMD_STAKING_TOKEN_ID: u64 = 1155001;
+
+// Auto-trade constants
+/// Số giờ mỗi ngày người dùng mặc định có thể sử dụng auto-trade
+pub const BASE_USER_AUTO_TRADE_HOURS: u64 = 1;
+/// Số giờ mỗi ngày người dùng Premium có thể sử dụng auto-trade
+pub const PREMIUM_USER_AUTO_TRADE_HOURS: u64 = 6;
+/// Số giờ mỗi ngày người dùng VIP có thể sử dụng auto-trade
+pub const VIP_USER_AUTO_TRADE_HOURS: u64 = 12;
+/// Số giờ mỗi ngày người dùng VIP 12 tháng được thêm để sử dụng auto-trade
+pub const VIP_STAKE_BONUS_AUTO_TRADE_HOURS: u64 = 3;
+/// Tổng số giờ mỗi ngày người dùng VIP 12 tháng có thể sử dụng auto-trade
+pub const VIP_STAKE_TOTAL_AUTO_TRADE_HOURS: u64 = VIP_USER_AUTO_TRADE_HOURS + VIP_STAKE_BONUS_AUTO_TRADE_HOURS;
+
+/// Ngưỡng phút còn lại để gửi cảnh báo sắp hết thời gian auto-trade
+pub const AUTO_TRADE_WARNING_MINUTES: i64 = 60; // Cảnh báo khi còn 60 phút
+/// Ngưỡng phần trăm thời gian còn lại để hiển thị cảnh báo (10%)
+pub const AUTO_TRADE_TIME_WARNING_THRESHOLD: i64 = 60; // Phút
+/// Chu kỳ kiểm tra định kỳ auto-trade (1 giờ)
+pub const AUTO_TRADE_PERIODIC_CHECK_INTERVAL: StdDuration = StdDuration::from_secs(3600); 

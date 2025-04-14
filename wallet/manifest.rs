@@ -44,13 +44,15 @@
     │   │   ├── mod.rs             -> Khai báo submodule
     │   │   ├── manager.rs         -> Quản lý tổng thể đăng ký
     │   │   ├── user_subscription.rs -> Cấu trúc dữ liệu đăng ký
-    │   │   ├── types.rs           -> Kiểu dữ liệu đăng ký
-    │   │   ├── constants.rs       -> Hằng số và tham số cấu hình
+    │   │   ├── types.rs           -> Kiểu dữ liệu đăng ký (sử dụng StakeStatus từ staking.rs)
+    │   │   ├── constants.rs       -> Hằng số và tham số cấu hình (stake amounts, APY, giá gói)
     │   │   ├── auto_trade.rs      -> Quản lý thời gian auto-trade
     │   │   ├── nft.rs             -> Kiểm tra và xác thực NFT
+    │   │   ├── staking.rs         -> Quản lý stake DMD token (ERC-1155) cho gói 12 tháng, 30% APY
     │   │   ├── payment.rs         -> Xử lý thanh toán đăng ký
     │   │   ├── events.rs          -> Phát và quản lý sự kiện đăng ký
-    │   │   └── tests.rs          -> Unit tests cho subscription
+    │   │   ├── utils.rs           -> Các tiện ích và helper function
+    │   │   └── tests.rs           -> Unit tests cho subscription
     │   ├── premium_user.rs        -> Logic người dùng premium
     │   ├── vip_user.rs            -> Logic người dùng VIP
     │   └── subscription.rs        -> (Sắp di chuyển sang thư mục subscription)
@@ -72,6 +74,10 @@
     - users::subscription::nft phụ thuộc vào walletmanager để kiểm tra NFT
     - users::subscription::payment phụ thuộc vào blockchain để xác minh giao dịch
     - users::subscription::events gửi thông báo khi có thay đổi subscription
+    - users::subscription::staking phụ thuộc vào walletmanager::api để tương tác với blockchain
+    - users::subscription::staking quản lý DMD token chuẩn ERC-1155 và cung cấp 30% APY hàng năm
+    - users::subscription::manager::stake_tokens_for_subscription yêu cầu bắt buộc có NFT trong ví
+    - users::subscription::manager::verify_all_nft_ownership bỏ qua kiểm tra NFT cho gói 12 tháng stake
     - main.rs dùng walletmanager và config để demo
 */
 
@@ -90,14 +96,25 @@ pub mod users;         // Quản lý người dùng và đăng ký
  * - use crate::walletlogic::handler::WalletHandler;
  * - use crate::walletmanager::api::WalletManagerApi;
  * - use crate::users::subscription::manager::SubscriptionManager;
+ * - use crate::users::subscription::staking::{StakingManager, TokenStake, StakeStatus};
  * 
  * 2. Import từ external crates (từ snipebot hoặc blockchain):
  * - use wallet::walletmanager::api::WalletManagerApi;
  * - use wallet::users::subscription::manager::SubscriptionManager;
+ * - use wallet::users::subscription::staking::StakingManager;
  * 
  * 3. Import error types:
  * - use crate::error::{WalletError, Result};
+ * - use crate::users::subscription::staking::StakingError;
  * 
  * 4. Import các events:
  * - use crate::users::subscription::events::{SubscriptionEvent, EventType};
+ * 
+ * 5. Pricing constants cho subscription:
+ * - use crate::users::subscription::constants::{FREE_TO_PREMIUM_UPGRADE_PRICE_USDC, 
+ *                                            PREMIUM_TO_VIP_UPGRADE_PRICE_USDC,
+ *                                            FREE_TO_VIP_UPGRADE_PRICE_USDC,
+ *                                            VIP_TWELVE_MONTH_PRICE_USDC,
+ *                                            MIN_DMD_STAKE_AMOUNT,
+ *                                            STAKED_DMD_APY_PERCENTAGE};
  */

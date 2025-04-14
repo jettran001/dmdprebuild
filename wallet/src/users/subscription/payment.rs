@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, error};
+use tracing::{info, error, warn, debug};
+use std::time::Duration;
 
 use crate::blockchain::types::TokenInfo;
 use crate::error::AppResult;
@@ -145,23 +146,42 @@ impl PaymentProcessor {
     
     /// Kiểm tra giao dịch một lần
     async fn check_transaction_once(&self, tx_hash: &str) -> Result<TransactionCheckResult, WalletError> {
-        // TODO: Triển khai chi tiết kết nối blockchain và kiểm tra giao dịch
-        // Đây là code mẫu để giả lập việc kiểm tra
+        // Kiểm tra tính hợp lệ của hash giao dịch
+        if !validate_transaction_hash(tx_hash) {
+            return Err(WalletError::InvalidTransactionHash);
+        }
+
+        // Kết nối đến blockchain và truy vấn thông tin giao dịch
+        // TODO: Triển khai chi tiết kết nối blockchain và kiểm tra giao dịch thực tế
         
         // Giả lập các kết quả khác nhau dựa trên hash giao dịch (cho mục đích demo)
         if tx_hash.starts_with("0xc") {
             // Đã xác nhận
-            let token_info = TokenInfo {
-                address: self.usdc_token_address,
-                name: "USDC".to_string(),
-                symbol: "USDC".to_string(),
-                decimals: 6,
+            let token_info = match self.get_token_info_from_tx(tx_hash).await {
+                Ok(info) => info,
+                Err(e) => {
+                    error!("Không thể lấy thông tin token từ giao dịch {}: {:?}", tx_hash, e);
+                    return Err(WalletError::BlockchainQueryError(format!("Không thể lấy thông tin token: {}", e)));
+                }
             };
+            
+            let amount = match self.get_transaction_amount(tx_hash).await {
+                Ok(amount) => amount,
+                Err(e) => {
+                    error!("Không thể lấy số lượng token từ giao dịch {}: {:?}", tx_hash, e);
+                    return Err(WalletError::BlockchainQueryError(format!("Không thể lấy số lượng token: {}", e)));
+                }
+            };
+            
+            let plan = self.determine_subscription_plan(&amount, &token_info).map_err(|e| {
+                error!("Không thể xác định gói đăng ký từ giao dịch {}: {:?}", tx_hash, e);
+                WalletError::InvalidSubscriptionPlan
+            })?;
             
             return Ok(TransactionCheckResult::Confirmed {
                 token: token_info,
-                amount: U256::from(100), // Ví dụ: 100 USDC
-                plan: SubscriptionType::Premium,
+                amount,
+                plan,
                 tx_id: tx_hash.to_string(),
             });
         } else if tx_hash.starts_with("0xp") {
@@ -169,13 +189,95 @@ impl PaymentProcessor {
             return Ok(TransactionCheckResult::Pending);
         } else if tx_hash.starts_with("0xf") {
             // Thất bại
+            let reason = match self.get_transaction_failure_reason(tx_hash).await {
+                Ok(reason) => reason,
+                Err(e) => {
+                    error!("Không thể lấy lý do thất bại từ giao dịch {}: {:?}", tx_hash, e);
+                    "Không xác định được lý do thất bại".to_string()
+                }
+            };
+            
             return Ok(TransactionCheckResult::Failed {
-                reason: "Giao dịch bị từ chối bởi mạng".to_string(),
+                reason,
             });
+        } else if tx_hash.starts_with("0xe") {
+            // Lỗi mạng
+            return Err(WalletError::NetworkError("Không thể kết nối đến blockchain".to_string()));
+        } else if tx_hash.starts_with("0xr") {
+            // Lỗi rpc
+            return Err(WalletError::RpcError("Lỗi từ node RPC".to_string()));
         }
         
         // Không tìm thấy
         Ok(TransactionCheckResult::Timeout)
+    }
+    
+    /// Lấy thông tin token từ giao dịch
+    async fn get_token_info_from_tx(&self, tx_hash: &str) -> Result<TokenInfo, WalletError> {
+        // TODO: Triển khai chi tiết kết nối blockchain và lấy thông tin token
+        // Đây là code mẫu để giả lập
+        
+        // Mô phỏng một số lỗi ngẫu nhiên để kiểm tra xử lý lỗi
+        if tx_hash.ends_with("ff") {
+            return Err(WalletError::BlockchainQueryError("Lỗi truy vấn thông tin token".to_string()));
+        }
+        
+        Ok(TokenInfo {
+            address: self.usdc_token_address,
+            name: "USDC".to_string(),
+            symbol: "USDC".to_string(),
+            decimals: 6,
+        })
+    }
+    
+    /// Lấy số lượng token từ giao dịch
+    async fn get_transaction_amount(&self, tx_hash: &str) -> Result<U256, WalletError> {
+        // TODO: Triển khai chi tiết kết nối blockchain và lấy số lượng token
+        // Đây là code mẫu để giả lập
+        
+        // Mô phỏng một số lỗi ngẫu nhiên để kiểm tra xử lý lỗi
+        if tx_hash.ends_with("ee") {
+            return Err(WalletError::BlockchainQueryError("Lỗi truy vấn số lượng token".to_string()));
+        }
+        
+        Ok(U256::from(100))
+    }
+    
+    /// Xác định gói đăng ký dựa trên số lượng token và loại token
+    fn determine_subscription_plan(&self, amount: &U256, token_info: &TokenInfo) -> Result<SubscriptionType, WalletError> {
+        // TODO: Triển khai logic xác định gói đăng ký dựa trên số lượng token
+        // Đây là code mẫu để giả lập
+        
+        if amount >= &U256::from(1000) {
+            Ok(SubscriptionType::VIP)
+        } else if amount >= &U256::from(100) {
+            Ok(SubscriptionType::Premium)
+        } else if amount >= &U256::from(10) {
+            Ok(SubscriptionType::Free)
+        } else {
+            Err(WalletError::InsufficientPaymentAmount)
+        }
+    }
+    
+    /// Lấy lý do thất bại của giao dịch
+    async fn get_transaction_failure_reason(&self, tx_hash: &str) -> Result<String, WalletError> {
+        // TODO: Triển khai chi tiết kết nối blockchain và lấy lý do thất bại
+        // Đây là code mẫu để giả lập
+        
+        // Mô phỏng một số lỗi ngẫu nhiên để kiểm tra xử lý lỗi
+        if tx_hash.ends_with("dd") {
+            return Err(WalletError::BlockchainQueryError("Lỗi truy vấn lý do thất bại".to_string()));
+        }
+        
+        if tx_hash.ends_with("1") {
+            Ok("Số dư không đủ".to_string())
+        } else if tx_hash.ends_with("2") {
+            Ok("Gas price quá thấp".to_string())
+        } else if tx_hash.ends_with("3") {
+            Ok("Giao dịch bị hủy bởi người dùng".to_string())
+        } else {
+            Ok("Giao dịch bị từ chối bởi mạng".to_string())
+        }
     }
     
     /// Xác nhận giao dịch đã được xử lý và cập nhật thông tin
@@ -365,28 +467,401 @@ impl PaymentManager {
 
     /// Kiểm tra trạng thái của một giao dịch cụ thể
     async fn check_transaction_status(&self, tx: &PaymentTransaction) -> Result<TransactionStatus, WalletError> {
-        // Kiểm tra trạng thái giao dịch trên blockchain
-        // TODO: Cần triển khai chi tiết kết nối với blockchain thông qua wallet_manager
+        // Thực hiện kiểm tra với cơ chế thử lại
+        let mut retries = 0;
+        let max_retries = 3;
+        let mut last_error = None;
+
+        while retries < max_retries {
+            match self.check_transaction_once(tx).await {
+                Ok(status) => return Ok(status),
+                Err(e) => {
+                    // Ghi log lỗi
+                    warn!(
+                        "Lần thử {}/{}: Lỗi khi kiểm tra giao dịch {}: {:?}",
+                        retries + 1, max_retries, tx.tx_hash, e
+                    );
+                    
+                    // Lưu lỗi mới nhất
+                    last_error = Some(e);
+                    
+                    // Đợi một chút trước khi thử lại
+                    tokio::time::sleep(Duration::from_secs(2 * (retries + 1) as u64)).await;
+                    
+                    retries += 1;
+                }
+            }
+        }
+
+        // Trả về lỗi cuối cùng sau khi đã thử tối đa số lần
+        Err(last_error.unwrap_or(WalletError::BlockchainQueryError(
+            "Đã vượt quá số lần thử tối đa khi kiểm tra trạng thái giao dịch".to_string()
+        )))
+    }
+
+    /// Thực hiện một lần kiểm tra trạng thái giao dịch
+    async fn check_transaction_once(&self, tx: &PaymentTransaction) -> Result<TransactionStatus, WalletError> {
+        // Ghi log bắt đầu kiểm tra
+        debug!("Bắt đầu kiểm tra trạng thái giao dịch: {:?}", tx.tx_hash);
         
-        // Giả lập kiểm tra trạng thái giao dịch cho mục đích demo
+        // Kiểm tra tham số đầu vào
+        if tx.user_id.is_empty() {
+            error!("user_id không hợp lệ khi kiểm tra giao dịch: {:?}", tx.tx_hash);
+            return Err(WalletError::InvalidParameter("user_id không được để trống".to_string()));
+        }
+        
+        // Lấy hash giao dịch dưới dạng chuỗi để demo
         let tx_hash_str = format!("{:?}", tx.tx_hash);
         
-        if tx_hash_str.starts_with("0xc") {
-            // Đã xác nhận
-            return Ok(TransactionStatus::Confirmed);
-        } else if tx_hash_str.starts_with("0xp") {
-            // Vẫn đang chờ
-            return Ok(TransactionStatus::Pending);
-        } else if tx_hash_str.starts_with("0xf") {
-            // Thất bại
-            return Ok(TransactionStatus::Failed);
-        } else if tx.retry_count > 10 {
-            // Quá nhiều lần thử, coi như hết hạn
+        // Kiểm tra tính hợp lệ của hash giao dịch
+        if tx_hash_str.len() < 10 || !tx_hash_str.starts_with("0x") {
+            error!("Hash giao dịch không hợp lệ: {}", tx_hash_str);
+            return Err(WalletError::InvalidTransactionHash);
+        }
+        
+        // Kiểm tra thời gian chờ xử lý, nếu quá lâu thì đánh dấu là hết hạn
+        let now = Utc::now();
+        let transaction_age = now.signed_duration_since(tx.timestamp);
+        if transaction_age > chrono::Duration::hours(24) {
+            warn!("Giao dịch {} đã quá thời gian chờ xử lý (24 giờ)", tx_hash_str);
             return Ok(TransactionStatus::Expired);
         }
         
+        // Thử kết nối với blockchain để lấy thông tin giao dịch
+        let transaction_result = match self.wallet_manager.get_transaction(&tx_hash_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Lỗi khi lấy thông tin giao dịch từ blockchain: {}: {:?}", tx_hash_str, e);
+                
+                // Phân loại lỗi để xử lý phù hợp
+                match e {
+                    WalletError::NetworkError(ref msg) => {
+                        error!("Lỗi mạng khi lấy thông tin giao dịch {}: {}", tx_hash_str, msg);
+                        // Đối với lỗi mạng, giữ trạng thái hiện tại và thử lại sau
+                        return Ok(tx.status);
+                    },
+                    WalletError::TimeoutError(ref msg) => {
+                        warn!("Timeout khi lấy thông tin giao dịch {}: {}", tx_hash_str, msg);
+                        // Đối với timeout, giữ trạng thái hiện tại và thử lại sau
+                        return Ok(tx.status);
+                    },
+                    WalletError::RpcError(ref msg) => {
+                        error!("Lỗi RPC khi lấy thông tin giao dịch {}: {}", tx_hash_str, msg);
+                        // Đối với lỗi RPC, giữ trạng thái hiện tại và thử lại sau
+                        return Ok(tx.status);
+                    },
+                    _ => {
+                        // Trả về lỗi cho các trường hợp khác để xử lý ở tầng cao hơn
+                        return Err(e);
+                    }
+                }
+            }
+        };
+        
+        // Kiểm tra xem giao dịch đã được xác nhận chưa
+        if let Some(receipt) = transaction_result.receipt {
+            // Kiểm tra số block xác nhận
+            let confirmations = match transaction_result.confirmations {
+                Some(count) => count,
+                None => {
+                    warn!("Không tìm thấy thông tin xác nhận cho giao dịch {}", tx_hash_str);
+                    return Ok(TransactionStatus::Pending);
+                }
+            };
+            
+            // Kiểm tra xem đã đủ số block xác nhận chưa
+            if confirmations < BLOCKCHAIN_TX_CONFIRMATION_BLOCKS {
+                debug!(
+                    "Giao dịch {} có {} xác nhận, cần tối thiểu {}",
+                    tx_hash_str, confirmations, BLOCKCHAIN_TX_CONFIRMATION_BLOCKS
+                );
+                return Ok(TransactionStatus::Pending);
+            }
+            
+            // Kiểm tra xem giao dịch có thành công không
+            if receipt.status.unwrap_or_default().as_u64() == 1 {
+                // Xác minh số tiền thanh toán
+                match self.verify_payment_amount(tx).await {
+                    Ok(true) => {
+                        info!("Giao dịch {} thành công và số tiền thanh toán đã được xác minh", tx_hash_str);
+                        return Ok(TransactionStatus::Confirmed);
+                    },
+                    Ok(false) => {
+                        warn!("Giao dịch {} thành công nhưng số tiền thanh toán không đủ", tx_hash_str);
+                        return Ok(TransactionStatus::Failed);
+                    },
+                    Err(e) => {
+                        match e {
+                            WalletError::NetworkError(ref msg) => {
+                                warn!("Lỗi mạng khi xác minh số tiền cho giao dịch {}: {}", tx_hash_str, msg);
+                                // Với lỗi mạng, giữ trạng thái hiện tại và thử lại sau
+                                return Ok(tx.status);
+                            },
+                            WalletError::TimeoutError(ref msg) => {
+                                warn!("Timeout khi xác minh số tiền cho giao dịch {}: {}", tx_hash_str, msg);
+                                // Với timeout, giữ trạng thái hiện tại và thử lại sau
+                                return Ok(tx.status);
+                            },
+                            WalletError::BlockchainQueryError(ref msg) => {
+                                // Ghi log chi tiết về lỗi truy vấn blockchain
+                                error!("Lỗi truy vấn blockchain khi xác minh số tiền cho giao dịch {} từ user {}: {}", 
+                                       tx_hash_str, tx.user_id, msg);
+                                
+                                // Đối với lỗi truy vấn blockchain, giữ trạng thái hiện tại nếu số lần thử ít
+                                if tx.retry_count < 5 {
+                                    return Ok(TransactionStatus::Pending);
+                                } else {
+                                    // Nếu đã thử nhiều lần, đánh dấu là lỗi
+                                    warn!("Đã vượt quá số lần thử xác minh số tiền cho giao dịch {}", tx_hash_str);
+                                    return Ok(TransactionStatus::Failed);
+                                }
+                            },
+                            _ => {
+                                // Ghi log chi tiết về lỗi không xác định
+                                error!("Lỗi không xác định khi xác minh số tiền cho giao dịch {} từ user {}: {:?}", 
+                                       tx_hash_str, tx.user_id, e);
+                                
+                                // Các lỗi khác, đánh dấu là đang chờ xử lý và thử lại sau
+                                return Ok(TransactionStatus::Pending);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Giao dịch thất bại trên blockchain
+                error!("Giao dịch {} thất bại trên blockchain", tx_hash_str);
+                
+                // Thử lấy lý do thất bại
+                let failure_reason = match self.wallet_manager.get_transaction_failure_reason(&tx_hash_str).await {
+                    Ok(reason) => reason,
+                    Err(e) => {
+                        error!("Không thể lấy lý do thất bại cho giao dịch {}: {:?}", tx_hash_str, e);
+                        "Không xác định được lý do thất bại".to_string()
+                    }
+                };
+                
+                // Ghi log chi tiết về lý do thất bại
+                error!(
+                    "Giao dịch thất bại cho user {}: {} - Lý do: {}",
+                    tx.user_id, tx_hash_str, failure_reason
+                );
+                
+                return Ok(TransactionStatus::Failed);
+            }
+        } else if tx_hash_str.starts_with("0xp") {
+            // Vẫn đang chờ
+            debug!("Giao dịch {} vẫn đang chờ xử lý trên blockchain", tx_hash_str);
+            return Ok(TransactionStatus::Pending);
+        } else if tx_hash_str.starts_with("0xf") {
+            // Thất bại
+            // Thử lấy lý do thất bại từ blockchain
+            let failure_reason = match self.wallet_manager.get_transaction_failure_reason(&tx_hash_str).await {
+                Ok(reason) => reason,
+                Err(e) => {
+                    error!("Không thể lấy lý do thất bại cho giao dịch {}: {:?}", tx_hash_str, e);
+                    
+                    match e {
+                        WalletError::NetworkError(ref msg) => {
+                            warn!("Lỗi mạng khi lấy lý do thất bại cho giao dịch {}: {}", tx_hash_str, msg);
+                            // Với lỗi mạng, thử lại sau
+                            return Ok(tx.status);
+                        },
+                        _ => "Không xác định được lý do thất bại".to_string()
+                    }
+                }
+            };
+            
+            // Ghi log chi tiết về lý do thất bại
+            error!(
+                "Giao dịch thất bại cho user {}: {} - Lý do: {}",
+                tx.user_id, tx_hash_str, failure_reason
+            );
+            
+            return Ok(TransactionStatus::Failed);
+        } else if tx.retry_count > 10 {
+            // Quá nhiều lần thử, coi như hết hạn
+            warn!("Giao dịch {} đã vượt quá số lần thử lại ({}), đánh dấu là hết hạn", tx_hash_str, tx.retry_count);
+            
+            // Ghi log chi tiết về việc giao dịch hết hạn
+            error!(
+                "Giao dịch của user {} hết hạn do vượt quá số lần thử: {} - Loại đăng ký: {:?}",
+                tx.user_id, tx_hash_str, tx.subscription_type
+            );
+            
+            return Ok(TransactionStatus::Expired);
+        } else {
+            // Không tìm thấy thông tin giao dịch
+            warn!("Không tìm thấy thông tin giao dịch {} trên blockchain", tx_hash_str);
+            
+            // Nếu số lần thử ít, giữ nguyên trạng thái
+            if tx.retry_count < 5 {
+                return Ok(TransactionStatus::Pending);
+            } else {
+                // Quá nhiều lần thử, coi như hết hạn
+                warn!("Đã thử {} lần nhưng không tìm thấy giao dịch {}", tx.retry_count, tx_hash_str);
+                return Ok(TransactionStatus::Expired);
+            }
+        }
+        
         // Không có thay đổi
+        debug!("Không có thay đổi trạng thái cho giao dịch {}", tx_hash_str);
         Ok(tx.status)
+    }
+    
+    /// Xác minh số tiền thanh toán từ blockchain
+    async fn verify_payment_amount(&self, tx: &PaymentTransaction) -> Result<bool, WalletError> {
+        let tx_hash_str = format!("{:?}", tx.tx_hash);
+        debug!("Bắt đầu xác minh số tiền thanh toán cho giao dịch: {}", tx_hash_str);
+        
+        // Kiểm tra tham số đầu vào
+        if tx.user_id.is_empty() {
+            error!("user_id không hợp lệ khi xác minh số tiền: {:?}", tx.tx_hash);
+            return Err(WalletError::InvalidParameter("user_id không được để trống".to_string()));
+        }
+        
+        if tx.amount.is_zero() {
+            error!("Số tiền dự kiến không hợp lệ: {:?}", tx.tx_hash);
+            return Err(WalletError::InvalidParameter("Số tiền thanh toán dự kiến không hợp lệ".to_string()));
+        }
+        
+        // Kiểm tra thời gian tồn tại của giao dịch
+        let transaction_age = Utc::now().signed_duration_since(tx.timestamp);
+        if transaction_age > chrono::Duration::hours(72) {
+            warn!("Giao dịch {} quá cũ (> 72 giờ), có thể gặp vấn đề khi xác minh", tx_hash_str);
+            
+            // Ghi log chi tiết về việc giao dịch quá cũ
+            warn!(
+                "Giao dịch của user {} quá cũ (> 72 giờ): {} - Thời gian: {}",
+                tx.user_id, tx_hash_str, tx.timestamp
+            );
+        }
+        
+        // Kiểm tra và lấy số tiền thực tế từ blockchain
+        let actual_amount = match self.wallet_manager.get_transaction_amount(&tx_hash_str).await {
+            Ok(amount) => amount,
+            Err(e) => {
+                error!("Lỗi khi lấy số tiền giao dịch {} từ blockchain: {:?}", tx_hash_str, e);
+                
+                match e {
+                    WalletError::NetworkError(ref msg) => {
+                        error!("Lỗi mạng khi lấy số tiền giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::NetworkError(format!(
+                            "Lỗi mạng khi lấy số tiền giao dịch: {}", msg
+                        )));
+                    },
+                    WalletError::TimeoutError(ref msg) => {
+                        warn!("Timeout khi lấy số tiền giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::TimeoutError(format!(
+                            "Timeout khi lấy số tiền giao dịch: {}", msg
+                        )));
+                    },
+                    WalletError::BlockchainQueryError(ref msg) => {
+                        error!("Lỗi truy vấn blockchain khi lấy số tiền giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::BlockchainQueryError(format!(
+                            "Lỗi truy vấn blockchain khi lấy số tiền: {}", msg
+                        )));
+                    },
+                    WalletError::RpcError(ref msg) => {
+                        error!("Lỗi RPC khi lấy số tiền giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::RpcError(format!(
+                            "Lỗi RPC khi lấy số tiền giao dịch: {}", msg
+                        )));
+                    },
+                    _ => return Err(e),
+                }
+            }
+        };
+        
+        // So sánh số tiền thực tế với số tiền dự kiến
+        if actual_amount < tx.amount {
+            warn!(
+                "Số tiền thanh toán không đủ cho giao dịch {}: Yêu cầu {} nhưng chỉ nhận được {}",
+                tx.tx_hash, tx.amount, actual_amount
+            );
+            
+            // Ghi log chi tiết về số tiền không đủ
+            error!(
+                "Chi tiết thanh toán không đủ - User: {}, Subscription: {:?}, Token: {:?}, Expected: {}, Received: {}",
+                tx.user_id, tx.subscription_type, tx.payment_token, tx.amount, actual_amount
+            );
+            
+            // Kiểm tra xem số tiền có đủ để nâng cấp lên gói thấp hơn không
+            if tx.subscription_type == SubscriptionType::Vip && 
+               actual_amount >= calculate_payment_amount(SubscriptionType::Premium, tx.payment_token) {
+                warn!(
+                    "Số tiền đủ để nâng cấp lên gói Premium cho user {} thay vì VIP: {} - Nhận: {}",
+                    tx.user_id, tx.amount, actual_amount
+                );
+                
+                // TODO: Xử lý logic nâng cấp lên gói thấp hơn dựa trên số tiền thực tế
+                // Trả về true nhưng xử lý ở lớp cao hơn
+                info!(
+                    "Chấp nhận thanh toán với số tiền thấp hơn, điều chỉnh gói đăng ký cho user {}",
+                    tx.user_id
+                );
+                return Ok(true);
+            }
+            
+            return Ok(false);
+        }
+        
+        // Kiểm tra loại token thanh toán
+        let token_info = match self.wallet_manager.get_token_info_from_tx(&tx_hash_str).await {
+            Ok(info) => info,
+            Err(e) => {
+                error!("Lỗi khi lấy thông tin token từ giao dịch {}: {:?}", tx_hash_str, e);
+                
+                match e {
+                    WalletError::NetworkError(ref msg) => {
+                        error!("Lỗi mạng khi lấy thông tin token từ giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::NetworkError(format!(
+                            "Lỗi mạng khi lấy thông tin token: {}", msg
+                        )));
+                    },
+                    WalletError::TimeoutError(ref msg) => {
+                        warn!("Timeout khi lấy thông tin token từ giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::TimeoutError(format!(
+                            "Timeout khi lấy thông tin token: {}", msg
+                        )));
+                    },
+                    WalletError::BlockchainQueryError(ref msg) => {
+                        error!("Lỗi truy vấn blockchain khi lấy thông tin token từ giao dịch {}: {}", tx_hash_str, msg);
+                        return Err(WalletError::BlockchainQueryError(format!(
+                            "Lỗi truy vấn blockchain khi lấy thông tin token: {}", msg
+                        )));
+                    },
+                    _ => return Err(e),
+                }
+            }
+        };
+        
+        // Kiểm tra xem đúng loại token không
+        let expected_token_address = self.wallet_manager.get_token_address(tx.payment_token);
+        if token_info.address != expected_token_address {
+            error!(
+                "Loại token không đúng cho giao dịch {}: Expected {} nhưng nhận được {}",
+                tx_hash_str, expected_token_address, token_info.address
+            );
+            
+            // Ghi log chi tiết về token không đúng
+            error!(
+                "Chi tiết token không đúng - User: {}, Expected: {}, Received: {}, Symbol: {}",
+                tx.user_id, expected_token_address, token_info.address, token_info.symbol
+            );
+            
+            return Ok(false);
+        }
+        
+        // Số tiền đủ
+        debug!("Xác minh thành công số tiền thanh toán cho giao dịch {}", tx_hash_str);
+        
+        // Ghi log thành công
+        info!(
+            "Xác minh thành công thanh toán - User: {}, Hash: {}, Subscription: {:?}, Amount: {}",
+            tx.user_id, tx_hash_str, tx.subscription_type, tx.amount
+        );
+        
+        Ok(true)
     }
 
     /// Cập nhật trạng thái giao dịch

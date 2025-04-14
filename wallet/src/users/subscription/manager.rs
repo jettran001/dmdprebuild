@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn, error};
 use uuid::Uuid;
+use rust_decimal::Decimal;
+use tokio::time::{self, Duration as TokioDuration, interval};
+use thiserror::Error;
 
 // Internal imports
 use crate::error::WalletError;
@@ -27,6 +30,7 @@ use super::{
         Feature, PaymentToken, SubscriptionPlan, SubscriptionStatus, 
         SubscriptionType, TransactionCheckResult, UserSubscription
     },
+    events::{EventType, SubscriptionEvent, EventEmitter},
 };
 
 /// Quản lý đăng ký nâng cấp tài khoản.
@@ -47,6 +51,8 @@ pub struct SubscriptionManager {
     premium_user_manager: Arc<PremiumUserManager>,
     /// Quản lý thời gian sử dụng auto_trade
     auto_trade_manager: Option<Arc<AutoTradeManager>>,
+    /// Event emitter để gửi thông báo
+    event_emitter: Option<EventEmitter>,
 }
 
 impl SubscriptionManager {
@@ -87,6 +93,22 @@ impl SubscriptionManager {
                     Feature::CustomStrategies,
                 ],
             },
+            SubscriptionPlan {
+                plan_type: SubscriptionType::VIP,
+                name: "VIP 12 Month Plan".to_string(),
+                description: "Gói VIP 12 tháng với toàn bộ tính năng không giới hạn và giảm 20% phí".to_string(),
+                price_dmd: 3840, // (100 + 300) * 12 * 0.8 = 3840 (giảm 20%)
+                price_usdc: 3840,
+                duration_days: 365,
+                features: vec![
+                    Feature::AutoTrade,
+                    Feature::AdvancedAnalytics,
+                    Feature::PremiumSupport,
+                    Feature::UnlimitedTransactions,
+                    Feature::CustomStrategies,
+                    Feature::TokenStaking,
+                ],
+            },
         ];
 
         let instance = Self {
@@ -98,6 +120,7 @@ impl SubscriptionManager {
             free_user_manager,
             premium_user_manager,
             auto_trade_manager: None,
+            event_emitter: None,
         };
         
         instance
@@ -107,11 +130,9 @@ impl SubscriptionManager {
     /// Gọi hàm này sau khi đã tạo SubscriptionManager để tránh circular reference.
     ///
     /// # Lưu ý về Thread Safety
-    /// Cần đảm bảo rằng instance này không được sử dụng song song với AutoTradeManager
-    /// để tránh deadlock.
+    /// Sử dụng Weak reference để tránh circular references và deadlock.
     pub fn init_auto_trade_manager(&mut self) {
-        // Tạo một bản copy của instance hiện tại mà không có auto_trade_manager
-        // để tránh circular reference
+        // Tạo một tham chiếu mạnh (Arc) cho SubscriptionManager hiện tại
         let subscription_manager = Arc::new(Self {
             subscription_plans: self.subscription_plans.clone(),
             user_subscriptions: self.user_subscriptions.clone(),
@@ -121,11 +142,14 @@ impl SubscriptionManager {
             free_user_manager: self.free_user_manager.clone(),
             premium_user_manager: self.premium_user_manager.clone(),
             auto_trade_manager: None,
+            event_emitter: self.event_emitter.clone(),
         });
         
-        // Tạo mới AutoTradeManager sử dụng bản copy
+        // Tạo mới AutoTradeManager sử dụng Arc, AutoTradeManager sẽ lưu Weak Reference
         let auto_trade_manager = Arc::new(AutoTradeManager::new(subscription_manager));
         self.auto_trade_manager = Some(auto_trade_manager);
+        
+        info!("Đã khởi tạo AutoTradeManager với Weak reference để tránh circular references");
     }
     
     /// Lấy AutoTradeManager.
@@ -146,6 +170,7 @@ impl SubscriptionManager {
             free_user_manager: self.free_user_manager.clone(),
             premium_user_manager: self.premium_user_manager.clone(),
             auto_trade_manager: None,
+            event_emitter: None,
         }
     }
 
@@ -428,6 +453,847 @@ impl SubscriptionManager {
         Ok(true)
     }
 
-    // Thêm các phương thức khác liên quan đến quản lý subscription
-    // ...
+    /// Nâng cấp tài khoản người dùng khi đăng ký được xác nhận thành công.
+    ///
+    /// # Arguments
+    /// - `user_id`: ID người dùng
+    /// - `subscription_type`: Loại gói đăng ký mới
+    ///
+    /// # Returns
+    /// - `Ok(())`: Nếu nâng cấp thành công
+    /// - `Err`: Nếu có lỗi
+    pub async fn upgrade_user_account(
+        &self,
+        user_id: &str,
+        subscription_type: SubscriptionType,
+    ) -> Result<(), WalletError> {
+        info!("Đang nâng cấp tài khoản của người dùng {} lên {}", user_id, subscription_type);
+        
+        match subscription_type {
+            SubscriptionType::Premium => {
+                // Kiểm tra nếu user đã tồn tại trong free_user_manager
+                let free_user_data = self.free_user_manager.get_user_data(user_id).await
+                    .map_err(|e| WalletError::Other(format!("Không tìm thấy dữ liệu người dùng: {}", e)))?;
+                
+                // Lấy thông tin subscription
+                let end_date = {
+                    let subscriptions = self.user_subscriptions.read().await;
+                    let subscription = subscriptions.get(user_id)
+                        .ok_or(WalletError::Other("Không tìm thấy thông tin đăng ký".to_string()))?;
+                    subscription.end_date
+                };
+                
+                // Tạo dữ liệu premium user mới
+                let premium_user_data = PremiumUserData {
+                    user_id: user_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    wallet_addresses: free_user_data.wallet_addresses.clone(),
+                    subscription_end_date: end_date,
+                };
+                
+                // TODO: Cập nhật premium_user_data vào database (MongoDB)
+                // Ví dụ với MongoDB
+                // let mongodb_client = get_mongodb_client();
+                // let premium_users = mongodb_client.collection("premium_users");
+                // premium_users.insert_one(premium_user_data).await?;
+                
+                info!("Đã nâng cấp người dùng {} lên Premium thành công", user_id);
+                
+                // Tạo Auto Trade Usage cho người dùng premium
+                if let Some(auto_trade_manager) = &self.auto_trade_manager {
+                    // Tạo usage cho người dùng premium
+                    let usage = AutoTradeUsage::new(user_id, &SubscriptionType::Premium);
+                    
+                    // TODO: Lưu auto trade usage vào database
+                    // Ví dụ:
+                    // mongodb_client.collection("auto_trade_usage").insert_one(usage).await?;
+                    
+                    info!("Đã tạo Auto Trade Usage cho người dùng premium {}", user_id);
+                }
+                
+                Ok(())
+            },
+            SubscriptionType::VIP => {
+                // TODO: Thực hiện kiểm tra người dùng Premium
+                // Ví dụ:
+                // let premium_user_data = get_premium_user_data(user_id).await?;
+                
+                // Lấy thông tin subscription và NFT
+                let (end_date, nft_info) = {
+                    let subscriptions = self.user_subscriptions.read().await;
+                    let subscription = subscriptions.get(user_id)
+                        .ok_or(WalletError::Other("Không tìm thấy thông tin đăng ký".to_string()))?;
+                    
+                    let nft_info = subscription.nft_info.clone()
+                        .ok_or(WalletError::Other("Không tìm thấy thông tin NFT cho gói VIP".to_string()))?;
+                    
+                    (subscription.end_date, nft_info)
+                };
+                
+                // Tạo VipUserData 
+                // TODO: Lấy các thông tin cần thiết từ premium_user_data
+                let vip_user_data = VipUserData {
+                    user_id: user_id.to_string(),
+                    created_at: Utc::now(),
+                    last_active: Utc::now(),
+                    wallet_addresses: vec![], // Cần lấy từ premium_user_data
+                    subscription_end_date: end_date,
+                    vip_support_code: Uuid::new_v4().to_string(), // Tạo mã hỗ trợ riêng
+                    special_privileges: vec!["UnlimitedTransactions".to_string(), "PrioritySupport".to_string()],
+                };
+                
+                // TODO: Cập nhật vip_user_data vào database (MongoDB)
+                // Ví dụ:
+                // let mongodb_client = get_mongodb_client();
+                // let vip_users = mongodb_client.collection("vip_users");
+                // vip_users.insert_one(vip_user_data).await?;
+                
+                // Kiểm tra tính hợp lệ của NFT
+                self.schedule_nft_verification(user_id, nft_info, end_date).await;
+                
+                info!("Đã nâng cấp người dùng {} lên VIP thành công", user_id);
+                
+                // Tạo Auto Trade Usage cho người dùng VIP
+                if let Some(auto_trade_manager) = &self.auto_trade_manager {
+                    // Tạo usage cho người dùng VIP
+                    let usage = AutoTradeUsage::new(user_id, &SubscriptionType::VIP);
+                    
+                    // TODO: Lưu auto trade usage vào database
+                    // Ví dụ:
+                    // mongodb_client.collection("auto_trade_usage").insert_one(usage).await?;
+                    
+                    info!("Đã tạo Auto Trade Usage cho người dùng VIP {}", user_id);
+                }
+                
+                Ok(())
+            },
+            _ => {
+                // Không cần xử lý cho Free hoặc các loại khác
+                warn!("Không cần nâng cấp tài khoản cho loại subscription: {:?}", subscription_type);
+                Ok(())
+            }
+        }
+    }
+    
+    /// Lên lịch kiểm tra tính hợp lệ của NFT VIP
+    async fn schedule_nft_verification(&self, user_id: &str, nft_info: NftInfo, end_date: DateTime<Utc>) {
+        // TODO: Trong một hệ thống thực tế, cần có một job scheduler để thực hiện việc này
+        // Ví dụ:
+        // let job = JobScheduler::new();
+        // job.schedule_recurring_task(
+        //    Utc::now() + Duration::days(1),
+        //    Duration::days(7),
+        //    move || { verify_nft(user_id, nft_info.clone()) }
+        // );
+        
+        info!("Đã lên lịch kiểm tra NFT định kỳ cho người dùng VIP {}", user_id);
+    }
+
+    /// Kiểm tra và hạ cấp tự động các subscription đã hết hạn
+    /// 
+    /// Phương thức này nên được gọi định kỳ (ví dụ thông qua một cronjob)
+    /// 
+    /// # Returns
+    /// Danh sách các user_id đã được hạ cấp
+    pub async fn check_and_downgrade_expired_subscriptions(&self) -> Result<Vec<String>, WalletError> {
+        info!("Bắt đầu kiểm tra và hạ cấp các subscription đã hết hạn");
+        let mut downgraded_users = Vec::new();
+        
+        // Danh sách các user cần hạ cấp
+        let users_to_downgrade = {
+            let subscriptions = self.user_subscriptions.read().await;
+            let mut users = Vec::new();
+            
+            for (user_id, subscription) in subscriptions.iter() {
+                if subscription.needs_downgrade() {
+                    users.push(user_id.clone());
+                }
+            }
+            
+            users
+        };
+        
+        // Thực hiện hạ cấp cho từng user
+        for user_id in users_to_downgrade {
+            match self.downgrade_user_to_free(&user_id).await {
+                Ok(_) => {
+                    info!("Đã hạ cấp user {} về Free do hết hạn subscription", user_id);
+                    downgraded_users.push(user_id);
+                }
+                Err(e) => {
+                    error!("Lỗi khi hạ cấp user {}: {}", user_id, e);
+                }
+            }
+        }
+        
+        info!("Hoàn thành kiểm tra và hạ cấp. Tổng số user bị hạ cấp: {}", downgraded_users.len());
+        Ok(downgraded_users)
+    }
+    
+    /// Hạ cấp một người dùng về Free
+    /// 
+    /// # Arguments
+    /// - `user_id`: ID người dùng cần hạ cấp
+    /// 
+    /// # Returns
+    /// - `Ok(())`: Nếu hạ cấp thành công
+    /// - `Err`: Nếu có lỗi
+    pub async fn downgrade_user_to_free(&self, user_id: &str) -> Result<(), WalletError> {
+        // Lấy thông tin subscription hiện tại
+        let new_subscription = {
+            let mut subscriptions = self.user_subscriptions.write().await;
+            let subscription = subscriptions.get(user_id)
+                .ok_or(WalletError::Other("Không tìm thấy thông tin đăng ký".to_string()))?;
+            
+            // Tạo subscription mới (free)
+            let new_subscription = subscription.downgrade_to_free()
+                .map_err(|e| WalletError::Other(format!("Lỗi khi tạo subscription mới: {}", e)))?;
+                
+            // Cập nhật vào danh sách
+            subscriptions.insert(user_id.to_string(), new_subscription.clone());
+            
+            new_subscription
+        };
+        
+        // Nếu có auto_trade_manager, cập nhật trạng thái
+        if let Some(auto_trade_manager) = &self.auto_trade_manager {
+            // TODO: Cập nhật auto_trade_usage về inactive
+            // Ví dụ:
+            // auto_trade_manager.deactivate_user_auto_trade(user_id).await
+            //    .map_err(|e| WalletError::from(e))?;
+        }
+        
+        // Xóa dữ liệu premium/vip nếu có
+        // TODO: Trong thực tế cần giữ lại lịch sử, chỉ cập nhật trạng thái
+        // Ví dụ:
+        // let mongodb = get_mongodb_client();
+        // 
+        // // Cập nhật trạng thái trong bảng premium_users
+        // mongodb.collection("premium_users").update_one(
+        //     doc! { "user_id": user_id },
+        //     doc! { "$set": { "status": "Inactive", "end_date": Utc::now() } }
+        // ).await?;
+        // 
+        // // Cập nhật trạng thái trong bảng vip_users
+        // mongodb.collection("vip_users").update_one(
+        //     doc! { "user_id": user_id },
+        //     doc! { "$set": { "status": "Inactive", "end_date": Utc::now() } }
+        // ).await?;
+        
+        // Gửi thông báo cho người dùng
+        // TODO: Gửi email/notification
+        // Ví dụ:
+        // notification_service.send_notification(
+        //     user_id,
+        //     "Subscription của bạn đã hết hạn",
+        //     "Tài khoản của bạn đã được chuyển về gói Free. Vui lòng nâng cấp để tiếp tục sử dụng các tính năng cao cấp."
+        // ).await?;
+        
+        info!("Đã hạ cấp tài khoản của người dùng {} về Free", user_id);
+        Ok(())
+    }
+
+    /// Nâng cấp từ gói Free lên gói VIP
+    /// 
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// * `nft_info` - Thông tin NFT
+    /// * `is_twelve_month_plan` - Là gói 12 tháng hay không
+    /// * `staking_tokens` - Số lượng token stake (nếu là gói 12 tháng)
+    /// 
+    /// # Returns
+    /// * `Result<UserSubscription, WalletError>` - Kết quả thực hiện
+    #[flow_from("wallet::ui")]
+    pub async fn upgrade_free_to_vip(
+        &self, 
+        user_id: &str, 
+        nft_info: super::nft::NftInfo, 
+        is_twelve_month_plan: bool,
+        staking_tokens: Option<U256>
+    ) -> Result<UserSubscription, WalletError> {
+        // Kiểm tra NFT trước khi nâng cấp
+        let nft_valid = self.check_nft_ownership(
+            nft_info.wallet_address,
+            nft_info.contract_address,
+            nft_info.token_id,
+            nft_info.chain_id,
+        ).await?;
+        
+        if !nft_valid {
+            return Err(WalletError::Other("NFT không hợp lệ hoặc không tìm thấy trong ví".to_string()));
+        }
+        
+        // Thêm logic bắt buộc có NFT trước khi đăng ký
+        info!("Đã xác minh NFT cho user {} trước khi nâng cấp lên VIP", user_id);
+        
+        // Tiếp tục logic nâng cấp
+        let mut subscriptions = self.user_subscriptions.write().await;
+        
+        // Lấy subscription hiện tại hoặc tạo mới nếu chưa có
+        let subscription_result = match subscriptions.get(user_id) {
+            Some(sub) => Ok(sub.clone()),
+            None => {
+                // Tạo subscription mới nếu chưa có
+                info!("Tạo subscription mới cho user {} khi stake token", user_id);
+                Ok(UserSubscription {
+                    user_id: user_id.to_string(),
+                    subscription_type: SubscriptionType::Free,
+                    start_date: Utc::now(),
+                    end_date: Utc::now() + Duration::days(30),
+                    payment_address: nft_info.wallet_address,
+                    payment_tx_hash: None,
+                    payment_token: PaymentToken::DMD,
+                    payment_amount: U256::zero(),
+                    status: SubscriptionStatus::Pending,
+                    nft_info: nft_info.clone(),
+                    non_nft_status: NonNftVipStatus::default(),
+                })
+            }
+        };
+        
+        // Xử lý kết quả subscription
+        let subscription = subscription_result?;
+        
+        // Chuyển đổi subscription thông qua trait
+        let mut subscription = subscription;
+        
+        // Nếu là gói 12 tháng với staking
+        if is_twelve_month_plan {
+            if let Some(amount) = staking_tokens {
+                // Kiểm tra số lượng tối thiểu DMD
+                let min_amount = U256::from(MIN_DMD_STAKE_AMOUNT.mantissa());
+                if amount < min_amount {
+                    return Err(WalletError::Other(format!(
+                        "Số lượng token không đủ để stake. Cần tối thiểu {} DMD",
+                        MIN_DMD_STAKE_AMOUNT
+                    )));
+                }
+                
+                // Cập nhật thông tin subscription
+                let duration = Duration::days(TWELVE_MONTH_STAKE_DAYS);
+                let start_date = Utc::now();
+                let end_date = start_date + duration;
+                let price = if subscription.subscription_type == SubscriptionType::Free {
+                    VIP_TWELVE_MONTH_PRICE_USDC
+                } else {
+                    // Giảm giá nếu đã là Premium
+                    VIP_TWELVE_MONTH_PRICE_USDC - DEFAULT_PREMIUM_PRICE_USDC
+                };
+                
+                subscription.upgrade_with_staking(amount, true, Some(nft_info.clone()))
+                    .map_err(|e| WalletError::Other(format!("Lỗi khi nâng cấp subscription: {}", e)))?;
+                
+                // Cập nhật trạng thái subscription và trả về thông tin
+                subscriptions.insert(user_id.to_string(), subscription.clone());
+                drop(subscriptions);
+                
+                // Ghi log
+                info!(
+                    "Đã nâng cấp user {} từ {:?} lên VIP với 12 tháng stake, giá: {}",
+                    user_id, subscription.subscription_type, price
+                );
+                
+                return Ok(subscription);
+            } else {
+                return Err(WalletError::Other("Cần cung cấp số lượng token để stake cho gói 12 tháng".to_string()));
+            }
+        } else {
+            // Gói VIP 30 ngày
+            let duration = Duration::days(30);
+            let start_date = Utc::now();
+            let end_date = start_date + duration;
+            
+            // Xác định giá nâng cấp
+            let price = if subscription.subscription_type == SubscriptionType::Free {
+                FREE_TO_VIP_UPGRADE_PRICE_USDC
+            } else {
+                // Giảm giá nếu đã là Premium
+                PREMIUM_TO_VIP_UPGRADE_PRICE_USDC
+            };
+            
+            subscription.upgrade_with_staking(U256::zero(), false, None)
+                .map_err(|e| WalletError::Other(format!("Lỗi khi nâng cấp subscription: {}", e)))?;
+            
+            // Cập nhật trạng thái subscription và trả về thông tin
+            subscriptions.insert(user_id.to_string(), subscription.clone());
+            drop(subscriptions);
+            
+            // Ghi log
+            info!(
+                "Đã nâng cấp user {} từ {:?} lên VIP với 30 ngày, giá: {}",
+                user_id, subscription.subscription_type, price
+            );
+            
+            return Ok(subscription);
+        }
+    }
+    
+    /// Stake token DMD cho subscription.
+    /// 
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// * `wallet_address` - Địa chỉ ví
+    /// * `chain_type` - Loại blockchain
+    /// * `amount` - Số lượng token cần stake
+    /// * `is_vip` - Có phải gói VIP hay không
+    /// * `nft_info` - Thông tin NFT (nếu là VIP)
+    /// 
+    /// # Returns
+    /// * `Result<TokenStake, WalletError>` - Kết quả thực hiện
+    #[flow_from("wallet::staking")]
+    pub async fn stake_tokens_for_subscription(
+        &self,
+        user_id: &str,
+        wallet_address: Address,
+        chain_type: ChainType,
+        amount: U256,
+        is_vip: bool,
+        nft_info: Option<super::nft::NftInfo>,
+    ) -> Result<super::staking::TokenStake, WalletError> {
+        use super::staking::{StakingManager, TokenStake};
+        
+        info!("Khóa {} DMD token trong pool stake cho người dùng {}", amount, user_id);
+        
+        // Nếu là gói VIP, bắt buộc phải có NFT
+        if is_vip {
+            if let Some(nft) = &nft_info {
+                // Kiểm tra NFT trước khi cho phép stake cho gói VIP
+                let nft_valid = self.check_nft_ownership(
+                    nft.wallet_address,
+                    nft.contract_address,
+                    nft.token_id,
+                    nft.chain_id,
+                ).await?;
+                
+                if !nft_valid {
+                    return Err(WalletError::Other("NFT không hợp lệ hoặc không tìm thấy trong ví".to_string()));
+                }
+                
+                info!("Đã xác minh NFT cho user {} trước khi stake DMD token cho gói VIP 12 tháng", user_id);
+            } else {
+                return Err(WalletError::Other("Cần cung cấp thông tin NFT cho gói VIP 12 tháng".to_string()));
+            }
+        }
+        
+        // Tạo StakingManager
+        let staking_manager = StakingManager::new(self.wallet_api.clone());
+        
+        // Thực hiện stake token
+        let mut stake = staking_manager.stake_tokens(user_id, wallet_address, chain_type, amount).await
+            .map_err(|e| WalletError::Other(format!("Lỗi khi stake token: {}", e)))?;
+        
+        // Cập nhật đăng ký người dùng
+        let mut subscriptions = self.user_subscriptions.write().await;
+        
+        // Lấy subscription hiện tại hoặc tạo mới nếu chưa có
+        let subscription_result = match subscriptions.get(user_id) {
+            Some(sub) => Ok(sub.clone()),
+            None => {
+                // Tạo subscription mới nếu chưa có
+                info!("Tạo subscription mới cho user {} khi stake token", user_id);
+                Ok(UserSubscription {
+                    user_id: user_id.to_string(),
+                    subscription_type: SubscriptionType::Free,
+                    start_date: Utc::now(),
+                    end_date: Utc::now() + Duration::days(30),
+                    payment_address: wallet_address,
+                    payment_tx_hash: None,
+                    payment_token: PaymentToken::DMD,
+                    payment_amount: U256::zero(),
+                    status: SubscriptionStatus::Pending,
+                    nft_info: nft_info.clone(),
+                    non_nft_status: NonNftVipStatus::default(),
+                })
+            }
+        };
+        
+        // Xử lý kết quả subscription
+        let subscription = subscription_result?;
+        
+        // Chuyển đổi subscription thông qua trait
+        let subscription = if is_vip {
+            // Đánh dấu stake là cho gói VIP
+            stake.mark_as_vip_subscription();
+            
+            subscription.upgrade_with_staking(amount, true, nft_info)
+                .map_err(|e| WalletError::Other(format!("Lỗi khi nâng cấp subscription: {}", e)))?
+        } else {
+            subscription.upgrade_with_staking(amount, false, None)
+                .map_err(|e| WalletError::Other(format!("Lỗi khi nâng cấp subscription: {}", e)))?
+        };
+        
+        // Cập nhật subscription
+        subscriptions.insert(user_id.to_string(), subscription);
+        drop(subscriptions);
+        
+        // Thêm transaction hash từ stake
+        if let Some(tx_hash) = &stake.stake_tx_hash {
+            self.process_payment(user_id, tx_hash, chain_type as u64).await?;
+        }
+        
+        // Ghi log hoạt động
+        let subscription_type = if is_vip {
+            SubscriptionType::VIP
+        } else {
+            SubscriptionType::Premium
+        };
+        
+        info!(
+            "Đã khóa {} DMD token trong pool stake cho người dùng {} thời hạn 12 tháng, loại gói: {:?}",
+            amount, user_id, subscription_type
+        );
+        
+        Ok(stake)
+    }
+    
+    /// Lấy thông tin stake của người dùng
+    /// 
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// 
+    /// # Returns
+    /// * `Result<Vec<TokenStake>, WalletError>` - Danh sách stake
+    #[flow_from("wallet::staking")]
+    pub async fn get_user_stakes(&self, user_id: &str) -> Result<Vec<super::staking::TokenStake>, WalletError> {
+        use super::staking::StakingManager;
+        
+        // Tạo StakingManager
+        let staking_manager = StakingManager::new(self.wallet_api.clone());
+        
+        // Lấy danh sách stake
+        staking_manager.get_user_stakes(user_id).await
+            .map_err(|e| WalletError::Other(format!("Lỗi khi lấy thông tin stake: {}", e)))
+    }
+    
+    /// Tính toán lợi nhuận từ stake
+    /// 
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// 
+    /// # Returns
+    /// * `Result<rust_decimal::Decimal, WalletError>` - Tổng lợi nhuận
+    #[flow_from("wallet::staking")]
+    pub async fn calculate_staking_rewards(&self, user_id: &str) -> Result<rust_decimal::Decimal, WalletError> {
+        use super::staking::StakingManager;
+        
+        // Tạo StakingManager
+        let staking_manager = StakingManager::new(self.wallet_api.clone());
+        
+        // Tính lợi nhuận
+        staking_manager.calculate_rewards(user_id).await
+            .map_err(|e| WalletError::Other(format!("Lỗi khi tính lợi nhuận stake: {}", e)))
+    }
+    
+    /// Hoàn thành stake token
+    /// 
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// * `stake_id` - ID của stake
+    /// 
+    /// # Returns
+    /// * `Result<super::staking::TokenStake, WalletError>` - Thông tin stake sau khi hoàn thành
+    #[flow_from("wallet::staking")]
+    pub async fn complete_stake(&self, user_id: &str, stake_id: &str) -> Result<super::staking::TokenStake, WalletError> {
+        use super::staking::StakingManager;
+        
+        // Tạo StakingManager
+        let staking_manager = StakingManager::new(self.wallet_api.clone());
+        
+        // Hoàn thành stake
+        staking_manager.complete_stake(user_id, stake_id).await
+            .map_err(|e| WalletError::Other(format!("Lỗi khi hoàn thành stake: {}", e)))
+    }
+
+    /// Lấy thông tin đăng ký của người dùng
+    ///
+    /// # Arguments
+    /// - `user_id`: ID người dùng
+    ///
+    /// # Returns
+    /// - `Ok(UserSubscription)`: Thông tin đăng ký
+    /// - `Err`: Nếu không tìm thấy thông tin đăng ký
+    pub async fn get_user_subscription(&self, user_id: &str) -> Result<UserSubscription, WalletError> {
+        let subscriptions = self.user_subscriptions.read().await;
+        
+        if let Some(subscription) = subscriptions.get(user_id) {
+            Ok(subscription.clone())
+        } else {
+            Err(WalletError::Other(format!("Không tìm thấy thông tin đăng ký cho người dùng {}", user_id)))
+        }
+    }
+
+    /// Khởi tạo và chạy task nền kiểm tra subscription
+    pub async fn start_background_tasks(&self) -> Result<(), WalletError> {
+        info!("Khởi động các background task cho subscription manager");
+        
+        // Clone các tham chiếu cần thiết
+        let subscription_manager = Arc::new(self.clone());
+        let auto_trade_manager = self.get_auto_trade_manager()?;
+        let event_emitter = match &self.event_emitter {
+            Some(emitter) => Some(emitter.clone()),
+            None => {
+                warn!("Không tìm thấy event_emitter, thông báo sẽ không được gửi");
+                None
+            }
+        };
+        
+        // Chạy task kiểm tra subscription
+        tokio::spawn(async move {
+            let mut interval = interval(SUBSCRIPTION_CHECK_INTERVAL);
+            
+            loop {
+                interval.tick().await;
+                debug!("Thực hiện kiểm tra định kỳ subscription");
+                
+                // Kiểm tra và hạ cấp subscription hết hạn
+                if let Err(e) = subscription_manager.check_and_process_subscriptions().await {
+                    error!("Lỗi khi kiểm tra subscription: {}", e);
+                }
+                
+                // Kiểm tra và gửi thông báo cho subscription sắp hết hạn
+                if let Err(e) = subscription_manager.check_and_send_expiry_warnings().await {
+                    error!("Lỗi khi gửi thông báo sắp hết hạn: {}", e);
+                }
+                
+                // Kiểm tra và xác minh NFT
+                if let Err(e) = subscription_manager.verify_all_nft_ownership().await {
+                    error!("Lỗi khi xác minh NFT: {}", e);
+                }
+            }
+        });
+        
+        // Chạy task kiểm tra auto-trade
+        tokio::spawn(async move {
+            let mut interval = interval(AUTO_TRADE_PERIODIC_CHECK_INTERVAL);
+            
+            loop {
+                interval.tick().await;
+                debug!("Thực hiện kiểm tra định kỳ auto-trade");
+                
+                // Kiểm tra và cập nhật auto-trade
+                if let Err(e) = auto_trade_manager.periodic_check().await {
+                    error!("Lỗi khi kiểm tra auto-trade: {}", e);
+                }
+            }
+        });
+        
+        info!("Đã khởi động các background task thành công");
+        Ok(())
+    }
+    
+    /// Kiểm tra và xử lý tất cả subscription
+    /// - Hạ cấp subscription đã hết hạn
+    /// - Cập nhật trạng thái subscription
+    /// - Đồng bộ với auto-trade manager
+    async fn check_and_process_subscriptions(&self) -> Result<(), WalletError> {
+        info!("Bắt đầu kiểm tra và xử lý subscription");
+        
+        // Lấy danh sách subscription
+        let subscriptions = {
+            let subscriptions_guard = self.user_subscriptions.read().await;
+            subscriptions_guard.clone()
+        };
+        
+        // Danh sách user cần hạ cấp
+        let mut users_to_downgrade = Vec::new();
+        
+        // Kiểm tra từng subscription
+        for (user_id, subscription) in subscriptions {
+            if subscription.is_expired() {
+                debug!("Subscription hết hạn: user_id={}, type={:?}", 
+                       user_id, subscription.subscription_type);
+                users_to_downgrade.push(user_id);
+            }
+        }
+        
+        // Hạ cấp các user đã hết hạn
+        for user_id in &users_to_downgrade {
+            match self.downgrade_user_to_free(user_id).await {
+                Ok(_) => {
+                    info!("Đã hạ cấp user {} xuống Free do hết hạn", user_id);
+                    
+                    // Gửi sự kiện
+                    if let Some(emitter) = &self.event_emitter {
+                        let event = SubscriptionEvent {
+                            user_id: user_id.clone(),
+                            event_type: EventType::SubscriptionExpired,
+                            timestamp: Utc::now(),
+                            data: Some("Subscription đã hết hạn và đã bị hạ cấp xuống Free".to_string()),
+                        };
+                        emitter.emit(event);
+                    }
+                }
+                Err(e) => {
+                    error!("Lỗi khi hạ cấp user {} xuống Free: {}", user_id, e);
+                }
+            }
+        }
+        
+        info!("Hoàn thành kiểm tra subscription, đã hạ cấp {} user", users_to_downgrade.len());
+        Ok(())
+    }
+    
+    /// Kiểm tra và gửi thông báo cho các subscription sắp hết hạn
+    async fn check_and_send_expiry_warnings(&self) -> Result<(), WalletError> {
+        info!("Kiểm tra và gửi thông báo subscription sắp hết hạn");
+        
+        // Chỉ tiếp tục nếu có event_emitter
+        let emitter = match &self.event_emitter {
+            Some(e) => e,
+            None => {
+                debug!("Không có event_emitter, bỏ qua việc gửi thông báo");
+                return Ok(());
+            }
+        };
+        
+        // Lấy danh sách subscription
+        let subscriptions = {
+            let subscriptions_guard = self.user_subscriptions.read().await;
+            subscriptions_guard.clone()
+        };
+        
+        // Kiểm tra từng subscription
+        let now = Utc::now();
+        let warning_threshold = now + Duration::days(EXPIRY_WARNING_DAYS);
+        let renewal_threshold = now + Duration::days(RENEWAL_REMINDER_DAYS);
+        
+        // Đếm số thông báo đã gửi để log
+        let mut warning_count = 0;
+        let mut renewal_count = 0;
+        
+        for (user_id, subscription) in subscriptions {
+            // Chỉ xem xét các subscription đang active
+            if subscription.status != SubscriptionStatus::Active {
+                continue;
+            }
+            
+            // Kiểm tra xem có sắp hết hạn không
+            if subscription.end_date <= warning_threshold {
+                // Tính số ngày còn lại
+                let days_remaining = (subscription.end_date - now).num_days();
+                
+                debug!("Subscription sắp hết hạn: user_id={}, type={:?}, còn {} ngày", 
+                       user_id, subscription.subscription_type, days_remaining);
+                
+                // Gửi thông báo sắp hết hạn
+                let event = SubscriptionEvent {
+                    user_id: user_id.clone(),
+                    event_type: EventType::SubscriptionExpiryWarning,
+                    timestamp: now,
+                    data: Some(format!("Subscription sẽ hết hạn trong {} ngày", days_remaining)),
+                };
+                emitter.emit(event);
+                warning_count += 1;
+            }
+            // Kiểm tra xem có nên nhắc gia hạn không
+            else if subscription.end_date <= renewal_threshold 
+                    && subscription.subscription_type != SubscriptionType::Free {
+                // Tính số ngày còn lại
+                let days_remaining = (subscription.end_date - now).num_days();
+                
+                debug!("Nên gia hạn subscription: user_id={}, type={:?}, còn {} ngày", 
+                       user_id, subscription.subscription_type, days_remaining);
+                
+                // Gửi nhắc nhở gia hạn
+                let event = SubscriptionEvent {
+                    user_id: user_id.clone(),
+                    event_type: EventType::SubscriptionRenewed,
+                    timestamp: now,
+                    data: Some(format!("Hãy gia hạn subscription để tiếp tục sử dụng dịch vụ. Còn {} ngày", days_remaining)),
+                };
+                emitter.emit(event);
+                renewal_count += 1;
+            }
+        }
+        
+        info!("Đã gửi {} thông báo sắp hết hạn và {} nhắc nhở gia hạn", warning_count, renewal_count);
+        Ok(())
+    }
+    
+    /// Kiểm tra việc sở hữu NFT định kỳ cho tất cả người dùng
+    /// 
+    /// # Returns
+    /// * `Result<(), WalletError>` - Kết quả thực hiện
+    pub async fn verify_all_nft_ownership(&self) -> Result<(), WalletError> {
+        let subscriptions = self.user_subscriptions.read().await;
+        let mut verification_results = Vec::new();
+        
+        for (user_id, subscription) in subscriptions.iter() {
+            // Bỏ qua người dùng không phải VIP hoặc không có thông tin NFT
+            if subscription.subscription_type != SubscriptionType::VIP || subscription.nft_info.is_none() {
+                continue;
+            }
+            
+            // Bỏ qua kiểm tra NFT cho người dùng VIP 12 tháng đã stake DMD token
+            if subscription.non_nft_status == NonNftVipStatus::StakedDMD {
+                info!("Bỏ qua kiểm tra NFT cho người dùng VIP 12 tháng {} đã stake DMD token", user_id);
+                continue;
+            }
+            
+            if let Some(nft_info) = &subscription.nft_info {
+                // Thêm vào danh sách kiểm tra
+                let wallet_address = nft_info.wallet_address;
+                let contract_address = nft_info.contract_address;
+                let token_id = nft_info.token_id;
+                let chain_id = nft_info.chain_id;
+                
+                // Giới hạn số lần kiểm tra NFT dựa trên thời điểm kiểm tra gần nhất
+                if let Some(last_verified) = nft_info.last_verified {
+                    let now = Utc::now();
+                    let duration_since_last_check = now.signed_duration_since(last_verified);
+                    
+                    // Nếu kiểm tra gần đây, bỏ qua
+                    if duration_since_last_check < chrono::Duration::hours(12) {
+                        continue;
+                    }
+                }
+                
+                match self.check_nft_ownership(wallet_address, contract_address, token_id, chain_id).await {
+                    Ok(is_valid) => {
+                        verification_results.push((user_id.clone(), is_valid));
+                    }
+                    Err(e) => {
+                        error!("Lỗi khi kiểm tra NFT cho người dùng {}: {}", user_id, e);
+                    }
+                }
+            }
+        }
+        
+        // Cập nhật trạng thái xác minh
+        if !verification_results.is_empty() {
+            self.update_nft_verification_status(&verification_results).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Cập nhật trạng thái xác minh NFT
+    async fn update_nft_verification_status(&self, user_verifications: &[(String, bool)]) -> Result<(), WalletError> {
+        let mut subscriptions = self.user_subscriptions.write().await;
+        
+        for (user_id, is_valid) in user_verifications {
+            if let Some(subscription) = subscriptions.get_mut(user_id) {
+                if let Some(nft_info) = &mut subscription.nft_info {
+                    // Cập nhật trạng thái và thời gian xác minh
+                    nft_info.is_valid = *is_valid;
+                    nft_info.last_verified = Some(Utc::now());
+                    
+                    debug!("Đã cập nhật trạng thái NFT cho user {}: is_valid={}", user_id, is_valid);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Thiết lập event emitter để gửi thông báo
+    pub fn set_event_emitter(&mut self, emitter: EventEmitter) {
+        self.event_emitter = Some(emitter.clone());
+        
+        // Thiết lập cho auto-trade manager nếu có
+        if let Ok(mut manager) = self.get_auto_trade_manager() {
+            manager.set_event_emitter(emitter);
+        }
+    }
 } 

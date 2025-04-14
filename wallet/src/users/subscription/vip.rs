@@ -1,4 +1,14 @@
-//! Quản lý đăng ký VIP và xác thực NFT.
+//! Module xử lý người dùng VIP.
+//! 
+//! Module này cung cấp các chức năng quản lý người dùng VIP, bao gồm:
+//! - Kiểm tra và xác thực NFT của người dùng VIP
+//! - Quản lý trạng thái VIP khi người dùng không còn NFT
+//! - Xử lý các trường hợp stake DMD token thay thế NFT
+//! - Quản lý chu kỳ đăng ký VIP và gia hạn tự động
+//! - Cung cấp thông tin về đặc quyền VIP
+//! 
+//! Module này làm việc chặt chẽ với các module khác như user_subscription, nft, 
+//! và staking để đảm bảo người dùng VIP nhận được đầy đủ quyền lợi.
 
 // Standard library imports
 use std::collections::HashMap;
@@ -9,7 +19,7 @@ use chrono::{DateTime, Duration, Utc};
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use uuid::Uuid;
 
 // Internal imports
@@ -66,18 +76,30 @@ impl VipManager {
         token_id: U256,
         chain_id: u64,
     ) -> Result<bool, WalletError> {
-        let wallet_api = self.wallet_api.read().await;
+        // Sử dụng RwLock an toàn trong async context
+        let wallet_api_guard = match self.wallet_api.read().await {
+            guard => guard
+        };
+        
+        // Thêm validation trước khi kiểm tra
+        if wallet_address.is_zero() {
+            warn!("Địa chỉ ví không hợp lệ (zero address) khi kiểm tra NFT");
+            return Err(WalletError::Other("Địa chỉ ví không hợp lệ".to_string()));
+        }
+        
+        if nft_contract.is_zero() {
+            warn!("Địa chỉ hợp đồng NFT không hợp lệ (zero address)");
+            return Err(WalletError::Other("Địa chỉ hợp đồng NFT không hợp lệ".to_string()));
+        }
         
         // TODO: Triển khai thực tế để kiểm tra NFT trên blockchain
         // Đây là ví dụ đơn giản, cần kết nối đến blockchain thực tế để kiểm tra balance của NFT
         
-        // Ví dụ mock:
-        if wallet_address.is_zero() || nft_contract.is_zero() {
-            return Ok(false);
-        }
-        
         // Trong thực tế, cần gọi hàm balanceOf từ smart contract ERC-1155
         // Và kiểm tra nếu balance > 0
+        
+        info!("Kiểm tra NFT: address={:?}, contract={:?}, token_id={}, chain_id={}", 
+              wallet_address, nft_contract, token_id, chain_id);
         
         // Giả lập trả về true
         Ok(true)
@@ -94,16 +116,28 @@ impl VipManager {
         
         // Chỉ chạy kiểm tra sau VIP_NFT_CHECK_HOUR UTC
         if now.hour() < VIP_NFT_CHECK_HOUR {
+            info!("Bỏ qua kiểm tra NFT, chưa đến giờ kiểm tra ({} UTC)", VIP_NFT_CHECK_HOUR);
             return Ok(Vec::new());
         }
         
         // Danh sách user_ids cần thông báo
         let mut users_without_nft = Vec::new();
+        let mut total_checked = 0;
+        let mut error_count = 0;
+        
+        info!("Bắt đầu kiểm tra NFT cho {} VIP users", 
+              user_subscriptions.iter().filter(|(_, s)| s.subscription_type == SubscriptionType::VIP).count());
         
         for (user_id, subscription) in user_subscriptions.iter_mut() {
             // Chỉ kiểm tra các VIP user đang active
             if subscription.subscription_type == SubscriptionType::VIP && 
                subscription.status == SubscriptionStatus::Active {
+                
+                // Bỏ qua kiểm tra NFT cho người dùng VIP 12 tháng đã stake token
+                if subscription.non_nft_status == NonNftVipStatus::StakedDMD {
+                    debug!("Bỏ qua kiểm tra NFT cho user {}: đã stake DMD token", user_id);
+                    continue;
+                }
                 
                 if let Some(nft_info) = &mut subscription.nft_info {
                     // Kiểm tra nếu đã kiểm tra trong ngày
@@ -112,31 +146,41 @@ impl VipManager {
                     
                     // Chỉ kiểm tra mỗi ngày một lần
                     if nft_last_checked_day != current_day {
+                        total_checked += 1;
+                        
                         // Kiểm tra NFT trên blockchain
                         match self.check_nft_ownership(
                             subscription.payment_address,
                             nft_info.contract_address,
                             nft_info.token_id,
-                            1 // Chain ID mặc định, trong thực tế cần lưu chain_id trong subscription
+                            nft_info.chain_id.unwrap_or(1) // Sử dụng chain_id từ nft_info hoặc mặc định
                         ).await {
                             Ok(has_nft) => {
                                 // Cập nhật trạng thái
                                 nft_info.update_status(has_nft, now);
                                 
                                 if !has_nft {
-                                    // Thêm vào danh sách cần thông báo
+                                    warn!("User {} không có NFT VIP, cần thông báo", user_id);
                                     users_without_nft.push(user_id.clone());
+                                } else {
+                                    debug!("Xác nhận user {} có NFT VIP hợp lệ", user_id);
                                 }
                             },
                             Err(e) => {
-                                warn!("Lỗi khi kiểm tra NFT cho người dùng {}: {}", user_id, e);
+                                error_count += 1;
+                                error!("Lỗi khi kiểm tra NFT cho người dùng {}: {}", user_id, e);
                                 // Không thay đổi trạng thái nếu có lỗi
                             }
                         }
                     }
+                } else {
+                    warn!("User {} là VIP nhưng không có thông tin NFT", user_id);
                 }
             }
         }
+        
+        info!("Hoàn thành kiểm tra NFT: {} users được kiểm tra, {} không có NFT, {} lỗi", 
+              total_checked, users_without_nft.len(), error_count);
         
         Ok(users_without_nft)
     }

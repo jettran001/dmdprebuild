@@ -16,15 +16,41 @@ mod integration_tests {
         let config = WalletSystemConfig::default();
         let mut api = WalletManagerApi::new(config);
 
-        let (address, seed, user_id) = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None).unwrap();
+        let create_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None);
+        assert!(create_result.is_ok(), "Không thể tạo ví: {:?}", create_result);
+        
+        let (address, seed, user_id) = match create_result {
+            Ok(wallet_info) => wallet_info,
+            Err(e) => panic!("Không thể tạo ví: {:?}", e),
+        };
+        
         assert!(api.has_wallet(address));
-        assert_eq!(api.get_user_id(address).unwrap(), user_id);
-        assert_eq!(api.export_seed_phrase(address, "password").unwrap(), seed);
+        
+        let user_id_result = api.get_user_id(address);
+        assert!(user_id_result.is_ok(), "Không thể lấy user ID: {:?}", user_id_result);
+        if let Ok(id) = user_id_result {
+            assert_eq!(id, user_id, "User ID không khớp");
+        }
+        
+        let seed_result = api.export_seed_phrase(address, "password");
+        assert!(seed_result.is_ok(), "Không thể xuất seed phrase: {:?}", seed_result);
+        if let Ok(exported_seed) = seed_result {
+            assert_eq!(exported_seed, seed, "Seed phrase không khớp");
+        }
+        
         assert!(api.export_seed_phrase(address, "wrong_password").is_err());
-        api.update_chain_id(address, 56, ChainType::EVM).unwrap();
-        assert_eq!(api.get_chain_id(address).unwrap(), 56);
+        
+        let update_result = api.update_chain_id(address, 56, ChainType::EVM);
+        assert!(update_result.is_ok(), "Không thể cập nhật chain ID: {:?}", update_result);
+        
+        let chain_id_result = api.get_chain_id(address);
+        assert!(chain_id_result.is_ok(), "Không thể lấy chain ID: {:?}", chain_id_result);
+        if let Ok(chain_id) = chain_id_result {
+            assert_eq!(chain_id, 56, "Chain ID không khớp");
+        }
 
-        api.remove_wallet(address).unwrap();
+        let remove_result = api.remove_wallet(address);
+        assert!(remove_result.is_ok(), "Không thể xóa ví: {:?}", remove_result);
         assert!(!api.has_wallet(address));
     }
 
@@ -41,9 +67,21 @@ mod integration_tests {
             seed_length: None,
             password: "password".to_string(),
         };
-        let (address, _) = api.import_wallet(wallet_config, None).unwrap();
+        
+        let import_result = api.import_wallet(wallet_config, None);
+        assert!(import_result.is_ok(), "Không thể import ví: {:?}", import_result);
+        
+        let (address, _) = match import_result {
+            Ok(wallet_info) => wallet_info,
+            Err(e) => panic!("Không thể import ví: {:?}", e),
+        };
 
-        assert_eq!(api.export_private_key(address, "password").unwrap(), private_key);
+        let export_result = api.export_private_key(address, "password");
+        assert!(export_result.is_ok(), "Không thể xuất private key: {:?}", export_result);
+        if let Ok(exported_key) = export_result {
+            assert_eq!(exported_key, private_key, "Private key không khớp");
+        }
+        
         assert!(api.export_seed_phrase(address, "password").is_err());
     }
 
@@ -51,7 +89,14 @@ mod integration_tests {
     fn test_sign_and_balance() {
         let config = WalletSystemConfig::default();
         let mut api = WalletManagerApi::new(config);
-        let (address, _, _) = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None).unwrap();
+        
+        let create_result = api.create_wallet(SeedLength::Twelve, None, ChainType::EVM, "password", None);
+        assert!(create_result.is_ok(), "Không thể tạo ví: {:?}", create_result);
+        
+        let (address, _, _) = match create_result {
+            Ok(wallet_info) => wallet_info,
+            Err(e) => panic!("Không thể tạo ví: {:?}", e),
+        };
         
         let tx = TransactionRequest::new().to(Address::zero()).value(100);
         let result = api.sign_transaction(address, tx);
