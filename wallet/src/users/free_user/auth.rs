@@ -11,6 +11,7 @@ use crate::error::WalletError;
 use crate::walletlogic::handler::WalletManagerHandler;
 use super::FreeUserManager;
 use super::types::*;
+use super::create_free_user_data;
 
 impl FreeUserManager {
     /// Xác minh rằng ví được liên kết với user_id thuộc về free_user.
@@ -35,12 +36,11 @@ impl FreeUserManager {
         // Kiểm tra xem user_id có prefix FREE_ không
         if user_id.starts_with("FREE_") {
             // Kiểm tra xem user_id đã được đăng ký trong hệ thống chưa
-            let user_data = self.user_data.read().await;
-            if user_data.contains_key(&user_id) {
+            let user_data_opt = self.get_user_data(&user_id).await?;
+            if user_data_opt.is_some() {
                 return Ok(true);
             } else {
                 // Nếu chưa có trong hệ thống, cập nhật hệ thống
-                drop(user_data); // Drop read lock trước khi lấy write lock
                 return self.register_user(user_id, address).await;
             }
         }
@@ -58,11 +58,10 @@ impl FreeUserManager {
     /// - `Ok(true)` nếu đăng ký thành công.
     /// - `Err` nếu có lỗi.
     pub async fn register_user(&self, user_id: String, address: Address) -> Result<bool, WalletError> {
-        let mut user_data = self.user_data.write().await;
-        
+        let user_data_opt = self.get_user_data(&user_id).await?;
         let now = Utc::now();
         
-        if let Some(data) = user_data.get_mut(&user_id) {
+        if let Some(mut data) = user_data_opt {
             // Nếu đã có user, thêm địa chỉ ví mới (nếu chưa có)
             if !data.wallet_addresses.contains(&address) {
                 // Kiểm tra giới hạn số ví
@@ -79,18 +78,17 @@ impl FreeUserManager {
             // Cập nhật thời gian hoạt động gần nhất
             data.last_active = now;
             
+            // Lưu dữ liệu cập nhật
+            self.save_user_data(&user_id, data).await?;
+            
             Ok(true)
         } else {
             // Tạo dữ liệu free user mới
-            let new_user = FreeUserData {
-                user_id: user_id.clone(),
-                created_at: now,
-                last_active: now,
-                status: UserStatus::Active,
-                wallet_addresses: vec![address],
-            };
+            let mut new_user = create_free_user_data(&user_id);
+            new_user.wallet_addresses.push(address);
             
-            user_data.insert(user_id.clone(), new_user);
+            // Lưu thông tin người dùng mới
+            self.save_user_data(&user_id, new_user).await?;
             
             // Khởi tạo lịch sử giao dịch trống
             let mut tx_history = self.transaction_history.write().await;
@@ -113,9 +111,9 @@ impl FreeUserManager {
     /// - `Ok(UserStatus)`: Trạng thái tài khoản.
     /// - `Err`: Nếu không tìm thấy người dùng.
     pub async fn check_user_status(&self, user_id: &str) -> Result<UserStatus, WalletError> {
-        let user_data = self.user_data.read().await;
+        let user_data_opt = self.get_user_data(user_id).await?;
         
-        if let Some(data) = user_data.get(user_id) {
+        if let Some(data) = user_data_opt {
             Ok(data.status.clone())
         } else {
             Err(WalletError::InvalidSeedOrKey(format!("User ID không tồn tại: {}", user_id)))
@@ -132,11 +130,12 @@ impl FreeUserManager {
     /// - `Ok(())`: Nếu cập nhật thành công.
     /// - `Err`: Nếu không tìm thấy người dùng.
     pub async fn update_user_status(&self, user_id: &str, new_status: UserStatus) -> Result<(), WalletError> {
-        let mut user_data = self.user_data.write().await;
+        let user_data_opt = self.get_user_data(user_id).await?;
         
-        if let Some(data) = user_data.get_mut(user_id) {
+        if let Some(mut data) = user_data_opt {
             data.status = new_status;
             data.last_active = Utc::now();
+            self.save_user_data(user_id, data).await?;
             Ok(())
         } else {
             Err(WalletError::InvalidSeedOrKey(format!("User ID không tồn tại: {}", user_id)))

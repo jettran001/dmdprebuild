@@ -1,7 +1,11 @@
 //! Module cung cấp các truy vấn thông tin người dùng miễn phí.
 
+// External imports
+use tracing::error;
+
 // Internal imports
 use crate::error::WalletError;
+use crate::cache;
 use super::FreeUserManager;
 use super::types::*;
 
@@ -14,11 +18,10 @@ impl FreeUserManager {
     /// # Returns
     /// - `Ok(FreeUserData)`: Thông tin người dùng.
     /// - `Err`: Nếu không tìm thấy người dùng.
-    pub async fn get_user_data(&self, user_id: &str) -> Result<FreeUserData, WalletError> {
-        let user_data = self.user_data.read().await;
-        
-        if let Some(data) = user_data.get(user_id) {
-            Ok(data.clone())
+    pub async fn get_user_data_direct(&self, user_id: &str) -> Result<FreeUserData, WalletError> {
+        // Lấy thông tin từ cache hoặc database sử dụng phương thức từ manager.rs
+        if let Some(data) = self.get_user_data(user_id).await? {
+            Ok(data)
         } else {
             Err(WalletError::InvalidSeedOrKey(format!("User ID không tồn tại: {}", user_id)))
         }

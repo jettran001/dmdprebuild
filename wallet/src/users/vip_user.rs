@@ -31,6 +31,7 @@ use crate::users::subscription::nft::{NftInfo, NonNftVipStatus};
 use crate::users::subscription::types::{SubscriptionStatus, SubscriptionType, PaymentToken};
 use crate::users::subscription::user_subscription::UserSubscription;
 use crate::users::subscription::staking;
+use crate::cache::{get_vip_user, update_vip_user_cache};
 
 /// Trạng thái của VIP user
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,8 +69,6 @@ pub struct VipUserData {
 pub struct VipUserManager {
     /// API wallet để xác thực NFT
     wallet_api: Arc<RwLock<WalletManagerApi>>,
-    /// Cache thông tin người dùng VIP
-    vip_users: HashMap<String, VipUserData>,
 }
 
 impl VipUserManager {
@@ -78,7 +77,6 @@ impl VipUserManager {
     pub fn new(wallet_api: Arc<RwLock<WalletManagerApi>>) -> Self {
         Self {
             wallet_api,
-            vip_users: HashMap::new(),
         }
     }
 
@@ -86,7 +84,10 @@ impl VipUserManager {
     #[flow_from("wallet::api")]
     pub async fn can_perform_transaction(&self, user_id: &str) -> Result<bool, WalletError> {
         // Người dùng VIP không bị giới hạn giao dịch
-        if let Some(user_data) = self.vip_users.get(user_id) {
+        if let Some(user_data) = get_vip_user(user_id, |id| async move {
+            // Hàm loader, sẽ được gọi khi không tìm thấy trong cache
+            self.load_vip_user_from_db(&id).await.unwrap_or(None)
+        }).await {
             // Kiểm tra xem subscription có còn hiệu lực
             if user_data.subscription_end_date > Utc::now() {
                 return Ok(true);
@@ -324,6 +325,30 @@ impl VipUserManager {
         vip_subscription.nft_info = Some(nft_info);
         vip_subscription.non_nft_status = NonNftVipStatus::Valid;
         
+        // Thêm logic cập nhật cache ở đây nếu cần
+        if let Some(vip_user_data) = get_vip_user(&subscription.user_id, |id| async move {
+            self.load_vip_user_from_db(&id).await.unwrap_or(None)
+        }).await {
+            // Đã có dữ liệu user VIP, cập nhật
+            let mut updated_data = vip_user_data.clone();
+            updated_data.nft_info = Some(NftInfo::new(nft_contract_address, nft_token_id));
+            update_vip_user_cache(&subscription.user_id, updated_data).await;
+        } else {
+            // Tạo dữ liệu mới
+            let vip_data = VipUserData {
+                user_id: subscription.user_id.clone(),
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+                wallet_addresses: vec![subscription.payment_address],
+                subscription_end_date: vip_subscription.end_date,
+                vip_support_code: generate_vip_support_code(),
+                special_privileges: Vec::new(),
+                nft_info: Some(NftInfo::new(nft_contract_address, nft_token_id)),
+            };
+            // Thêm vào cache VIP users
+            update_vip_user_cache(&subscription.user_id, vip_data).await;
+        }
+        
         // Cập nhật thông tin khác
         // TODO: Thêm logic tính thời hạn mới và các thông tin liên quan
         
@@ -387,7 +412,8 @@ impl VipUserManager {
             nft_info: None,
         };
         
-        self.vip_users.insert(user_id.to_string(), vip_user_data);
+        // Thêm vào cache VIP users
+        update_vip_user_cache(&user_id, vip_user_data).await;
         
         info!("Nâng cấp thành công lên VIP cho user {} bằng stake token, hết hạn {}", 
               user_id, end_date.format("%Y-%m-%d"));
@@ -436,11 +462,16 @@ impl VipUserManager {
     /// - `Err`: Nếu có lỗi
     #[flow_from("database::users")]
     pub async fn load_vip_user(&mut self, user_id: &str) -> Result<Option<VipUserData>, WalletError> {
-        // Kiểm tra trong cache trước
-        if let Some(user_data) = self.vip_users.get(user_id) {
-            return Ok(Some(user_data.clone()));
-        }
+        // Sử dụng global cache với loader function
+        let user_data = get_vip_user(user_id, |id| async move {
+            self.load_vip_user_from_db(&id).await.unwrap_or(None)
+        }).await;
         
+        Ok(user_data)
+    }
+    
+    // Phương thức mới để tách biệt việc tải từ database
+    async fn load_vip_user_from_db(&self, user_id: &str) -> Result<Option<VipUserData>, WalletError> {
         // TODO: Tải từ database thực tế
         info!("Tải thông tin người dùng VIP {} từ database", user_id);
         
@@ -455,3 +486,9 @@ pub const MAX_TRANSACTIONS_PER_DAY: usize = 1000;
 pub const MAX_SNIPEBOT_ATTEMPTS_PER_DAY: usize = 100;
 pub const MAX_SNIPEBOT_ATTEMPTS_PER_WALLET: usize = 20;
 pub const VIP_PRIORITY_LEVEL: u8 = 10; // Mức độ ưu tiên cao nhất
+
+// Helper function không đề cập trong ví dụ trước đây
+fn generate_vip_support_code() -> String {
+    // Tạo mã hỗ trợ ngẫu nhiên cho VIP user
+    format!("VIP-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("00000000"))
+}

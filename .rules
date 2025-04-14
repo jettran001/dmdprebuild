@@ -29,7 +29,7 @@
         "rules": [
           "Mỗi khi yêu cầu quét cấu trúc dữ liệu, LUÔN đọc manifest.rs đầu tiên",
           "Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs để xác định vị trí chính xác",
-          "Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm"
+          "Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm",
           "Khi được yêu cầu quét cấu trúc và tìm lỗi, các lỗi tìm thấy sẽ được cập nhật nội dung có kèm path file và dòng lỗi vào file .bugs "
         ]
       },
@@ -63,10 +63,11 @@
         "rules": [
           "Duy trì cấu trúc module như trong manifest.rs",
           "Tuân thủ các mẫu thiết kế đã thiết lập",
+          "Đọc comment trước khi sửa code",
           "Khi tạo các folder hoặc file mới, luôn dùng các command cho powershell để tạo",
           "Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác",
           "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo",
-          "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp",
+          "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp"
         ]
       },
       "post_check": {
@@ -75,7 +76,7 @@
         "rules": [
           "Kiểm tra tính toàn vẹn module sau khi chỉnh sửa",
           "Cập nhật tài liệu khi thay đổi chức năng",
-          "Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs"
+          "Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs",
           "Cập nhật lại các thay đổi vào file manifest.rs của domain hiện tại"
         ]
       },

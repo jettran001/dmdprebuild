@@ -12,9 +12,6 @@
 //! Module này tương tác với các hợp đồng thông minh trên blockchain để 
 //! thực hiện các hành động đặt cọc và rút token, đồng thời duy trì
 //! trạng thái của người dùng VIP mà không cần NFT.
-//! 
-//! Tất cả các phương thức đều cung cấp xử lý lỗi toàn diện và kiểm tra 
-//! đầu vào để đảm bảo tính toàn vẹn của dữ liệu và hệ thống.
 
 // External imports
 use ethers::types::{Address, U256};
@@ -26,6 +23,7 @@ use uuid::Uuid;
 // Standard library imports
 use std::fmt;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 // Tokio imports
 use tokio::sync::RwLock;
@@ -131,7 +129,11 @@ impl TokenStake {
         chain_type: ChainType,
         amount: U256,
         duration_days: i64,
-    ) -> Self {
+    ) -> Result<Self, StakingError> {
+        if amount < MIN_DMD_STAKE_AMOUNT {
+            return Err(StakingError::InsufficientAmount(Decimal::from(MIN_DMD_STAKE_AMOUNT)));
+        }
+
         let start_date = Utc::now();
         let end_date = start_date + Duration::days(duration_days);
         let amount_decimal = Decimal::from_i128_with_scale(amount.as_u128() as i128, 2);
@@ -139,9 +141,11 @@ impl TokenStake {
         // Tính toán lợi nhuận dự kiến
         let apy_rate = STAKED_DMD_APY_PERCENTAGE / Decimal::from(100);
         let year_fraction = Decimal::from(duration_days) / Decimal::from(365);
-        let expected_rewards = amount_decimal * apy_rate * year_fraction;
+        let expected_rewards = amount_decimal.checked_mul(apy_rate)
+            .and_then(|r| r.checked_mul(year_fraction))
+            .ok_or_else(|| StakingError::Other("Lỗi tính toán lợi nhuận".to_string()))?;
         
-        Self {
+        Ok(Self {
             stake_id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             wallet_address,
@@ -158,7 +162,7 @@ impl TokenStake {
             is_vip_subscription: false,
             erc1155_token_id: Some(DMD_STAKING_TOKEN_ID),
             erc1155_contract_address: None,
-        }
+        })
     }
     
     /// Cập nhật hash giao dịch stake
@@ -184,9 +188,9 @@ impl TokenStake {
     }
     
     /// Tính toán lợi nhuận hiện tại
-    pub fn calculate_current_rewards(&self) -> Decimal {
+    pub fn calculate_current_rewards(&self) -> Result<Decimal, StakingError> {
         if self.status != StakeStatus::Active {
-            return self.received_rewards;
+            return Ok(self.received_rewards);
         }
         
         let now = Utc::now();
@@ -194,13 +198,14 @@ impl TokenStake {
         let total_duration = self.end_date.signed_duration_since(self.start_date);
         
         if elapsed <= chrono::Duration::zero() {
-            return Decimal::new(0, 0);
+            return Ok(Decimal::new(0, 0));
         }
         
         let elapsed_fraction = Decimal::from(elapsed.num_days()) / Decimal::from(total_duration.num_days());
-        let current_rewards = self.expected_rewards * elapsed_fraction;
+        let current_rewards = self.expected_rewards.checked_mul(elapsed_fraction)
+            .ok_or_else(|| StakingError::Other("Lỗi tính toán lợi nhuận".to_string()))?;
         
-        current_rewards
+        Ok(current_rewards)
     }
     
     /// Đánh dấu stake này là cho gói VIP 12 tháng
@@ -226,6 +231,8 @@ pub struct StakingManager {
     wallet_api: Arc<RwLock<WalletManagerApi>>,
     /// Địa chỉ của staking pool
     staking_pool_address: Address,
+    /// Danh sách các stake đang hoạt động
+    active_stakes: Arc<RwLock<HashMap<String, TokenStake>>>,
 }
 
 impl StakingManager {
@@ -237,6 +244,7 @@ impl StakingManager {
         Self {
             wallet_api,
             staking_pool_address,
+            active_stakes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -248,90 +256,37 @@ impl StakingManager {
         chain_type: ChainType,
         amount: U256,
     ) -> Result<TokenStake, StakingError> {
-        // Validate đầu vào
-        if user_id.is_empty() {
-            error!("User ID không hợp lệ khi thực hiện stake token");
-            return Err(StakingError::Other("User ID không được để trống".to_string()));
+        // Kiểm tra số dư tối thiểu
+        if amount < MIN_DMD_STAKE_AMOUNT {
+            return Err(StakingError::InsufficientAmount(Decimal::from(MIN_DMD_STAKE_AMOUNT)));
         }
-        
-        if wallet_address.is_zero() {
-            error!("Địa chỉ ví không hợp lệ (zero address) khi stake token");
-            return Err(StakingError::Other("Địa chỉ ví không hợp lệ".to_string()));
-        }
-        
-        // Kiểm tra số lượng tối thiểu
-        if amount < U256::from(MIN_DMD_STAKE_AMOUNT.mantissa()) {
-            warn!("Số lượng DMD token không đủ để stake: {} < {}", amount, MIN_DMD_STAKE_AMOUNT);
-            return Err(StakingError::InsufficientAmount(MIN_DMD_STAKE_AMOUNT));
-        }
-        
-        info!("Bắt đầu stake {} DMD token cho user {} từ ví {:?}", amount, user_id, wallet_address);
-        
+
         // Tạo thông tin stake mới
-        let mut stake = TokenStake::new(
+        let stake = TokenStake::new(
             user_id,
             wallet_address,
             chain_type,
             amount,
             TWELVE_MONTH_STAKE_DAYS,
-        );
-        
-        // Gọi smart contract để stake token
-        let wallet_api = match self.wallet_api.read().await {
-            guard => guard
-        };
-        
-        let tx_hash = match self.staking_pool_address.is_zero() {
-            true => {
-                warn!("Địa chỉ staking pool chưa được cấu hình đúng, sử dụng giả lập");
-                format!("0x{}", Uuid::new_v4().simple())
-            },
-            false => {
-                // TODO: Thực hiện gọi smart contract ERC-1155
-                // Trong môi trường thực tế, sẽ gọi blockchain và xử lý lỗi
-                
-                // Ví dụ thực tế:
-                /*
-                match wallet_api.call_staking_contract(
-                    wallet_address,
-                    self.staking_pool_address,
-                    "stakeForNft",
-                    vec![amount.into_token(), DMD_STAKING_TOKEN_ID.into_token()],
-                    chain_type,
-                ).await {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        error!("Lỗi khi gọi smart contract để stake token: {}", e);
-                        return Err(StakingError::BlockchainError(format!("Lỗi từ blockchain: {}", e)));
-                    }
-                }
-                */
-                
-                // Giả lập cho mục đích demo
-                format!("0x{}", Uuid::new_v4().simple())
-            }
-        };
-        
+        )?;
+
+        // Thực hiện stake trên blockchain
+        let wallet_api = self.wallet_api.read().await;
+        let tx_hash = wallet_api.stake_tokens(
+            wallet_address,
+            amount,
+            TWELVE_MONTH_STAKE_DAYS,
+        ).await?;
+
+        // Cập nhật thông tin stake
+        let mut stake = stake;
         stake.set_stake_tx_hash(&tx_hash);
-        
-        // Cập nhật thông tin ERC-1155
-        stake.set_erc1155_info(self.staking_pool_address, DMD_STAKING_TOKEN_ID);
-        
-        // Lưu thông tin stake vào database
-        // TODO: Thực hiện lưu vào database
-        // match save_stake_to_db(&stake).await {
-        //     Ok(_) => {},
-        //     Err(e) => {
-        //         error!("Lỗi khi lưu thông tin stake vào database: {}", e);
-        //         return Err(StakingError::Database(format!("Lỗi database: {}", e)));
-        //     }
-        // }
-        
-        info!(
-            "Đã stake {} DMD token cho user {} và nhận ERC-1155 NFT, tx: {}",
-            amount, user_id, tx_hash
-        );
-        
+
+        // Lưu vào danh sách active stakes
+        let mut active_stakes = self.active_stakes.write().await;
+        active_stakes.insert(stake.stake_id.clone(), stake.clone());
+
+        info!("Stake thành công: user_id={}, amount={}, tx_hash={}", user_id, amount, tx_hash);
         Ok(stake)
     }
     
@@ -515,7 +470,7 @@ impl StakingManager {
         let mut total_rewards = Decimal::new(0, 0);
         
         for stake in active_stakes {
-            let current_rewards = stake.calculate_current_rewards();
+            let current_rewards = stake.calculate_current_rewards()?;
             total_rewards += current_rewards;
         }
         

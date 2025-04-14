@@ -35,6 +35,7 @@ use crate::users::subscription::{
     types::{SubscriptionType, SubscriptionStatus, UserSubscription},
     events::{EventEmitter, SubscriptionEvent, EventType},
 };
+use crate::cache;
 
 /// Lỗi liên quan đến tính năng auto trade
 #[derive(Debug, Error)]
@@ -352,6 +353,8 @@ impl AutoTradeUsage {
 pub struct AutoTradeManager {
     /// Lưu trữ thông tin sử dụng auto-trade của người dùng
     auto_trade_usages: Arc<RwLock<HashMap<String, AutoTradeUsage>>>,
+    /// Cache cho auto-trade usage
+    auto_trade_cache: cache::AsyncCache<String, AutoTradeUsage, cache::LRUCache<String, AutoTradeUsage>>,
     /// Đối tượng phát sự kiện
     event_emitter: Option<EventEmitter>,
     /// Tham chiếu yếu đến subscription manager để tránh circular reference
@@ -383,6 +386,7 @@ impl AutoTradeManager {
     pub fn new(subscription_manager: Arc<super::manager::SubscriptionManager>) -> Self {
         Self {
             auto_trade_usages: Arc::new(RwLock::new(HashMap::new())),
+            auto_trade_cache: cache::create_async_lru_cache(500, 300), // Cache 5 phút (300 giây)
             event_emitter: None,
             subscription_manager: Arc::downgrade(&subscription_manager),
         }
@@ -465,7 +469,22 @@ impl AutoTradeManager {
     pub async fn periodic_check(&self) -> Result<(), AutoTradeError> {
         info!("Thực hiện kiểm tra định kỳ auto-trade");
         
-        // Đồng bộ với subscription
+        // Kiểm tra sớm xem SubscriptionManager có tồn tại không trước khi thực hiện bất kỳ thao tác nào
+        let subscription_manager = match self.subscription_manager.upgrade() {
+            Some(manager) => manager,
+            None => {
+                let error_msg = "SubscriptionManager đã bị giải phóng, cần khởi tạo lại AutoTradeManager";
+                error!("{}", error_msg);
+                // Ghi log chi tiết về lỗi và cách khắc phục
+                error!("Lỗi này có thể xảy ra khi SubscriptionManager bị hủy trước AutoTradeManager");
+                error!("Để khắc phục: 1) Đảm bảo AutoTradeManager được hủy trước SubscriptionManager");
+                error!("             2) Hoặc tạo lại AutoTradeManager với SubscriptionManager mới");
+                return Err(AutoTradeError::InvalidReferenceError(error_msg.to_string()));
+            }
+        };
+        
+        // Đồng bộ với subscription - Bỏ qua lỗi cụ thể từ sync_all_with_subscriptions
+        // vì chúng ta đã kiểm tra subscription_manager ở trên
         if let Err(e) = self.sync_all_with_subscriptions().await {
             error!("Lỗi khi đồng bộ auto-trade với subscription: {}", e);
         }
@@ -474,15 +493,6 @@ impl AutoTradeManager {
         let auto_trade_usages = {
             let usages = self.auto_trade_usages.read().await;
             usages.clone()
-        };
-        
-        // Lấy tham chiếu mạnh từ tham chiếu yếu
-        let subscription_manager = match self.subscription_manager.upgrade() {
-            Some(manager) => manager,
-            None => {
-                error!("Không thể lấy tham chiếu đến SubscriptionManager trong periodic_check");
-                return Err(AutoTradeError::Other("SubscriptionManager không còn tồn tại".to_string()));
-            }
         };
         
         let mut reset_count = 0;
@@ -621,10 +631,9 @@ impl AutoTradeManager {
         }
     }
     
-    /// Lấy thông tin auto-trade usage của user
+    /// Lấy thông tin sử dụng auto trade của người dùng
     /// 
-    /// Truy xuất thông tin sử dụng auto-trade của người dùng từ bộ nhớ.
-    /// Nếu không tìm thấy, sẽ trả về lỗi Database.
+    /// Lấy thông tin sử dụng auto-trade từ cache hoặc bộ nhớ
     /// 
     /// # Arguments
     /// * `user_id` - ID của người dùng cần lấy thông tin
@@ -633,35 +642,44 @@ impl AutoTradeManager {
     /// * `Ok(AutoTradeUsage)` - Nếu tìm thấy thông tin
     /// * `Err(AutoTradeError)` - Nếu không tìm thấy hoặc có lỗi xảy ra
     pub async fn get_auto_trade_usage(&self, user_id: &str) -> Result<AutoTradeUsage, AutoTradeError> {
-        let usages = self.auto_trade_usages.read().await;
+        // Tìm trong cache trước
+        let auto_trade_usage = cache::get_or_load_with_cache(
+            &self.auto_trade_cache,
+            user_id,
+            |id| async {
+                // Nếu không có trong cache, tìm trong memory
+                let usages = self.auto_trade_usages.read().await;
+                usages.get(&id).cloned()
+            }
+        ).await;
         
-        if let Some(usage) = usages.get(user_id) {
-            return Ok(usage.clone());
-        }
-        
-        // Nếu không tìm thấy, thử tạo mới
-        drop(usages); // Giải phóng lock trước khi tạo mới
-        
-        // Lấy tham chiếu mạnh từ tham chiếu yếu
-        let subscription_manager = match self.subscription_manager.upgrade() {
-            Some(manager) => manager,
+        match auto_trade_usage {
+            Some(usage) => Ok(usage),
             None => {
-                error!("Không thể lấy tham chiếu đến SubscriptionManager trong get_auto_trade_usage");
-                return Err(AutoTradeError::Other("SubscriptionManager không còn tồn tại".to_string()));
+                // Nếu không tìm thấy, thử tạo mới
+                
+                // Lấy tham chiếu mạnh từ tham chiếu yếu
+                let subscription_manager = match self.subscription_manager.upgrade() {
+                    Some(manager) => manager,
+                    None => {
+                        error!("Không thể lấy tham chiếu đến SubscriptionManager trong get_auto_trade_usage");
+                        return Err(AutoTradeError::Other("SubscriptionManager không còn tồn tại".to_string()));
+                    }
+                };
+                
+                let subscription = match subscription_manager.get_user_subscription(user_id).await {
+                    Ok(sub) => sub,
+                    Err(e) => {
+                        return Err(AutoTradeError::Database(format!(
+                            "Không tìm thấy subscription cho user {}: {}", user_id, e
+                        )));
+                    }
+                };
+                
+                let is_vip_staking = subscription.is_twelve_month_vip();
+                self.create_auto_trade_usage(user_id, &subscription.subscription_type, is_vip_staking).await
             }
-        };
-        
-        let subscription = match subscription_manager.get_user_subscription(user_id).await {
-            Ok(sub) => sub,
-            Err(e) => {
-                return Err(AutoTradeError::Database(format!(
-                    "Không tìm thấy subscription cho user {}: {}", user_id, e
-                )));
-            }
-        };
-        
-        let is_vip_staking = subscription.is_twelve_month_vip();
-        self.create_auto_trade_usage(user_id, &subscription.subscription_type, is_vip_staking).await
+        }
     }
     
     /// Tạo mới một AutoTradeUsage cho người dùng
@@ -687,10 +705,14 @@ impl AutoTradeManager {
         let mut usage = AutoTradeUsage::new(user_id, subscription_type, is_vip_staking);
         usage.warning_sent = false;
         
+        // Lưu vào bộ nhớ
         {
             let mut auto_trade_usages = self.auto_trade_usages.write().await;
             auto_trade_usages.insert(user_id.to_string(), usage.clone());
         }
+        
+        // Cập nhật vào cache
+        self.auto_trade_cache.insert(user_id.to_string(), usage.clone()).await;
         
         Ok(usage)
     }
@@ -740,6 +762,11 @@ impl AutoTradeManager {
             auto_trade_usage.reset(subscription_type, is_vip_staking);
             auto_trade_usage.warning_sent = false;
             
+            // Cập nhật lại vào cache
+            let usage_clone = auto_trade_usage.clone();
+            drop(auto_trade_usages); // Giải phóng lock trước khi cập nhật cache
+            self.auto_trade_cache.insert(user_id.to_string(), usage_clone).await;
+            
             info!("Đã reset thời gian auto-trade cho user {}", user_id);
             
             // Gửi sự kiện thông báo
@@ -760,7 +787,12 @@ impl AutoTradeManager {
             usage.warning_sent = false;
             usage.activate();
             
-            auto_trade_usages.insert(user_id.to_string(), usage);
+            // Lưu vào HashMap
+            auto_trade_usages.insert(user_id.to_string(), usage.clone());
+            
+            // Cập nhật vào cache
+            drop(auto_trade_usages); // Giải phóng lock trước khi cập nhật cache
+            self.auto_trade_cache.insert(user_id.to_string(), usage).await;
             
             info!("Đã tạo và kích hoạt auto-trade mới cho user {}", user_id);
             Ok(())
@@ -803,42 +835,65 @@ impl AutoTradeManager {
         &self,
         user_id: &str,
     ) -> Result<AutoTradeUsage, AutoTradeError> {
-        // Lấy tham chiếu mạnh từ tham chiếu yếu
-        let subscription_manager = match self.subscription_manager.upgrade() {
-            Some(manager) => manager,
-            None => {
-                error!("Không thể lấy tham chiếu đến SubscriptionManager trong get_or_create_auto_trade_usage");
-                return Err(AutoTradeError::Other("SubscriptionManager không còn tồn tại".to_string()));
-            }
-        };
-        
-        // Lấy thông tin từ subscription manager
-        let subscription = subscription_manager.get_user_subscription(user_id).await
-            .map_err(|e| AutoTradeError::Other(format!("Không thể lấy thông tin subscription: {}", e)))?;
-        
-        // Xác định loại gói và có phải VIP staking không
-        let subscription_type = subscription.subscription_type;
-        let is_vip_staking = subscription.is_twelve_month_vip();
-        
-        {
-            let auto_trade_usages = self.auto_trade_usages.read().await;
-            if let Some(auto_trade_usage) = auto_trade_usages.get(user_id) {
-                // Đồng bộ trạng thái với subscription
-                let mut usage = auto_trade_usage.clone();
-                usage.sync_with_subscription(&subscription);
+        // Sử dụng cache.get_or_load_with_cache từ wallet/cache.rs
+        let auto_trade_usage = cache::get_or_load_with_cache(
+            &self.auto_trade_cache, 
+            user_id,
+            |id| async {
+                let subscription_manager = match self.subscription_manager.upgrade() {
+                    Some(manager) => manager,
+                    None => {
+                        error!("Không thể lấy tham chiếu đến SubscriptionManager trong get_or_create_auto_trade_usage");
+                        return None;
+                    }
+                };
                 
-                // Kiểm tra nếu là Free user thì cần reset theo định kỳ
-                if usage.check_and_reset_if_needed(&subscription_type) {
-                    // Đã reset, cập nhật lại vào map
-                    drop(auto_trade_usages);
-                    let mut auto_trade_usages = self.auto_trade_usages.write().await;
-                    auto_trade_usages.insert(user_id.to_string(), usage.clone());
+                // Lấy thông tin từ subscription manager
+                let subscription = match subscription_manager.get_user_subscription(&id).await {
+                    Ok(sub) => sub,
+                    Err(e) => {
+                        error!("Không thể lấy thông tin subscription: {}", e);
+                        return None;
+                    }
+                };
+                
+                // Xác định loại gói và có phải VIP staking không
+                let subscription_type = subscription.subscription_type;
+                let is_vip_staking = subscription.is_twelve_month_vip();
+                
+                // Kiểm tra map đầu tiên
+                {
+                    let auto_trade_usages = self.auto_trade_usages.read().await;
+                    if let Some(usage) = auto_trade_usages.get(&id) {
+                        // Đồng bộ trạng thái với subscription
+                        let mut usage_clone = usage.clone();
+                        usage_clone.sync_with_subscription(&subscription);
+                        
+                        // Kiểm tra nếu là Free user thì cần reset theo định kỳ
+                        if usage_clone.check_and_reset_if_needed(&subscription_type) {
+                            // Đã reset, cập nhật lại vào map
+                            drop(auto_trade_usages);
+                            let mut auto_trade_usages = self.auto_trade_usages.write().await;
+                            auto_trade_usages.insert(id.clone(), usage_clone.clone());
+                        }
+                        return Some(usage_clone);
+                    }
                 }
-                return Ok(usage);
+                
+                // Không tìm thấy, tạo mới
+                match self.create_auto_trade_usage(&id, &subscription_type, is_vip_staking).await {
+                    Ok(usage) => Some(usage),
+                    Err(e) => {
+                        error!("Lỗi khi tạo auto_trade_usage: {}", e);
+                        None
+                    }
+                }
             }
-        }
+        ).await;
         
-        // Không tìm thấy, tạo mới
-        self.create_auto_trade_usage(user_id, &subscription_type, is_vip_staking).await
+        match auto_trade_usage {
+            Some(usage) => Ok(usage),
+            None => Err(AutoTradeError::Other("Không thể lấy hoặc tạo auto trade usage".to_string()))
+        }
     }
 } 

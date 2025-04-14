@@ -10,6 +10,7 @@
     ├── lib.rs                     -> Khai báo module cấp cao [liên quan: tất cả module khác, điểm import cho crate]
     ├── main.rs                    -> Điểm chạy chính, demo WalletManagerApi với ví dụ tạo và import wallet [liên quan: walletmanager::api, config]
     ├── config.rs                  -> Cấu hình ví (WalletSystemConfig với default_chain_id, default_chain_type, max_wallets) [liên quan: walletmanager::api, walletlogic]
+    ├── cache.rs                   -> Tiện ích quản lý cache chung với AsyncCache, LRUCache và hàm get_or_load_with_cache [liên quan: các module sử dụng cache như users::subscription::auto_trade]
     ├── manifest.rs                -> Tài liệu tham chiếu module path [liên quan: tất cả các module, BẮT BUỘC đọc đầu tiên]
     ├── src/walletlogic/           -> Logic cốt lõi ví
     │   ├── mod.rs                 -> Khai báo submodule [liên quan: tất cả các file trong walletlogic]
@@ -22,7 +23,7 @@
     │   ├── lib.rs                 -> Re-export api, types để tiện import từ bên ngoài [liên quan: api.rs, types.rs]
     │   ├── mod.rs                 -> Khai báo submodule (api, types, chain) [liên quan: tất cả file trong walletmanager]
     │   ├── types.rs               -> Kiểu dữ liệu (SeedLength, WalletSecret, WalletConfig, WalletInfo) [liên quan: api.rs, chain.rs]
-    │   ├── chain.rs               -> Quản lý chain (ChainManager, DefaultChainManager, ChainConfig, ChainType: EVM, Solana, TON, NEAR, Stellar, Sui) [liên quan: api.rs, walletlogic::handler]
+    │   ├── chain.rs               -> Quản lý chain (ChainManager trait, DefaultChainManager, SimpleChainManager, ChainConfig, ChainType: EVM, Solana, TON, NEAR, Stellar, Sui, BTC) với async API [liên quan: api.rs, walletlogic::handler]
     ├── src/defi/                  -> Chức năng DeFi (farming, staking)
     │   ├── api.rs                 -> API công khai DefiApi cho DeFi với các phương thức get_farming_opportunities, get_staking_opportunities [liên quan: farm.rs, stake.rs, walletlogic::handler]
     │   ├── farm.rs                -> Logic farming với FarmingManager (add_liquidity, withdraw_liquidity, harvest_rewards) và FarmingOpportunity (pool_address, token_address, apy, tvl) [liên quan: api.rs, walletmanager::api]
@@ -34,11 +35,11 @@
     │   ├── free_user/             -> Module người dùng miễn phí
     │   │   ├── mod.rs             -> Khai báo submodule [liên quan: tất cả file trong free_user]
     │   │   ├── types.rs           -> Định nghĩa kiểu dữ liệu FreeUserData, UserStatus, TransactionType [liên quan: manager.rs, auth.rs, limits.rs]
-    │   │   ├── manager.rs         -> Quản lý tổng thể người dùng miễn phí (FreeUserManager), hạn chế số lượng giao dịch [liên quan: types.rs, auth.rs, limits.rs, records.rs, queries.rs]
-    │   │   ├── auth.rs            -> Xác thực người dùng miễn phí (login, register, verify) [liên quan: types.rs, manager.rs]
+    │   │   ├── manager.rs         -> Quản lý tổng thể người dùng miễn phí (FreeUserManager), sử dụng cache.rs để lưu và truy xuất dữ liệu hiệu quả [liên quan: types.rs, auth.rs, limits.rs, records.rs, queries.rs, cache.rs]
+    │   │   ├── auth.rs            -> Xác thực người dùng miễn phí (login, register, verify), sử dụng cache thông qua manager.rs [liên quan: types.rs, manager.rs]
     │   │   ├── limits.rs          -> Kiểm tra và áp dụng giới hạn giao dịch cho người dùng miễn phí [liên quan: types.rs, manager.rs]
     │   │   ├── records.rs         -> Ghi nhận hoạt động của người dùng miễn phí [liên quan: types.rs, manager.rs]
-    │   │   ├── queries.rs         -> Truy vấn dữ liệu người dùng miễn phí [liên quan: types.rs, manager.rs]
+    │   │   ├── queries.rs         -> Truy vấn dữ liệu người dùng miễn phí thông qua cache [liên quan: types.rs, manager.rs, cache.rs]
     │   │   └── test_utils.rs      -> Công cụ kiểm thử với MockWalletHandler [liên quan: tất cả file trong free_user, tests/auth_tests.rs]
     │   ├── subscription/          -> Module quản lý đăng ký người dùng
     │   │   ├── mod.rs             -> Khai báo submodule, re-export SubscriptionManager, StakingManager, các kiểu dữ liệu [liên quan: tất cả file trong subscription]
@@ -46,7 +47,7 @@
     │   │   ├── user_subscription.rs -> Cấu trúc dữ liệu UserSubscription, thực hiện trait SubscriptionConverter để chuyển đổi giữa các loại gói [liên quan: manager.rs, types.rs, auto_trade.rs, nft.rs]
     │   │   ├── types.rs           -> Kiểu dữ liệu đăng ký: SubscriptionType, SubscriptionStatus, Feature, PaymentToken [liên quan: manager.rs, user_subscription.rs, staking.rs]
     │   │   ├── constants.rs       -> Hằng số và tham số cấu hình (stake amounts, APY, giá gói đăng ký) [liên quan: manager.rs, staking.rs, payment.rs]
-    │   │   ├── auto_trade.rs      -> Quản lý thời gian auto-trade (AutoTradeManager), theo dõi thời gian sử dụng [liên quan: manager.rs, user_subscription.rs]
+    │   │   ├── auto_trade.rs      -> Quản lý thời gian auto-trade (AutoTradeManager), theo dõi thời gian sử dụng, sử dụng cache chung từ wallet/cache.rs [liên quan: manager.rs, user_subscription.rs, cache.rs]
     │   │   ├── nft.rs             -> Kiểm tra và xác thực NFT, quản lý VipNftInfo và NonNftVipStatus [liên quan: manager.rs, walletmanager::api, vip_user.rs]
     │   │   ├── staking.rs         -> Quản lý stake DMD token (ERC-1155) cho gói 12 tháng, 30% APY, xử lý TokenStake và StakeStatus [liên quan: manager.rs, types.rs, constants.rs, walletmanager::api]
     │   │   ├── payment.rs         -> Xử lý thanh toán đăng ký, xác minh giao dịch blockchain [liên quan: manager.rs, constants.rs, walletmanager::api]
@@ -75,8 +76,8 @@
     - walletmanager::api gọi walletlogic::init, handler, dùng config, chain
     - walletmanager::api cung cấp các phương thức công khai như create_wallet, import_wallet, export_seed_phrase, export_private_key, remove_wallet, update_chain_id, get_balance, sign_transaction, send_transaction
     - walletmanager::api sử dụng DefaultChainManager để quản lý các provider kết nối đến blockchain
-    - walletmanager dùng walletmanager::types, chain
-    - walletmanager::chain hỗ trợ nhiều loại blockchain: EVM, Solana, TON, NEAR, Stellar, Sui
+    - walletmanager::chain định nghĩa trait ChainManager với API async nhất quán và các cài đặt DefaultChainManager, SimpleChainManager
+    - walletmanager::chain hỗ trợ nhiều loại blockchain: EVM, Solana, TON, NEAR, Stellar, Sui, BTC
     - walletmanager::types định nghĩa các cấu trúc dữ liệu như SeedLength, WalletSecret, WalletConfig, WalletInfo
     - defi có thể dùng walletlogic::handler để truy xuất ví
     - defi::api cung cấp DefiApi với các phương thức get_farming_opportunities, get_staking_opportunities
@@ -87,6 +88,7 @@
     - users có thể liên kết với walletlogic qua user_id
     - users::free_user cung cấp chức năng cơ bản cho người dùng miễn phí với giới hạn giao dịch
     - users::free_user::manager quản lý hạn chế giao dịch, lưu lịch sử hoạt động
+    - users::free_user::manager sử dụng cache.rs để lưu trữ và truy xuất thông tin người dùng hiệu quả
     - users::premium_user quản lý người dùng premium với PremiumUserManager và PremiumUserData
     - users::premium_user.rs hỗ trợ nâng cấp từ free lên premium, gia hạn đăng ký
     - users::vip_user.rs cung cấp VipUserManager với đặc quyền cao cấp nhất, kiểm tra NFT
@@ -99,6 +101,7 @@
     - users::subscription::staking quản lý TokenStake, StakeStatus cho việc stake DMD token
     - users::subscription::payment phụ thuộc vào blockchain để xác minh giao dịch
     - users::subscription::auto_trade quản lý thời gian sử dụng auto_trade cho từng loại gói
+    - users::subscription::auto_trade sử dụng cache.rs để lưu trữ và truy xuất thông tin auto_trade hiệu quả
     - users::subscription::events gửi thông báo khi có thay đổi subscription
     - users::subscription::types định nghĩa SubscriptionType, SubscriptionStatus, Feature, PaymentToken
     - users::subscription::staking phụ thuộc vào walletmanager::api để tương tác với blockchain

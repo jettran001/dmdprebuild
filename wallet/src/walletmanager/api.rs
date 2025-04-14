@@ -1,3 +1,5 @@
+//! API công khai cho wallet manager, cung cấp các chức năng quản lý ví.
+
 // External imports
 use ethers::core::types::{TransactionRequest, U256};
 use ethers::signers::LocalWallet;
@@ -306,11 +308,23 @@ impl WalletManagerApi {
     /// # Arguments
     /// - `address`: Địa chỉ ví gửi giao dịch.
     /// - `tx`: Giao dịch cần gửi.
+    ///
+    /// # Returns
+    /// - `Ok(String)`: Hash giao dịch.
+    /// - `Err(WalletError)`: Nếu có lỗi.
     #[flow_from("common::gateway")]
     pub async fn send_transaction(&self, address: Address, tx: TransactionRequest) -> Result<String, WalletError> 
     where Self: Send + Sync + 'static 
     {
-        self.manager.send_transaction(address, tx, self.chain_manager.as_ref())
+        // Thay đổi cách gọi send_transaction để phù hợp với ChainManager async
+        let wallet = self.manager.get_wallet_internal(address).await?;
+        let chain_id = self.manager.get_chain_id_internal(address).await?;
+        
+        // Lấy provider theo chain_id
+        let provider = self.chain_manager.get_provider(chain_id).await?;
+        
+        // Thực hiện giao dịch
+        self.manager.send_transaction_with_provider(wallet, tx, provider)
             .await
             .context("Lỗi khi gửi giao dịch")
             .map_err(|e| match e.downcast::<WalletError>() {
@@ -323,11 +337,22 @@ impl WalletManagerApi {
     ///
     /// # Arguments
     /// - `address`: Địa chỉ ví.
+    ///
+    /// # Returns
+    /// - `Ok(U256)`: Số dư.
+    /// - `Err(WalletError)`: Nếu có lỗi.
     #[flow_from("common::gateway")]
     pub async fn get_balance(&self, address: Address) -> Result<U256, WalletError> 
     where Self: Send + Sync + 'static 
     {
-        self.manager.get_balance(address, self.chain_manager.as_ref())
+        // Thay đổi cách gọi get_balance để phù hợp với ChainManager async
+        let chain_id = self.manager.get_chain_id_internal(address).await?;
+        
+        // Lấy provider theo chain_id
+        let provider = self.chain_manager.get_provider(chain_id).await?;
+        
+        // Lấy số dư từ provider
+        self.manager.get_balance_with_provider(address, provider)
             .await
             .context("Lỗi khi lấy số dư")
             .map_err(|e| match e.downcast::<WalletError>() {

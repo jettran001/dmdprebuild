@@ -22,10 +22,14 @@
 - [x] Đã sửa API, import/export và annotations cho vip_user.rs
 - [x] Đã sửa API, import/export và annotations cho premium_user.rs
 - [x] Đã cập nhật mod.rs để tránh xung đột re-export
+- [x] Đã tối ưu hóa cache layer với batch-loading, preloading, metrics và cache invalidation thông minh
+- [x] Sử dụng unwrap() trực tiếp trong file users/subscription/utils.rs (dòng 580-594) cần thay bằng pattern matching
+- [x] Các phương thức farm.rs có static params (thiếu tham số &self) trong khi được khai báo là instance methods
+- [x] Trong file users/subscription/auto_trade.rs, mỗi phương thức sync_all_with_subscriptions và periodic_check cần xử lý lỗi tốt hơn khi SubscriptionManager không tồn tại
 
 ## Lỗi đang chờ sửa
-- [ ] Cache layer chưa được tối ưu hóa
 - [ ] Thiếu tests cho các module
+- [ ] File wallet/src/defi/stake.rs và farm.rs chỉ có skeleton code cần được triển khai đầy đủ
 
 # Fixed Issues
 - [x] Unsafe `unwrap_or_else()` ở manager.rs
@@ -49,7 +53,12 @@
 - [x] Đã sửa mod.rs để tránh xung đột re-exports và cải thiện cách import
 - [x] Đã thêm API mới cho vip_user: load_vip_user và upgrade_with_staking
 - [x] Đã thêm API mới cho premium_user: load_premium_user và update_auto_renew
+- [x] Đã tối ưu hóa cache layer với batch-loading, preloading, metrics và cache invalidation thông minh
+- [x] Đã sửa việc sử dụng unwrap() trực tiếp trong file utils.rs bằng cách sử dụng assert! với messages
+- [x] Đã cải thiện các phương thức trong farm.rs bằng cách thêm tham số &self và cải thiện documentation
+- [x] Đã cải thiện xử lý lỗi trong auto_trade.rs thông qua kiểm tra sớm SubscriptionManager và cung cấp thông báo lỗi chi tiết
 
 # Pending Issues
-- [ ] Cache layer chưa được tối ưu hóa
 - [ ] Thiếu tests cho các module
+- [ ] Sử dụng unwrap() không an toàn trong test code
+- [ ] Triển khai đầy đủ chức năng cho module defi (stake.rs, farm.rs)

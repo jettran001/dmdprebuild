@@ -29,6 +29,7 @@ use crate::error::WalletError;
 use crate::walletmanager::api::WalletManagerApi;
 use crate::users::subscription::types::{SubscriptionStatus, SubscriptionType, PaymentToken};
 use crate::users::subscription::user_subscription::UserSubscription;
+use crate::cache::{get_premium_user, update_premium_user_cache};
 
 /// Trạng thái của người dùng Premium
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,8 +80,6 @@ pub struct PaymentRecord {
 pub struct PremiumUserManager {
     /// API wallet để tương tác với blockchain
     wallet_api: Arc<RwLock<WalletManagerApi>>,
-    /// Cache thông tin người dùng Premium
-    premium_users: HashMap<String, PremiumUserData>,
 }
 
 impl PremiumUserManager {
@@ -89,7 +88,6 @@ impl PremiumUserManager {
     pub fn new(wallet_api: Arc<RwLock<WalletManagerApi>>) -> Self {
         Self {
             wallet_api,
-            premium_users: HashMap::new(),
         }
     }
 
@@ -97,7 +95,10 @@ impl PremiumUserManager {
     #[flow_from("wallet::api")]
     pub async fn can_perform_transaction(&self, user_id: &str) -> Result<bool, WalletError> {
         // Người dùng premium ít bị giới hạn hơn free users
-        if let Some(user_data) = self.premium_users.get(user_id) {
+        if let Some(user_data) = get_premium_user(user_id, |id| async move {
+            // Hàm loader, sẽ được gọi khi không tìm thấy trong cache
+            self.load_premium_user_from_db(&id).await.unwrap_or(None)
+        }).await {
             // Kiểm tra xem subscription có còn hiệu lực
             if user_data.subscription_end_date > Utc::now() {
                 return Ok(true);
@@ -105,8 +106,6 @@ impl PremiumUserManager {
         }
         
         // Kiểm tra trong subscription database
-        // TODO: Thực hiện kiểm tra trong database nếu không tìm thấy trong cache
-        
         Ok(true)
     }
 
@@ -164,7 +163,7 @@ impl PremiumUserManager {
         
         // TODO: Xử lý thanh toán và ghi nhận vào blockchain
         
-        // Thêm vào cache
+        // Thay đổi phần cache
         let premium_user_data = PremiumUserData {
             user_id: user_id.to_string(),
             created_at: now,
@@ -175,7 +174,8 @@ impl PremiumUserManager {
             payment_history: vec![],
         };
         
-        self.premium_users.insert(user_id.to_string(), premium_user_data);
+        // Sử dụng global cache
+        update_premium_user_cache(user_id, premium_user_data).await;
         
         info!("Nâng cấp thành công từ Free lên Premium cho user {}, hết hạn {}", 
               user_id, end_date.format("%Y-%m-%d"));
@@ -220,10 +220,14 @@ impl PremiumUserManager {
         renewed_subscription.end_date = new_end_date;
         renewed_subscription.status = SubscriptionStatus::Active;
         
-        // Cập nhật cache nếu có
-        if let Some(user_data) = self.premium_users.get_mut(user_id) {
+        // Cập nhật cache
+        // Tải dữ liệu user từ cache, cập nhật, và lưu lại
+        if let Some(mut user_data) = get_premium_user(user_id, |id| async move {
+            self.load_premium_user_from_db(&id).await.unwrap_or(None)
+        }).await {
             user_data.subscription_end_date = new_end_date;
             user_data.last_active = Utc::now();
+            update_premium_user_cache(user_id, user_data).await;
         }
         
         info!("Gia hạn thành công Premium subscription cho user {}, hết hạn mới: {}", 
@@ -297,11 +301,16 @@ impl PremiumUserManager {
     /// - `Err`: Nếu có lỗi
     #[flow_from("database::users")]
     pub async fn load_premium_user(&mut self, user_id: &str) -> Result<Option<PremiumUserData>, WalletError> {
-        // Kiểm tra trong cache trước
-        if let Some(user_data) = self.premium_users.get(user_id) {
-            return Ok(Some(user_data.clone()));
-        }
+        // Sử dụng global cache với loader function
+        let user_data = get_premium_user(user_id, |id| async move {
+            self.load_premium_user_from_db(&id).await.unwrap_or(None)
+        }).await;
         
+        Ok(user_data)
+    }
+    
+    // Phương thức mới để tách biệt việc tải từ database
+    async fn load_premium_user_from_db(&self, user_id: &str) -> Result<Option<PremiumUserData>, WalletError> {
         // TODO: Tải từ database thực tế
         info!("Tải thông tin người dùng Premium {} từ database", user_id);
         
@@ -320,24 +329,17 @@ impl PremiumUserManager {
     /// - `Err`: Nếu có lỗi
     #[flow_from("wallet::ui")]
     pub async fn update_auto_renew(&mut self, user_id: &str, auto_renew: bool) -> Result<(), WalletError> {
-        if let Some(user_data) = self.premium_users.get_mut(user_id) {
+        // Sử dụng global cache
+        if let Some(mut user_data) = get_premium_user(user_id, |id| async move {
+            self.load_premium_user_from_db(&id).await.unwrap_or(None)
+        }).await {
             user_data.auto_renew = auto_renew;
+            update_premium_user_cache(user_id, user_data).await;
             info!("Đã cập nhật tự động gia hạn cho Premium user {} thành {}", user_id, auto_renew);
             return Ok(());
         }
         
-        // Không tìm thấy trong cache, cần tải từ database
-        match self.load_premium_user(user_id).await? {
-            Some(mut user_data) => {
-                user_data.auto_renew = auto_renew;
-                self.premium_users.insert(user_id.to_string(), user_data);
-                info!("Đã cập nhật tự động gia hạn cho Premium user {} thành {}", user_id, auto_renew);
-                Ok(())
-            },
-            None => {
-                Err(WalletError::Other(format!("Không tìm thấy Premium user {}", user_id)))
-            }
-        }
+        Err(WalletError::Other(format!("Không tìm thấy Premium user {}", user_id)))
     }
 }
 

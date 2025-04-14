@@ -586,15 +586,16 @@ mod tests {
         // Xử lý subscription hết hạn
         let event = SubscriptionUtils::process_expired_subscription(&mut expired_subscription);
         
-        // Kiểm tra kết quả
-        assert!(event.is_some());
-        // Thay vì unwrap() trực tiếp, sử dụng pattern matching
-        if let Some(event) = event {
-            assert_eq!(event.event_type, EventType::SubscriptionExpired);
-        } else {
-            panic!("Event không được trả về như mong đợi");
+        // Kiểm tra kết quả, sử dụng assert! thay vì panic!
+        assert!(event.is_some(), "Phải trả về một sự kiện");
+        
+        // Sử dụng match để kiểm tra giá trị bên trong Some
+        match event {
+            Some(event) => assert_eq!(event.event_type, EventType::SubscriptionExpired, "Event type phải là SubscriptionExpired"),
+            None => assert!(false, "Không nhận được event như mong đợi")
         }
-        assert_eq!(expired_subscription.status, SubscriptionStatus::Expired);
-        assert_eq!(expired_subscription.subscription_type, SubscriptionType::Free);
+        
+        assert_eq!(expired_subscription.status, SubscriptionStatus::Expired, "Status phải là Expired");
+        assert_eq!(expired_subscription.subscription_type, SubscriptionType::Free, "Subscription type phải là Free");
     }
 } 

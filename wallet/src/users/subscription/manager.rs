@@ -21,13 +21,14 @@
 // Standard library imports
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 // External imports
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use uuid::Uuid;
 use rust_decimal::Decimal;
 use tokio::time::{self, Duration as TokioDuration, interval};
@@ -39,6 +40,10 @@ use crate::users::free_user::{FreeUserData, FreeUserManager};
 use crate::users::premium_user::{PremiumUserData, PremiumUserManager};
 use crate::walletmanager::api::WalletManagerApi;
 use crate::walletmanager::chain::ChainType;
+use crate::cache;
+use crate::db::Database;
+use crate::users::subscription::constants::{USER_DATA_CACHE_SECONDS};
+use crate::users::subscription::UserSubscription;
 
 use super::{
     auto_trade::AutoTradeManager,
@@ -71,17 +76,12 @@ pub struct SubscriptionManager {
     auto_trade_manager: Option<Arc<AutoTradeManager>>,
     /// Event emitter để gửi thông báo
     event_emitter: Option<EventEmitter>,
+    db: Arc<Database>,
 }
 
 impl SubscriptionManager {
     /// Khởi tạo SubscriptionManager mới.
-    pub fn new(
-        wallet_api: Arc<RwLock<WalletManagerApi>>,
-        free_user_manager: Arc<FreeUserManager>,
-        premium_user_manager: Arc<PremiumUserManager>,
-        dmd_token_address: Address,
-        usdc_token_address: Address,
-    ) -> Self {
+    pub fn new(db: Arc<Database>) -> Self {
         let subscription_plans = vec![
             SubscriptionPlan {
                 plan_type: SubscriptionType::Premium,
@@ -132,13 +132,14 @@ impl SubscriptionManager {
         let instance = Self {
             subscription_plans,
             user_subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            dmd_token_address,
-            usdc_token_address,
-            wallet_api,
-            free_user_manager,
-            premium_user_manager,
+            dmd_token_address: Address::zero(),
+            usdc_token_address: Address::zero(),
+            wallet_api: Arc::new(RwLock::new(WalletManagerApi::new())),
+            free_user_manager: Arc::new(FreeUserManager::new()),
+            premium_user_manager: Arc::new(PremiumUserManager::new()),
             auto_trade_manager: None,
             event_emitter: None,
+            db,
         };
         
         instance
@@ -161,6 +162,7 @@ impl SubscriptionManager {
             premium_user_manager: self.premium_user_manager.clone(),
             auto_trade_manager: None,
             event_emitter: self.event_emitter.clone(),
+            db: self.db.clone(),
         });
         
         // Tạo mới AutoTradeManager sử dụng Arc, AutoTradeManager sẽ lưu Weak Reference
@@ -189,6 +191,7 @@ impl SubscriptionManager {
             premium_user_manager: self.premium_user_manager.clone(),
             auto_trade_manager: None,
             event_emitter: None,
+            db: self.db.clone(),
         }
     }
 
