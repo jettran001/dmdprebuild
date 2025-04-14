@@ -1,0 +1,295 @@
+# DiamondChain Project Structure Map
+# Tài liệu tổng hợp từ các manifest.rs của các module
+
+## 1. Module Common (Gateway Server)
+- **Mô tả**: Server Gateway điều phối API, xác thực người dùng và giao tiếp web3
+- **Đường dẫn**: /common
+- **Cấu trúc**:
+  - `api`: API Gateway và Router
+    - `gateway`: API gateway xử lý yêu cầu
+    - `router`: Định tuyến yêu cầu
+    - `middleware`: Logging, rate limiting
+    - `error_handling`: Xử lý lỗi & format
+    - `docs`: Documentation & testing
+  - `auth`: Xác thực người dùng
+    - `authentication`: JWT, OAuth, v.v.
+    - `authorization`: Phân quyền truy cập
+    - `session`: Quản lý phiên làm việc
+    - `web3_auth`: Xác thực wallet connect
+    - `security`: Bảo vệ chống tấn công
+  - `web3`: Giao tiếp blockchain
+    - `blockchain_gateway`: Kết nối với chains
+    - `transaction`: Quản lý transaction
+    - `contract_interaction`: Smart contract
+    - `event_manager`: Event & subscription
+    - `multichain`: Đa chuỗi và bridge
+  - `frontend`: Dioxus framework
+    - `components`: UI components
+    - `state_management`: State & data flow
+    - `routing`: Navigation
+    - `i18n`: Đa ngôn ngữ
+    - `theming`: Responsive design
+  - `performance`: Tối ưu hiệu năng
+    - `queue`: Redis + Tokio Mutex queue
+    - `concurrency`: Thread safety control
+    - `cache`: Caching mechanism
+    - `optimization`: Performance tuning
+    - `monitoring`: Metrics & monitoring
+  - `mpc`: Multi-Party Computation
+    - `session`: Session management
+    - `cache`: Token/session caching
+    - `signing`: Ký và verify
+    - `key_management`: Key security
+    - `threshold`: Threshold control
+  - `network_integration`: Tích hợp mạng
+    - `grpc`: gRPC integration
+    - `websocket`: WebSocket
+    - `http2`: HTTP/2
+    - `redis`: Redis integration
+    - `p2p`: P2P communications
+  - `config`: Cấu hình
+    - `env`: Biến môi trường
+    - `system`: Cấu hình hệ thống
+    - `service`: Cấu hình service
+    - `feature_flags`: Feature flags
+    - `logging`: Logging configuration
+
+## 2. Module Network
+- **Mô tả**: Cung cấp cơ sở hạ tầng mạng và giao thức kết nối
+- **Đường dẫn**: /network
+- **Cấu trúc**:
+  - `docker`: Quản lý container
+    - `compose`: Docker compose
+    - `containers`: Network containers
+    - `networks`: Docker network config
+  - `nodes`: Quản lý node mạng
+    - `depin`: DePIN nodes
+    - `master_slave`: Master-Slave structure
+    - `scaling`: Node scaling & balancing
+    - `discovery`: Node discovery & registry
+  - `protocols`: Các giao thức mạng
+    - `ipfs`: InterPlanetary File System
+    - `quic`: QUIC protocol
+    - `grpc`: gRPC
+    - `websocket`: WebSocket
+    - `redis`: Redis
+    - `libp2p`: Libp2p
+    - `webrtc`: WebRTC
+    - `coap`: CoAP protocol
+  - `messaging`: Truyền tin
+    - `mqtt`: MQTT broker
+    - `kafka`: Apache Kafka
+    - `zeromq`: ZeroMQ
+    - `messagepack`: MessagePack
+  - `edge`: Edge computing
+    - `computing`: Tính toán Edge
+    - `sync`: Đồng bộ dữ liệu
+    - `optimization`: Tối ưu băng thông
+  - `wasm`: WebAssembly
+    - `runtime`: WASM runtime
+    - `compiler`: WASM compiler
+    - `integration`: WASM integration
+
+## 3. Module Wallet
+- **Mô tả**: Quản lý ví và giao dịch an toàn
+- **Đường dẫn**: /wallet
+- **Cấu trúc**:
+  - `keystore`: Quản lý khóa
+  - `accounts`: Quản lý tài khoản
+  - `transactions`: Quản lý giao dịch
+  - `users`: Người dùng và quyền
+    - `subscription`: Dịch vụ theo gói
+    - `vip_user`: Người dùng VIP
+    - `premium_user`: Người dùng premium
+  - `security`: Bảo mật
+  - `mpc`: Multi-party computation
+
+## 4. Module SnipeBot
+- **Mô tả**: Bot giao dịch DeFi thông minh
+- **Đường dẫn**: /snipebot
+- **Cấu trúc**:
+  - `core`: Core logic
+  - `strategies`: Chiến lược giao dịch
+  - `monitor`: Giám sát thị trường
+  - `execution`: Thực thi giao dịch
+  - `analytics`: Phân tích dữ liệu
+  - `risk`: Quản lý rủi ro
+
+## 5. Module Blockchain
+- **Mô tả**: Tương tác với blockchain, quản lý EIP-2535
+- **Đường dẫn**: /blockchain
+- **Cấu trúc**:
+  - `chains`: Hỗ trợ đa blockchain
+  - `contracts`: Smart contracts
+  - `eip2535`: Diamond standard
+  - `abi`: Contract ABIs
+  - `events`: Xử lý blockchain events
+  - `sync`: Đồng bộ dữ liệu
+
+## Mối quan hệ giữa các module
+- **Common → Wallet**: Gọi API wallet để xác thực, quản lý phiên.
+- **Common → SnipeBot**: Điều phối yêu cầu thực thi bot.
+- **Common → Network**: Sử dụng các service mạng (gRPC, WebSocket, Redis).
+- **Common → Blockchain**: Truy vấn dữ liệu blockchain qua gateway.
+- **Wallet → Blockchain**: Thực hiện giao dịch, ký và xác thực.
+- **SnipeBot → Wallet**: Sử dụng ví để giao dịch.
+- **SnipeBot → Blockchain**: Giám sát và tương tác với blockchain.
+- **Network → Blockchain**: Kết nối và đồng bộ node blockchain.
+
+## Luồng dữ liệu
+1. **UI → Common → Wallet → Blockchain**:
+   - Yêu cầu người dùng → API Gateway → Wallet Service → Blockchain Transaction
+2. **UI → Common → SnipeBot → Wallet → Blockchain**:
+   - Cấu hình bot → API Gateway → Bot Execution → Wallet Transaction → Blockchain
+3. **Network → Common → UI**:
+   - Event Blockchain → Network Listen → Common Websocket → UI Update
+
+## Sơ đồ cây cấu trúc dự án (Tree Structure)
+
+```
+DiamondChain/
+├── common/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── api/
+│       │   ├── gateway.rs
+│       │   ├── router.rs
+│       │   ├── middleware.rs
+│       │   ├── error_handling.rs
+│       │   └── docs.rs
+│       ├── auth/
+│       │   ├── authentication.rs
+│       │   ├── authorization.rs
+│       │   ├── session.rs
+│       │   ├── web3_auth.rs
+│       │   └── security.rs
+│       ├── web3/
+│       │   ├── blockchain_gateway.rs
+│       │   ├── transaction.rs
+│       │   ├── contract_interaction.rs
+│       │   ├── event_manager.rs
+│       │   └── multichain.rs
+│       ├── frontend/
+│       │   ├── components.rs
+│       │   ├── state_management.rs
+│       │   ├── routing.rs
+│       │   ├── i18n.rs
+│       │   └── theming.rs
+│       ├── performance/
+│       │   ├── queue.rs
+│       │   ├── concurrency.rs
+│       │   ├── cache.rs
+│       │   ├── optimization.rs
+│       │   └── monitoring.rs
+│       ├── mpc/
+│       │   ├── session.rs
+│       │   ├── cache.rs
+│       │   ├── signing.rs
+│       │   ├── key_management.rs
+│       │   └── threshold.rs
+│       ├── network_integration/
+│       │   ├── grpc.rs
+│       │   ├── websocket.rs
+│       │   ├── http2.rs
+│       │   ├── redis.rs
+│       │   └── p2p.rs
+│       └── config/
+│           ├── env.rs
+│           ├── system.rs
+│           ├── service.rs
+│           ├── feature_flags.rs
+│           └── logging.rs
+├── network/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── docker/
+│       │   ├── compose.rs
+│       │   ├── containers.rs
+│       │   └── networks.rs
+│       ├── nodes/
+│       │   ├── depin.rs
+│       │   ├── master_slave.rs
+│       │   ├── scaling.rs
+│       │   └── discovery.rs
+│       ├── protocols/
+│       │   ├── ipfs.rs
+│       │   ├── quic.rs
+│       │   ├── grpc.rs
+│       │   ├── websocket.rs
+│       │   ├── redis.rs
+│       │   ├── libp2p.rs
+│       │   ├── webrtc.rs
+│       │   └── coap.rs
+│       ├── messaging/
+│       │   ├── mqtt.rs
+│       │   ├── kafka.rs
+│       │   ├── zeromq.rs
+│       │   └── messagepack.rs
+│       ├── edge/
+│       │   ├── computing.rs
+│       │   ├── sync.rs
+│       │   └── optimization.rs
+│       └── wasm/
+│           ├── runtime.rs
+│           ├── compiler.rs
+│           └── integration.rs
+├── wallet/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── keystore/
+│       ├── accounts/
+│       ├── transactions/
+│       ├── users/
+│       │   ├── subscription/
+│       │   ├── vip_user.rs
+│       │   └── premium_user.rs
+│       ├── security/
+│       └── mpc/
+├── snipebot/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── core/
+│       ├── strategies/
+│       ├── monitor/
+│       ├── execution/
+│       ├── analytics/
+│       └── risk/
+└── blockchain/
+    ├── manifest.rs
+    ├── lib.rs
+    └── src/
+        ├── chains/
+        ├── contracts/
+        ├── eip2535/
+        ├── abi/
+        ├── events/
+        └── sync/
+```
+
+## Sơ đồ mối quan hệ giữa các module
+
+```
+┌─────────┐      ┌─────────┐      ┌─────────┐
+│         │      │         │      │         │
+│  UI     │─────▶│ Common  │─────▶│ Wallet  │
+│         │      │         │      │         │
+└─────────┘      └────┬────┘      └────┬────┘
+                      │                 │
+                      ▼                 ▼
+                ┌─────────┐      ┌─────────┐
+                │         │      │         │
+                │SnipeBot │─────▶│Blockchain│
+                │         │      │         │
+                └────┬────┘      └────┬────┘
+                     │                 │
+                     ▼                 ▼
+                ┌─────────┐      ┌─────────┐
+                │         │      │         │
+                │ Network │◀────▶│   MPC   │
+                │         │      │         │
+                └─────────┘      └─────────┘
+```
