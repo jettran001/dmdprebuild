@@ -58,7 +58,7 @@
         ]
       },
       "during_edit": {
-        "priority": "HIGH",
+        "priority": "MANDATORY",
         "description": "BẮT BUỘC tuân thủ khi chỉnh sửa code",
         "rules": [
           "Duy trì cấu trúc module như trong manifest.rs",
@@ -67,7 +67,8 @@
           "Khi tạo các folder hoặc file mới, luôn dùng các command cho powershell để tạo",
           "Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác",
           "Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo",
-          "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp"
+          "Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp",
+          "Khi sửa lỗi phải đảm bảo hoàn thiện code, xong 1 phạm vi mới qua phạm vi tiếp theo"
         ]
       },
       "post_check": {
@@ -77,7 +78,8 @@
           "Kiểm tra tính toàn vẹn module sau khi chỉnh sửa",
           "Cập nhật tài liệu khi thay đổi chức năng",
           "Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs",
-          "Cập nhật lại các thay đổi vào file manifest.rs của domain hiện tại"
+          "Cập nhật lại các thay đổi vào file manifest.rs của domain hiện tại",
+          "Khi cập nhật manifest.rs quét định dạng trước và  chỉ cập nhật các thay đổi theo định dạng mặc định có sẵn"
         ]
       },
       "module_synchronization": {

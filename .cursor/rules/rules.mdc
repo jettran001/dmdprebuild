@@ -1,0 +1,11 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# Your rule content
+- Bắt buộc tuân thủ và thực hiện đúng mệnh lệnh được giao, không tự ý thay đổi mệnh lệnh . 
+- Bắt buộc đọc file .rules trước khi tạo code và sửa lỗi .
+- Bắt buộc tuân thủ nghiêm ngặt quy tắc trong .rules .
+- Bắt buộc kiểm tra đầu tiên file manifest tại thư mục domain khi được yêu cầu quét cấu trúc.  

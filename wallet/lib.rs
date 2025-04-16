@@ -6,4 +6,5 @@ pub mod walletlogic;
 pub mod walletmanager;
 pub mod defi;
 pub mod users;
+pub mod contracts;
 pub mod cache;
