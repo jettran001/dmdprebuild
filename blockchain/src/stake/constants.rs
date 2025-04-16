@@ -1,28 +1,78 @@
-//! Module chứa các hằng số dùng cho staking
+//! Các hằng số cho module stake
+//!
+//! Chứa các giá trị cố định được sử dụng trong toàn bộ module stake
 
-use rust_decimal::Decimal;
+use std::time::Duration;
 use ethers::types::U256;
 
-/// Thời gian lock tối đa (1 năm tính bằng giây)
-pub const MAX_LOCK_TIME: u64 = 365 * 86400;
+/// Thời gian tối thiểu giữa các lần claim rewards (giây)
+pub const MIN_CLAIM_INTERVAL: u64 = 3600; // 1 giờ
 
-/// Timeout cho các giao dịch blockchain (5 giây)
-pub const BLOCKCHAIN_TIMEOUT: u64 = 5000;
+/// Thời gian lock tối thiểu cho stake (giây)
+pub const MIN_LOCK_TIME: u64 = 86400; // 24 giờ
 
-/// Số lượng token tối thiểu để stake (100 DMD) - 10^18 wei
-pub const MIN_STAKE_AMOUNT: U256 = U256([100_000_000_000_000_000_000u64, 0, 0, 0]);
+/// Thời gian lock tối đa cho stake (giây)
+pub const MAX_LOCK_TIME: u64 = 31536000; // 1 năm
 
-/// APY cho 7 ngày staking (10%)
-pub const SEVEN_DAYS_APY: Decimal = Decimal::from_parts(100, 0, 0, false, 1);
+/// Số validator tối thiểu cho một pool
+pub const MIN_VALIDATORS: u32 = 3;
 
-/// APY cho 30 ngày staking (15%)
-pub const THIRTY_DAYS_APY: Decimal = Decimal::from_parts(150, 0, 0, false, 1);
+/// Số validator tối đa cho một pool
+pub const MAX_VALIDATORS: u32 = 100;
 
-/// APY cho 90 ngày staking (20%)
-pub const NINETY_DAYS_APY: Decimal = Decimal::from_parts(200, 0, 0, false, 1);
+/// Phần trăm phí tối thiểu cho unstake sớm
+pub const EARLY_UNSTAKE_FEE_PERCENT: u64 = 10; // 10%
 
-/// APY cho 180 ngày staking (25%)
-pub const ONE_EIGHTY_DAYS_APY: Decimal = Decimal::from_parts(250, 0, 0, false, 1);
+/// Số block tối thiểu giữa các lần cập nhật APY
+pub const MIN_BLOCKS_BETWEEN_APY_UPDATE: u64 = 100;
 
-/// APY cho 365 ngày staking (30%)
-pub const THREE_SIXTY_FIVE_DAYS_APY: Decimal = Decimal::from_parts(300, 0, 0, false, 1); 
+/// Số block tối thiểu giữa các lần phân phối rewards
+pub const MIN_BLOCKS_BETWEEN_REWARD_DISTRIBUTION: u64 = 1000;
+
+/// Thời gian timeout cho các giao dịch (ms)
+pub const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Số lần retry tối đa cho các giao dịch
+pub const MAX_TRANSACTION_RETRIES: u32 = 3;
+
+/// Thời gian chờ giữa các lần retry (ms)
+pub const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Số lượng token tối thiểu để stake
+pub const MIN_STAKE_AMOUNT: U256 = U256([1000000000000000000, 0, 0, 0]); // 1 token
+
+/// Số lượng token tối đa để stake
+pub const MAX_STAKE_AMOUNT: U256 = U256([1000000000000000000000000, 0, 0, 0]); // 1,000,000 tokens
+
+/// Phần trăm rewards tối thiểu cho validator
+pub const MIN_VALIDATOR_REWARD_PERCENT: u64 = 5; // 5%
+
+/// Phần trăm rewards tối đa cho validator
+pub const MAX_VALIDATOR_REWARD_PERCENT: u64 = 20; // 20%
+
+/// Thời gian cache cho pool info (giây)
+pub const POOL_INFO_CACHE_TIME: u64 = 300; // 5 phút
+
+/// Thời gian cache cho user stake info (giây)
+pub const USER_STAKE_CACHE_TIME: u64 = 60; // 1 phút
+
+/// Thời gian cache cho rewards (giây)
+pub const REWARDS_CACHE_TIME: u64 = 300; // 5 phút
+
+/// Số lượng decimals mặc định cho token
+pub const DEFAULT_TOKEN_DECIMALS: u8 = 18;
+
+/// Địa chỉ contract staking mặc định
+pub const DEFAULT_STAKING_CONTRACT: &str = "0x0000000000000000000000000000000000000000";
+
+/// Địa chỉ token mặc định
+pub const DEFAULT_TOKEN_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
+/// APY mặc định cho pool mới
+pub const DEFAULT_APY: f64 = 10.0; // 10%
+
+/// Phần trăm phí tối thiểu cho unstake
+pub const MIN_UNSTAKE_FEE_PERCENT: u64 = 1; // 1%
+
+/// Phần trăm phí tối đa cho unstake
+pub const MAX_UNSTAKE_FEE_PERCENT: u64 = 50; // 50% 

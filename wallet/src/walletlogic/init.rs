@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 // Internal imports
 use crate::error::WalletError;
-use crate::walletlogic::crypto::{encrypt_data, decrypt_data};
+use crate::defi::crypto::{encrypt_data, decrypt_data};
 use crate::walletlogic::utils::{generate_user_id, generate_default_user_id, UserType, is_seed_phrase};
 use crate::walletmanager::chain::ChainType;
 use crate::walletmanager::types::{WalletConfig, SeedLength, WalletInfo, WalletSecret};

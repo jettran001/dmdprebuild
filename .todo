@@ -1,0 +1,53 @@
+ Kế hoạch phát triển tương lai:
+1.Wallet
+- [ ] Integration tests
+- [ ] Module tests toàn diện
+- [ ] Metrics chi tiết
+- [ ] Logging nâng cao
+- [ ] Documentation nâng cao
+- [ ] Error handling nâng cao
+- [ ] Hỗ trợ thêm các loại contract (ERC-721, ERC-1155, DEX)
+- [ ] Cải thiện xử lý race condition
+- [ ] Triển khai persistent storage
+- [ ] Cải thiện các biện pháp bảo mật
+- [ ] WalletManager: Quản lý ví, tạo và quản lý ví người dùng
+- [ ] WalletLogic: Logic xử lý giao dịch và tương tác với blockchain
+- [ ] WalletUI: Giao diện người dùng cho ví
+- [ ] WalletAPI: API cho ví
+- [ ] WalletStorage: Lưu trữ và quản lý dữ liệu ví
+
+2. Snipebot
+- [ ] Integration tests
+- [ ] Module tests toàn diện
+- [ ] Metrics chi tiết
+- [ ] Logging 
+- [ ] Documentation 
+- [ ] Error handling 
+
+
+3.network
+- [ ] Integration tests
+- [ ] Module tests toàn diện
+- [ ] Metrics chi tiết
+- [ ] Logging 
+- [ ] Documentation 
+- [ ] Error handling 
+
+
+4.blockchain
+- [ ] Integration tests
+- [ ] Module tests toàn diện
+- [ ] Metrics chi tiết
+- [ ] Logging 
+- [ ] Documentation 
+- [ ] Error handling 
+
+
+5.common
+- [ ] Integration tests
+- [ ] Module tests toàn diện
+- [ ] Metrics chi tiết
+- [ ] Logging 
+- [ ] Documentation 
+- [ ] Error handling 
+

@@ -20,6 +20,9 @@ use thiserror::Error;
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::time::sleep;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // Standard library imports
 use std::fmt;
@@ -359,6 +362,10 @@ pub struct AutoTradeManager {
     event_emitter: Option<EventEmitter>,
     /// Tham chiếu yếu đến subscription manager để tránh circular reference
     subscription_manager: Weak<super::manager::SubscriptionManager>,
+    usage: Arc<AutoTradeUsage>,
+    request_count: AtomicU32,
+    last_reset: std::time::Instant,
+    retry_count: HashMap<String, u32>,
 }
 
 impl AutoTradeManager {
@@ -389,6 +396,10 @@ impl AutoTradeManager {
             auto_trade_cache: cache::create_async_lru_cache(500, 300), // Cache 5 phút (300 giây)
             event_emitter: None,
             subscription_manager: Arc::downgrade(&subscription_manager),
+            usage: Arc::new(AutoTradeUsage::new_default("default_user", &SubscriptionType::Free)),
+            request_count: AtomicU32::new(0),
+            last_reset: std::time::Instant::now(),
+            retry_count: HashMap::new(),
         }
     }
     
@@ -895,5 +906,78 @@ impl AutoTradeManager {
             Some(usage) => Ok(usage),
             None => Err(AutoTradeError::Other("Không thể lấy hoặc tạo auto trade usage".to_string()))
         }
+    }
+
+    /// Kiểm tra rate limit
+    fn check_rate_limit(&mut self) -> Result<(), WalletError> {
+        // Reset counter nếu đã qua window
+        if self.last_reset.elapsed().as_secs() >= RATE_LIMIT_WINDOW {
+            self.request_count.store(0, Ordering::SeqCst);
+            self.last_reset = std::time::Instant::now();
+        }
+
+        // Tăng counter và kiểm tra
+        let count = self.request_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if count > MAX_REQUESTS_PER_WINDOW {
+            return Err(WalletError::RateLimitExceeded);
+        }
+
+        Ok(())
+    }
+
+    /// Thực hiện auto-trade với retry mechanism
+    pub async fn execute_trade(&mut self, trade_id: &str, operation: impl Fn() -> Result<(), WalletError>) -> Result<(), WalletError> {
+        // Kiểm tra rate limit
+        self.check_rate_limit()?;
+
+        // Lấy số lần retry hiện tại
+        let retry_count = self.retry_count.entry(trade_id.to_string())
+            .or_insert(0);
+
+        // Thực hiện operation với retry
+        for attempt in 0..MAX_RETRIES {
+            match operation() {
+                Ok(_) => {
+                    // Reset retry count khi thành công
+                    self.retry_count.remove(trade_id);
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES - 1 {
+                        // Tăng retry count
+                        *retry_count += 1;
+                        
+                        // Log lỗi
+                        tracing::warn!(
+                            "Auto-trade attempt {} failed for trade {}: {:?}",
+                            attempt + 1,
+                            trade_id,
+                            e
+                        );
+
+                        // Đợi trước khi retry
+                        sleep(Duration::from_millis(RETRY_DELAY * (attempt + 1) as u64)).await;
+                    } else {
+                        // Đã hết số lần retry
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Err(WalletError::MaxRetriesExceeded)
+    }
+
+    /// Kiểm tra giới hạn sử dụng
+    pub fn check_usage_limit(&self) -> Result<(), WalletError> {
+        if self.usage.used_trades >= self.usage.max_trades {
+            return Err(WalletError::UsageLimitExceeded);
+        }
+        Ok(())
+    }
+
+    /// Tăng số lần sử dụng
+    pub fn increment_usage(&mut self) {
+        self.usage.used_trades += 1;
     }
 } 

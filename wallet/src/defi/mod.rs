@@ -18,17 +18,17 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     // Tạo DefiManager
-//!     let manager = DefiManager::new();
+//!     let manager = DefiManager::new(ChainId::EthereumMainnet).await.unwrap();
 //!     
 //!     // Stake DMD tokens
 //!     let user_id = "user1";
 //!     let pool_address = Address::zero();
 //!     let amount = U256::from(1000);
 //!     let lock_time = 86400;
-//!     manager.stake_manager().stake(user_id, pool_address, amount, lock_time).await.unwrap();
+//!     manager.provider().stake(user_id, pool_address, amount, lock_time).await.unwrap();
 //!     
 //!     // Add liquidity
-//!     manager.farm_manager().add_liquidity(user_id, pool_address, amount).await.unwrap();
+//!     manager.provider().add_liquidity(user_id, pool_address, amount).await.unwrap();
 //! }
 //! ```
 
@@ -43,57 +43,65 @@ use anyhow::Result;
 use crate::blockchain::provider::{get_provider, ChainId};
 use crate::cache::{Cache, CacheManager};
 
-// Re-export các module
-pub mod adapter;
-
-// Re-export các component từ adapter
-pub use adapter::farm::{FarmManager, FarmPoolConfig};
-pub use adapter::stake::{StakeManager, StakePoolConfig};
-
-// Các module khác
+// Các module
+pub mod provider;
 pub mod constants;
 pub mod error;
 pub mod chain;
 pub mod blockchain;
+pub mod erc20;
+pub mod erc721;
+pub mod erc1155;
+pub mod contracts;
+pub mod security;
+pub mod api;
+pub mod crypto;
 
-// Re-exports
+// Re-export từ module mới
+pub use provider::{DefiProvider, DefiProviderImpl, DefiProviderFactory, FarmPoolConfig, StakePoolConfig};
 pub use constants::*;
 pub use error::*;
 pub use chain::ChainId;
+pub use erc20::Erc20Contract;
+pub use erc721::Erc721Contract;
+pub use erc1155::Erc1155Contract;
+pub use contracts::{
+    ContractInterface, ContractMetadata, ContractType, ContractError,
+    ContractRegistry, ContractFactory, get_contract_registry
+};
+pub use api::DefiApi;
+pub use crypto::{encrypt_data, decrypt_data};
 
 /// Manager chính cho module DeFi
 pub struct DefiManager {
-    farm_manager: Arc<FarmManager>,
-    stake_manager: Arc<StakeManager>,
+    provider: Arc<Box<dyn DefiProvider>>,
 }
 
 impl DefiManager {
     /// Tạo một DefiManager mới
-    pub fn new() -> Self {
-        Self {
-            farm_manager: Arc::new(FarmManager::new()),
-            stake_manager: Arc::new(StakeManager::new()),
-        }
+    pub async fn new(chain_id: ChainId) -> Result<Self, DefiError> {
+        let provider = DefiProviderFactory::create_provider(chain_id).await?;
+        
+        Ok(Self {
+            provider: Arc::new(provider),
+        })
     }
 
-    /// Trả về reference đến FarmManager
-    pub fn farm_manager(&self) -> &FarmManager {
-        &self.farm_manager
-    }
-
-    /// Trả về reference đến StakeManager
-    pub fn stake_manager(&self) -> &StakeManager {
-        &self.stake_manager
+    /// Trả về reference đến DefiProvider
+    pub fn provider(&self) -> &Box<dyn DefiProvider> {
+        &self.provider
     }
 
     /// Khởi tạo pools mặc định với các tham số đã cài đặt sẵn
-    /// Logic đã được chuyển sang blockchain/stake/stake_logic.rs và blockchain/farm/farm_logic.rs
     pub async fn init_default_pools(&mut self, token_address: String) -> Result<(), String> {
-        // Gọi phương thức thông qua adapter
-        self.stake_manager.inner.create_default_pools(token_address.clone()).await?;
-
-        // Khởi tạo các farm pools mặc định
-        self.farm_manager.inner.create_default_pools(token_address.clone()).await?;
+        // Gọi phương thức thông qua provider
+        // Logic đã được chuyển sang blockchain/stake/stake_logic.rs và blockchain/farm/farm_logic.rs
+        let blockchain_farm_manager = self.provider.farm_manager();
+        let blockchain_stake_manager = self.provider.stake_manager();
+        
+        // Khởi tạo các farm và stake pools mặc định
+        blockchain_farm_manager.create_default_pools(token_address.clone()).await?;
+        blockchain_stake_manager.create_default_pools(token_address.clone()).await?;
 
         info!(
             token_address = %token_address,
@@ -114,29 +122,17 @@ impl DefiManager {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let manager = DefiManager::new();
+    ///     let manager = DefiManager::new(ChainId::EthereumMainnet).await.unwrap();
     ///     manager.sync_all_pools().await.unwrap();
     /// }
     /// ```
     pub async fn sync_all_pools(&self) -> Result<(), DefiError> {
-        // Đồng bộ hóa stake pools
-        self.stake_manager.sync_pools().await?;
-
-        // Đồng bộ hóa farm pools
-        self.farm_manager.sync_pools().await?;
-
-        info!("Đã đồng bộ hóa tất cả các pools");
+        self.provider.sync_pools().await?;
         Ok(())
     }
 }
 
 // Đảm bảo DefiManager có thể sử dụng an toàn trong async context
-impl Default for DefiManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Send for DefiManager {}
 impl Sync for DefiManager {}
 
@@ -146,25 +142,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_defi_manager() {
-        let manager = DefiManager::new();
+        let manager = DefiManager::new(ChainId::EthereumMainnet).await.unwrap();
 
-        // Test farm manager
-        let farm_config = adapter::farm::FarmPoolConfig {
+        // Test provider
+        let farm_config = FarmPoolConfig {
             pool_address: Address::zero(),
             router_address: Address::zero(),
             reward_token_address: Address::zero(),
             apy: Decimal::from(10),
         };
-        assert!(manager.farm_manager().add_pool(farm_config).await.is_ok());
+        assert!(manager.provider().add_farm_pool(farm_config).await.is_ok());
 
-        // Test stake manager
-        let stake_config = adapter::stake::StakePoolConfig {
+        // Test stake
+        let stake_config = StakePoolConfig {
             pool_address: Address::zero(),
             token_address: Address::zero(),
             min_lock_time: 86400,
             base_apy: Decimal::from(10),
             bonus_apy: Decimal::from(5),
         };
-        assert!(manager.stake_manager().add_pool(stake_config).await.is_ok());
+        assert!(manager.provider().add_stake_pool(stake_config).await.is_ok());
     }
 }

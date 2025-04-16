@@ -4,5 +4,5 @@
 
 // Re-exports chính từ DeFi module
 pub use crate::defi::api::DefiApi;
-pub use crate::defi::farm::{FarmingManager, FarmingOpportunity};
-pub use crate::defi::stake::{StakingManager, StakingOpportunity};
+pub use crate::defi::provider::{DefiProvider, DefiProviderImpl, DefiProviderFactory};
+pub use crate::defi::provider::{FarmPoolConfig, StakePoolConfig};

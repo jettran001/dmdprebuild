@@ -1,502 +1,227 @@
-//! Module quản lý farming và liquidity pools trong DeFi
-//! 
-//! Module này có chức năng:
-//! - Quản lý farming pools 
-//! - Thêm/rút liquidity
-//! - Harvest rewards
-//! - Tính toán APY và rewards
-//! 
-//! ## Ví dụ:
-//! ```
-//! use blockchain::stake::farm_logic::{FarmManager, FarmPoolConfig};
-//! use ethers::types::{Address, U256};
-//! use rust_decimal::Decimal;
-//! 
-//! #[tokio::main]
-//! async fn main() {
-//!     // Tạo farm manager
-//!     let manager = FarmManager::new();
-//!     
-//!     // Thêm pool mới
-//!     let config = FarmPoolConfig {
-//!         pool_address: Address::zero(),
-//!         lp_token_address: Address::zero(),
-//!         reward_token_address: Address::zero(),
-//!         reward_per_block: U256::from(100),
-//!         apy_estimate: Decimal::from(20),
-//!     };
-//!     manager.add_pool(config).await.unwrap();
-//!     
-//!     // Thêm liquidity
-//!     let user_id = "user1";
-//!     let pool_address = Address::zero();
-//!     let amount = U256::from(1000);
-//!     manager.add_liquidity(user_id, pool_address, amount).await.unwrap();
-//!     
-//!     // Harvest rewards
-//!     manager.harvest(user_id, pool_address).await.unwrap();
-//! }
-//! ```
+//! Module logic farming liên quan đến staking
+//!
+//! Module này cung cấp các chức năng:
+//! - Quản lý farm pools
+//! - Tính toán farming rewards
+//! - Tương tác với smart contracts
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
-use ethers::types::{Address, U256};
-use ethers::prelude::{Provider, Http, Contract};
-use rust_decimal::Decimal;
 use anyhow::Result;
-use prometheus::{register_counter, register_gauge, Counter, Gauge};
-use serde::{Serialize, Deserialize};
-use chrono::{DateTime, Utc};
-use tokio::time::{timeout, Duration};
-use thiserror::Error;
+use async_trait::async_trait;
+use ethers::types::{Address, U256};
+use tracing::{info, warn, error};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::smartcontracts::dmd_token::DMDToken;
-use crate::smartcontracts::base_contract::BaseContract;
-use crate::smartcontracts::bsc_contract::BscContract;
-
-/// Error type cho farm operations
-#[derive(Debug, Error)]
-pub enum FarmingError {
-    #[error("Pool not found: {0}")]
-    PoolNotFound(Address),
-    
-    #[error("User farm not found: {0}")]
-    UserFarmNotFound(String),
-    
-    #[error("Insufficient token balance: required {0}, found {1}")]
-    InsufficientBalance(U256, U256),
-    
-    #[error("Insufficient liquidity: required {0}, found {1}")]
-    InsufficientLiquidity(U256, U256),
-    
-    #[error("No rewards to harvest")]
-    NoRewardsToHarvest,
-    
-    #[error("Blockchain error: {0}")]
-    BlockchainError(String),
-    
-    #[error("Contract error: {0}")]
-    ContractError(String),
-    
-    #[error("Internal error: {0}")]
-    InternalError(String),
-}
+use crate::stake::{
+    StakePoolConfig,
+    UserStakeInfo,
+    StakePoolManager,
+    StakePoolCache,
+};
+use super::constants::*;
 
 /// Cấu hình cho farm pool
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FarmPoolConfig {
     /// Địa chỉ của pool
-    pub pool_address: Address,
-    /// Địa chỉ của LP token
-    pub lp_token_address: Address,
-    /// Địa chỉ token rewards
+    pub address: Address,
+    /// Token được farm
+    pub token_address: Address,
+    /// Token reward
     pub reward_token_address: Address,
-    /// Rewards cho mỗi block
-    pub reward_per_block: U256,
-    /// Ước tính APY
-    pub apy_estimate: Decimal,
+    /// APY hiện tại
+    pub current_apy: f64,
+    /// Tổng số token đã farm
+    pub total_farmed: U256,
+    /// Tổng rewards đã phân phối
+    pub total_rewards_distributed: U256,
+    /// Thời gian bắt đầu farm
+    pub start_time: u64,
+    /// Thời gian kết thúc farm
+    pub end_time: u64,
 }
 
-/// Thông tin farming của user
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Thông tin farm của người dùng
+#[derive(Debug, Clone)]
 pub struct UserFarmInfo {
-    /// ID của user
-    pub user_id: String,
-    /// Địa chỉ pool
-    pub pool_address: Address,
-    /// Địa chỉ ví của user
-    pub wallet_address: Address,
-    /// Số lượng LP token đã thêm
-    pub liquidity: U256,
-    /// Thời điểm bắt đầu farming
-    pub start_time: DateTime<Utc>,
-    /// Rewards chưa harvested
+    /// Địa chỉ người dùng
+    pub user_address: Address,
+    /// Số lượng token đã farm
+    pub farmed_amount: U256,
+    /// Thời gian bắt đầu farm
+    pub start_time: u64,
+    /// Rewards đã nhận
+    pub claimed_rewards: U256,
+    /// Rewards đang chờ
     pub pending_rewards: U256,
-    /// Thời gian harvest gần nhất
-    pub last_harvest_time: DateTime<Utc>,
 }
 
-/// Manager quản lý farm pools và user farms
-pub struct FarmManager {
-    pools: Arc<RwLock<HashMap<Address, FarmPoolConfig>>>,
-    user_farms: Arc<RwLock<HashMap<String, HashMap<Address, UserFarmInfo>>>>,
-    total_liquidity_counter: Arc<RwLock<HashMap<Address, U256>>>,
-    liquidity_gauge: Gauge,
-    farms_count_gauge: Gauge,
-    rewards_harvested_counter: Counter,
+/// Trait cho quản lý farm pool
+#[async_trait]
+pub trait FarmManager: Send + Sync {
+    /// Tạo farm pool mới
+    async fn create_farm_pool(&self, config: FarmPoolConfig) -> Result<Address>;
+    
+    /// Thêm liquidity vào farm
+    async fn add_liquidity(&self, pool_address: Address, user_address: Address, amount: U256) -> Result<()>;
+    
+    /// Rút liquidity từ farm
+    async fn remove_liquidity(&self, pool_address: Address, user_address: Address) -> Result<()>;
+    
+    /// Claim farming rewards
+    async fn claim_farming_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>;
+    
+    /// Lấy thông tin farm pool
+    async fn get_farm_pool_info(&self, pool_address: Address) -> Result<FarmPoolConfig>;
+    
+    /// Lấy thông tin farm của người dùng
+    async fn get_user_farm_info(&self, pool_address: Address, user_address: Address) -> Result<UserFarmInfo>;
 }
 
-impl FarmManager {
-    /// Tạo một FarmManager mới
-    pub fn new() -> Self {
-        let liquidity_gauge = register_gauge!("blockchain_farm_liquidity", "Total liquidity in farms").unwrap();
-        let farms_count_gauge = register_gauge!("blockchain_farm_count", "Number of active farms").unwrap();
-        let rewards_harvested_counter = register_counter!("blockchain_farm_rewards_harvested", "Total rewards harvested").unwrap();
+/// Implement FarmManager
+pub struct FarmManagerImpl {
+    /// Cache cho farm pools
+    farm_pools: Arc<RwLock<Vec<FarmPoolConfig>>>,
+    /// Cache cho user farm info
+    user_farms: Arc<RwLock<Vec<UserFarmInfo>>>,
+    /// Stake manager
+    stake_manager: Arc<dyn StakePoolManager>,
+}
 
+impl FarmManagerImpl {
+    /// Tạo manager mới
+    pub fn new(stake_manager: Arc<dyn StakePoolManager>) -> Self {
         Self {
-            pools: Arc::new(RwLock::new(HashMap::new())),
-            user_farms: Arc::new(RwLock::new(HashMap::new())),
-            total_liquidity_counter: Arc::new(RwLock::new(HashMap::new())),
-            liquidity_gauge,
-            farms_count_gauge,
-            rewards_harvested_counter,
+            farm_pools: Arc::new(RwLock::new(Vec::new())),
+            user_farms: Arc::new(RwLock::new(Vec::new())),
+            stake_manager,
         }
     }
+    
+    /// Lấy thời gian hiện tại (giây)
+    fn get_current_time() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+}
 
-    /// Thêm pool mới
-    ///
-    /// # Arguments
-    /// * `config` - Cấu hình của pool
-    ///
-    /// # Returns
-    /// * `Result<(), FarmingError>` - Kết quả thành công hoặc lỗi
-    pub async fn add_pool(&self, config: FarmPoolConfig) -> Result<(), FarmingError> {
-        let mut pools = self.pools.write().await;
-        pools.insert(config.pool_address, config);
+#[async_trait]
+impl FarmManager for FarmManagerImpl {
+    async fn create_farm_pool(&self, config: FarmPoolConfig) -> Result<Address> {
+        // Kiểm tra điều kiện tạo pool
+        if config.start_time >= config.end_time {
+            return Err(anyhow::anyhow!("Invalid time range"));
+        }
         
-        // Khởi tạo total liquidity counter cho pool
-        let mut total_liquidity = self.total_liquidity_counter.write().await;
-        total_liquidity.insert(config.pool_address, U256::zero());
+        // Lưu pool vào cache
+        let mut pools = self.farm_pools.write().await;
+        pools.push(config.clone());
+        
+        info!("Created new farm pool: {:?}", config.address);
+        Ok(config.address)
+    }
 
-        info!(
-            pool_address = %config.pool_address,
-            lp_token = %config.lp_token_address,
-            reward_token = %config.reward_token_address,
-            apy = %config.apy_estimate,
-            "Thêm farm pool mới"
-        );
+    async fn add_liquidity(&self, pool_address: Address, user_address: Address, amount: U256) -> Result<()> {
+        // Kiểm tra điều kiện add liquidity
+        if amount < MIN_STAKE_AMOUNT {
+            return Err(anyhow::anyhow!("Amount too small"));
+        }
         
+        // Lấy thông tin pool
+        let pool = self.get_farm_pool_info(pool_address).await?;
+        
+        // Kiểm tra thời gian farm
+        let current_time = Self::get_current_time();
+        if current_time < pool.start_time || current_time > pool.end_time {
+            return Err(anyhow::anyhow!("Farm not active"));
+        }
+        
+        // Tạo thông tin farm
+        let farm_info = UserFarmInfo {
+            user_address,
+            farmed_amount: amount,
+            start_time: current_time,
+            claimed_rewards: U256::zero(),
+            pending_rewards: U256::zero(),
+        };
+        
+        // Lưu vào cache
+        let mut farms = self.user_farms.write().await;
+        farms.push(farm_info);
+        
+        // TODO: Implement logic add liquidity
+        // 1. Gọi smart contract
+        // 2. Xác thực giao dịch
+        // 3. Cập nhật rewards
+        
+        info!("User added liquidity: {:?}, amount: {:?}", user_address, amount);
         Ok(())
     }
 
-    /// Thêm liquidity vào pool
-    ///
-    /// # Arguments
-    /// * `user_id` - ID của user
-    /// * `pool_address` - Địa chỉ của pool
-    /// * `amount` - Số lượng LP token muốn thêm
-    ///
-    /// # Returns
-    /// * `Result<(), FarmingError>` - Kết quả thành công hoặc lỗi
-    pub async fn add_liquidity(&self, user_id: &str, pool_address: Address, amount: U256) -> Result<(), FarmingError> {
-        // Kiểm tra pool tồn tại
-        let pools = self.pools.read().await;
-        let pool = pools.get(&pool_address).ok_or(FarmingError::PoolNotFound(pool_address))?;
-        
-        // Thực hiện add liquidity trên blockchain (trên thực tế sẽ gọi smart contract)
-        // Mô phỏng việc gọi smart contract
-        debug!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            amount = %amount,
-            "Thêm liquidity"
-        );
-
-        // Cập nhật tổng liquidity
-        {
-            let mut total_liquidity = self.total_liquidity_counter.write().await;
-            let current = total_liquidity.get(&pool_address).unwrap_or(&U256::zero());
-            total_liquidity.insert(pool_address, *current + amount);
-        }
-
-        // Cập nhật thông tin farming của user
-        let now = Utc::now();
-        {
-            let mut user_farms = self.user_farms.write().await;
-            let user_farms_map = user_farms.entry(user_id.to_string()).or_insert_with(HashMap::new);
-            
-            let farm_info = user_farms_map.entry(pool_address).or_insert_with(|| UserFarmInfo {
-                user_id: user_id.to_string(),
-                pool_address,
-                wallet_address: Address::zero(), // Trong ứng dụng thực tế, lấy từ input hoặc lookup
-                liquidity: U256::zero(),
-                start_time: now,
-                pending_rewards: U256::zero(),
-                last_harvest_time: now,
-            });
-            
-            // Cập nhật rewards trước khi thêm liquidity mới
-            farm_info.pending_rewards += self.calculate_rewards(farm_info, pool).await?;
-            farm_info.liquidity += amount;
-            farm_info.last_harvest_time = now;
-        }
-
-        // Cập nhật metrics
-        self.liquidity_gauge.add(amount.as_u64() as f64);
-        self.farms_count_gauge.inc();
-
-        info!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            amount = %amount,
-            "Đã thêm liquidity thành công"
-        );
-
-        Ok(())
-    }
-
-    /// Rút liquidity từ pool
-    ///
-    /// # Arguments
-    /// * `user_id` - ID của user
-    /// * `pool_address` - Địa chỉ của pool
-    /// * `amount` - Số lượng LP token muốn rút, nếu None thì rút hết
-    ///
-    /// # Returns
-    /// * `Result<(), FarmingError>` - Kết quả thành công hoặc lỗi
-    pub async fn remove_liquidity(&self, user_id: &str, pool_address: Address, amount: Option<U256>) -> Result<(), FarmingError> {
+    async fn remove_liquidity(&self, pool_address: Address, user_address: Address) -> Result<()> {
         // Lấy thông tin farm
-        let mut user_farms = self.user_farms.write().await;
-        let user_farms_map = user_farms.get_mut(user_id).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-        let farm_info = user_farms_map.get_mut(&pool_address).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-
-        // Kiểm tra liquidity
-        let remove_amount = amount.unwrap_or(farm_info.liquidity);
-        if remove_amount > farm_info.liquidity {
-            return Err(FarmingError::InsufficientLiquidity(remove_amount, farm_info.liquidity));
-        }
-
-        // Thực hiện remove liquidity trên blockchain
-        debug!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            amount = %remove_amount,
-            "Removing liquidity"
-        );
-
-        // Harvest rewards trước khi rút liquidity
-        let pools = self.pools.read().await;
-        let pool = pools.get(&pool_address).ok_or(FarmingError::PoolNotFound(pool_address))?;
-        let rewards = self.calculate_rewards(farm_info, pool).await?;
-        farm_info.pending_rewards += rewards;
-        
-        // Cập nhật thông tin farm
-        farm_info.liquidity -= remove_amount;
-        let is_empty = farm_info.liquidity.is_zero();
-        
-        // Cập nhật tổng liquidity
+        let farm_info = if let Some(info) = self.user_farms.read().await
+            .iter()
+            .find(|f| f.user_address == user_address)
+            .cloned()
         {
-            let mut total_liquidity = self.total_liquidity_counter.write().await;
-            let current = total_liquidity.get(&pool_address).unwrap_or(&U256::zero());
-            let new_total = current.saturating_sub(remove_amount);
-            total_liquidity.insert(pool_address, new_total);
-        }
-
-        // Cập nhật metrics
-        self.liquidity_gauge.sub(remove_amount.as_u64() as f64);
+            info
+        } else {
+            return Err(anyhow::anyhow!("No farm found"));
+        };
         
-        // Nếu user đã rút hết, xóa farm
-        if is_empty {
-            user_farms_map.remove(&pool_address);
-            if user_farms_map.is_empty() {
-                user_farms.remove(user_id);
-            }
-            self.farms_count_gauge.dec();
-        }
-
-        info!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            amount = %remove_amount,
-            "Đã rút liquidity thành công"
-        );
-
+        // TODO: Implement logic remove liquidity
+        // 1. Gọi smart contract
+        // 2. Xác thực giao dịch
+        // 3. Cập nhật cache
+        
+        info!("User removed liquidity: {:?}", user_address);
         Ok(())
     }
 
-    /// Harvest rewards từ farm
-    ///
-    /// # Arguments
-    /// * `user_id` - ID của user
-    /// * `pool_address` - Địa chỉ của pool
-    ///
-    /// # Returns
-    /// * `Result<U256, FarmingError>` - Số lượng rewards đã harvest hoặc lỗi
-    pub async fn harvest(&self, user_id: &str, pool_address: Address) -> Result<U256, FarmingError> {
+    async fn claim_farming_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256> {
         // Lấy thông tin farm
-        let mut user_farms = self.user_farms.write().await;
-        let user_farms_map = user_farms.get_mut(user_id).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-        let farm_info = user_farms_map.get_mut(&pool_address).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-
-        // Tính toán rewards
-        let pools = self.pools.read().await;
-        let pool = pools.get(&pool_address).ok_or(FarmingError::PoolNotFound(pool_address))?;
+        let farm_info = if let Some(info) = self.user_farms.read().await
+            .iter()
+            .find(|f| f.user_address == user_address)
+            .cloned()
+        {
+            info
+        } else {
+            return Err(anyhow::anyhow!("No farm found"));
+        };
         
-        let rewards = self.calculate_rewards(farm_info, pool).await?;
-        let total_rewards = farm_info.pending_rewards + rewards;
-        
-        if total_rewards.is_zero() {
-            return Err(FarmingError::NoRewardsToHarvest);
-        }
-
-        // Thực hiện harvest trên blockchain
-        debug!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            rewards = %total_rewards,
-            "Harvesting rewards"
-        );
-
-        // Reset pending rewards
-        farm_info.pending_rewards = U256::zero();
-        farm_info.last_harvest_time = Utc::now();
-
-        // Cập nhật metrics
-        self.rewards_harvested_counter.inc_by(total_rewards.as_u64());
-
-        info!(
-            user_id = %user_id,
-            pool_address = %pool_address,
-            rewards = %total_rewards,
-            "Đã harvest rewards thành công"
-        );
-
-        Ok(total_rewards)
-    }
-
-    /// Lấy thông tin pool
-    ///
-    /// # Arguments
-    /// * `pool_address` - Địa chỉ của pool
-    ///
-    /// # Returns
-    /// * `Result<FarmPoolConfig, FarmingError>` - Thông tin pool hoặc lỗi
-    pub async fn get_pool(&self, pool_address: Address) -> Result<FarmPoolConfig, FarmingError> {
-        let pools = self.pools.read().await;
-        let pool = pools.get(&pool_address).ok_or(FarmingError::PoolNotFound(pool_address))?;
-        Ok(pool.clone())
-    }
-
-    /// Lấy thông tin farm của user
-    ///
-    /// # Arguments
-    /// * `user_id` - ID của user
-    /// * `pool_address` - Địa chỉ của pool
-    ///
-    /// # Returns
-    /// * `Result<UserFarmInfo, FarmingError>` - Thông tin farm của user hoặc lỗi
-    pub async fn get_user_farm(&self, user_id: &str, pool_address: Address) -> Result<UserFarmInfo, FarmingError> {
-        let user_farms = self.user_farms.read().await;
-        let user_farms_map = user_farms.get(user_id).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-        let farm_info = user_farms_map.get(&pool_address).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-        Ok(farm_info.clone())
-    }
-
-    /// Lấy danh sách tất cả các pools
-    ///
-    /// # Returns
-    /// * `Result<Vec<FarmPoolConfig>, FarmingError>` - Danh sách pools hoặc lỗi
-    pub async fn get_all_pools(&self) -> Result<Vec<FarmPoolConfig>, FarmingError> {
-        let pools = self.pools.read().await;
-        let pool_configs = pools.values().cloned().collect();
-        Ok(pool_configs)
-    }
-
-    /// Lấy danh sách tất cả các farms của user
-    ///
-    /// # Arguments
-    /// * `user_id` - ID của user
-    ///
-    /// # Returns
-    /// * `Result<Vec<UserFarmInfo>, FarmingError>` - Danh sách farms của user hoặc lỗi
-    pub async fn get_user_farms(&self, user_id: &str) -> Result<Vec<UserFarmInfo>, FarmingError> {
-        let user_farms = self.user_farms.read().await;
-        let user_farms_map = user_farms.get(user_id).ok_or(FarmingError::UserFarmNotFound(user_id.to_string()))?;
-        let farms = user_farms_map.values().cloned().collect();
-        Ok(farms)
-    }
-
-    /// Cập nhật APY cho pool
-    ///
-    /// # Arguments
-    /// * `pool_address` - Địa chỉ của pool
-    /// * `new_apy` - APY mới
-    ///
-    /// # Returns
-    /// * `Result<(), FarmingError>` - Kết quả thành công hoặc lỗi
-    pub async fn update_apy(&self, pool_address: Address, new_apy: Decimal) -> Result<(), FarmingError> {
-        let mut pools = self.pools.write().await;
-        let pool = pools.get_mut(&pool_address).ok_or(FarmingError::PoolNotFound(pool_address))?;
-        
-        pool.apy_estimate = new_apy;
-
-        info!(
-            pool_address = %pool_address,
-            new_apy = %new_apy,
-            "Đã cập nhật APY cho farm pool"
-        );
-
-        Ok(())
-    }
-
-    /// Tính toán rewards của user
-    ///
-    /// # Arguments
-    /// * `farm_info` - Thông tin farm của user
-    /// * `pool` - Thông tin pool
-    ///
-    /// # Returns
-    /// * `Result<U256, FarmingError>` - Số lượng rewards tính được hoặc lỗi
-    async fn calculate_rewards(&self, farm_info: &UserFarmInfo, pool: &FarmPoolConfig) -> Result<U256, FarmingError> {
-        if farm_info.liquidity.is_zero() {
+        if farm_info.pending_rewards == U256::zero() {
             return Ok(U256::zero());
         }
+        
+        // TODO: Implement logic claim rewards
+        // 1. Gọi smart contract
+        // 2. Xác thực giao dịch
+        // 3. Cập nhật cache
+        
+        info!("User claimed farming rewards: {:?}, amount: {:?}", user_address, farm_info.pending_rewards);
+        Ok(farm_info.pending_rewards)
+    }
 
-        let now = Utc::now();
-        let duration = now.signed_duration_since(farm_info.last_harvest_time);
-        let blocks = duration.num_seconds() as u64 / 3; // Assume 3 seconds per block
-        
-        let total_liquidity = {
-            let liquidity_counter = self.total_liquidity_counter.read().await;
-            *liquidity_counter.get(&pool.pool_address).unwrap_or(&U256::one())
-        };
-        
-        let user_share = if total_liquidity.is_zero() {
-            0.0
+    async fn get_farm_pool_info(&self, pool_address: Address) -> Result<FarmPoolConfig> {
+        let pools = self.farm_pools.read().await;
+        if let Some(pool) = pools.iter().find(|p| p.address == pool_address) {
+            Ok(pool.clone())
         } else {
-            farm_info.liquidity.as_u128() as f64 / total_liquidity.as_u128() as f64
-        };
-        
-        let rewards_per_block = pool.reward_per_block.as_u128() as f64;
-        let rewards = (rewards_per_block * blocks as f64 * user_share) as u128;
-        
-        Ok(U256::from(rewards))
-    }
-
-    /// Đồng bộ hóa thông tin pools từ blockchain
-    ///
-    /// # Returns
-    /// * `Result<(), FarmingError>` - Kết quả thành công hoặc lỗi
-    pub async fn sync_pools(&self) -> Result<(), FarmingError> {
-        // Trong ứng dụng thực tế, sẽ gọi đến các contract trên blockchain để lấy thông tin mới nhất
-        // Đây là phiên bản đơn giản chỉ ghi log
-
-        info!("Bắt đầu đồng bộ hóa thông tin farm pools từ blockchain");
-
-        let pools = self.pools.read().await;
-        for pool in pools.values() {
-            debug!(
-                pool_address = %pool.pool_address,
-                "Đồng bộ hóa farm pool"
-            );
-            
-            // Mô phỏng việc đồng bộ dữ liệu từ blockchain
-            // Trong thực tế, sẽ gọi smart contract và cập nhật thông tin
+            Err(anyhow::anyhow!("Pool not found"))
         }
-        
-        info!("Đã đồng bộ hóa tất cả các farm pools");
-        Ok(())
     }
-}
 
-impl Default for FarmManager {
-    fn default() -> Self {
-        Self::new()
+    async fn get_user_farm_info(&self, pool_address: Address, user_address: Address) -> Result<UserFarmInfo> {
+        let farms = self.user_farms.read().await;
+        if let Some(farm) = farms.iter().find(|f| f.user_address == user_address) {
+            Ok(farm.clone())
+        } else {
+            Err(anyhow::anyhow!("No farm found"))
+        }
     }
-}
-
-// Đảm bảo FarmManager có thể sử dụng an toàn trong async context
-impl Send for FarmManager {}
-impl Sync for FarmManager {} 
+} 

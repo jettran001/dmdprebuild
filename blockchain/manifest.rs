@@ -23,13 +23,19 @@
     │   │   ├── smartcontract.rs    -> Cung cấp kiểu DmdChain và các hàm liên quan [liên quan: mod.rs]
     │   ├── solana_contract/        -> Tương tác với DMD token trên Solana
     │   │   ├── mod.rs              -> Cung cấp SolanaContractProvider [liên quan: crate::smartcontracts::TokenInterface]
+    │   │   ├── smartcontract.rs    -> Định nghĩa các hàm tương tác với Solana [liên quan: mod.rs]
     │   ├── eth_contract/           -> Tương tác với DMD token trên Ethereum
     │   │   ├── mod.rs              -> Cung cấp EthContractProvider và thông tin về contract DMD token [liên quan: crate::smartcontracts::TokenInterface]
+    │   │   ├── dmd_eth_contract.sol -> Solidity code cho DMD token trên Ethereum [liên quan: mod.rs]
     │   ├── arb_contract/           -> Tương tác với DMD token trên Arbitrum
     │   │   ├── mod.rs              -> Cung cấp ArbContractProvider và thông tin về contract DMD token [liên quan: crate::smartcontracts::TokenInterface]
     │   │   ├── DiamondTokenARB.sol -> Solidity code cho DMD token trên Arbitrum [liên quan: mod.rs]
+    │   │   ├── external/           -> Thư viện và dependencies bên ngoài cho Arbitrum [liên quan: DiamondTokenARB.sol]
     │   ├── base_contract/          -> Tương tác với DMD token trên Base L2
-    │   │   ├── mod.rs              -> Cung cấp BaseContractProvider [liên quan: crate::smartcontracts::TokenInterface]
+    │   │   ├── DiamondTokenETH.sol -> Solidity code cho DMD token trên Base [liên quan: mod.rs]
+    │   │   ├── dmd_eth_contract.sol -> Solidity code cho DMD token trên Ethereum [liên quan: DiamondTokenETH.sol]
+    │   │   ├── dmd_base_contract.sol -> Solidity code cho DMD token trên Base [liên quan: mod.rs]
+    │   │   ├── external/           -> Thư viện và dependencies bên ngoài cho Base [liên quan: dmd_base_contract.sol]
     │   ├── polygon_contract/       -> Tương tác với DMD token trên Polygon
     │   │   ├── mod.rs              -> Cung cấp PolygonContractProvider [liên quan: crate::smartcontracts::TokenInterface]
     ├── src/stake/                  -> Logic staking
@@ -42,18 +48,15 @@
     │   ├── routers.rs              -> Routers cho các pool staking [liên quan: smartcontracts] (đang triển khai)
     ├── src/exchange/               -> Tương tác với DEX
     │   ├── pairs.rs                -> Quản lý token pairs và liquidity pools [liên quan: smartcontracts] (đang triển khai)
-    │   ├── swap.rs                 -> Logic swap tokens [liên quan: smartcontracts, wallet] (chưa triển khai)
-    │   ├── liquidity.rs            -> Quản lý liquidity (add/remove) [liên quan: smartcontracts, wallet] (chưa triển khai)
     ├── src/farm/                   -> Yield farming
     │   ├── mod.rs                  -> Khai báo submodule farm [liên quan: tất cả file trong farm]
     │   ├── farm_logic.rs           -> Logic farming chính [liên quan: stake, smartcontracts]
     │   ├── factorry.rs             -> Factory cho các farm mới [liên quan: smartcontracts, exchange] (đang triển khai)
-    │   ├── rewards.rs              -> Phân phối reward cho farming [liên quan: smartcontracts, dmd_token] (chưa triển khai)
-    │   ├── pools.rs                -> Quản lý pools farming [liên quan: stake, exchange, smartcontracts] (chưa triển khai)
     ├── src/brigde/                 -> Bridge giữa các blockchain (đang phát triển)
 
     Mối liên kết:
     - smartcontracts là trung tâm tương tác với blockchain
+    - smartcontracts/mod.rs định nghĩa các trait chính: TokenInterface và BridgeInterface
     - smartcontracts/dmd_token.rs quản lý tương tác với DMD token (ERC-1155), hệ thống tier và danh sách token được phép
     - smartcontracts/dmd_bsc_bridge.rs quản lý bridge DMD token giữa BSC và các blockchain khác
     - smartcontracts/bsc_contract/ quản lý tương tác với DMD token trên BSC
@@ -90,7 +93,7 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * - use crate::smartcontracts::dmd_bsc_bridge::DmdBscBridge;
  * - use crate::smartcontracts::bsc_contract::BscContractProvider;
  * - use crate::smartcontracts::near_contract::NearContractProvider;
- * - use crate::smartcontracts::solana_contract::SolanaContractProvider;
+ * - use crate::smartcontracts::solana_contract::SolanaContractProvider; 
  * - use crate::smartcontracts::eth_contract::EthContractProvider;
  * - use crate::smartcontracts::arb_contract::ArbContractProvider;
  * - use crate::smartcontracts::polygon_contract::PolygonContractProvider;
@@ -109,7 +112,22 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * - use ethers::contract::Contract;
  * - use ethers::types::{Address, U256, Transaction};
  * - use ethers::abi::{Abi, Function, Token};
- * - use tokio::time::{sleep, Duration}; // Thêm cho các tác vụ async
+ * - use tokio::time::{sleep, Duration};
+ * - use async_trait::async_trait;
+ * - use anyhow::{Result, Context};
+ */
+
+// Các trait chính trong blockchain domain:
+/**
+ * TokenInterface (smartcontracts/mod.rs):
+ * - Trait cho tương tác với token trên các blockchain khác nhau
+ * - Được implement bởi: BscContractProvider, NearContractProvider, SolanaContractProvider, EthContractProvider, ArbContractProvider, PolygonContractProvider
+ * - Phương thức chính: get_balance, transfer, total_supply, decimals, token_name, token_symbol, get_total_supply, bridge_to
+ * 
+ * BridgeInterface (smartcontracts/mod.rs):
+ * - Trait cho chức năng bridge token giữa các blockchain
+ * - Được implement bởi: DmdBscBridge
+ * - Phương thức chính: bridge_tokens, check_bridge_status, estimate_bridge_fee
  */
 
 // Các cập nhật quan trọng:
@@ -138,4 +156,8 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * 29-06-2023: Cải thiện cơ chế fallback RPC URL cho ArbContractProvider khi kết nối bị lỗi
  * 30-06-2023: Cập nhật TokenInterface để thêm các phương thức liên quan đến kiểm tra balance và bridge tokens
  * 01-07-2023: Thêm phương thức is_token_allowed vào dmd_token.rs để kiểm tra quyền sử dụng token dựa trên tier
+ * 02-07-2023: Thêm thư mục external trong arb_contract và base_contract để quản lý dependencies bên ngoài
+ * 03-07-2023: Cập nhật smartcontract.rs trong solana_contract để hỗ trợ tương tác với Solana
+ * 04-07-2023: Bổ sung các trait bounds Send + Sync + 'static cho TokenInterface và BridgeInterface
+ * 05-07-2023: Thêm phương thức bridge_to trong TokenInterface để hỗ trợ bridge tokens giữa các blockchain
  */

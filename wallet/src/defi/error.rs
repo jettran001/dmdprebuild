@@ -85,6 +85,10 @@ pub enum DefiError {
     /// Lỗi khi chain không được hỗ trợ
     #[error("Chain không được hỗ trợ: {0}")]
     ChainNotSupported(String),
+    
+    /// Lỗi khi Chain ID không hợp lệ
+    #[error("Chain ID không hợp lệ: {0}")]
+    InvalidChainId(String),
 
     /// Lỗi khi token không được hỗ trợ
     #[error("Token không được hỗ trợ: {0}")]
@@ -93,4 +97,36 @@ pub enum DefiError {
     /// Lỗi khi router không được hỗ trợ
     #[error("Router không được hỗ trợ: {0}")]
     RouterNotSupported(Address),
+
+    /// Lỗi bảo mật (mã hóa, giải mã, xác thực)
+    #[error("Lỗi bảo mật: {0}")]
+    SecurityError(String),
+    
+    /// Lỗi khi vượt quá giới hạn tốc độ request
+    #[error("Vượt quá giới hạn tốc độ request")]
+    RateLimitExceeded,
+    
+    /// Lỗi khi không tìm thấy Chain
+    #[error("Không tìm thấy chain với ID: {0}")]
+    ChainNotFound(u64),
+    
+    /// Lỗi khi chức năng chưa được triển khai
+    #[error("Chức năng chưa được triển khai: {0}")]
+    NotImplemented(String),
+    
+    /// Lỗi khi giao dịch thất bại
+    #[error("Giao dịch thất bại: {0}")]
+    TransactionFailed(String),
+    
+    /// Lỗi khi giải mã thất bại
+    #[error("Giải mã thất bại: {0}")]
+    DecryptionError(String),
+    
+    /// Lỗi khi đạt giới hạn số lượng ví
+    #[error("Đã đạt giới hạn số lượng ví tối đa: {0}")]
+    MaxWalletLimitReached(String),
+    
+    /// Lỗi khi không tìm thấy ví
+    #[error("Không tìm thấy ví với địa chỉ: {0:?}")]
+    WalletNotFound(Address),
 } 

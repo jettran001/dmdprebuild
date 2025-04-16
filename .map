@@ -97,6 +97,20 @@
   - `keystore`: Quản lý khóa
   - `accounts`: Quản lý tài khoản
   - `transactions`: Quản lý giao dịch
+  - `defi`: Chức năng DeFi (farming, staking, blockchain interaction)
+    - `mod.rs`: Khai báo và re-export các thành phần chính
+    - `provider.rs`: DefiProvider và DefiProviderImpl, re-export từ blockchain
+    - `blockchain.rs`: BlockchainProvider trait và implementations
+    - `contracts.rs`: Quản lý các smart contracts
+    - `erc20.rs`: Tương tác với ERC-20 tokens
+    - `erc721.rs`: Tương tác với ERC-721 NFTs
+    - `erc1155.rs`: Tương tác với ERC-1155 Multi-Token
+    - `chain.rs`: Định nghĩa ChainId và thông tin chain
+    - `security.rs`: Bảo mật DeFi
+    - `error.rs`: DefiError cho module defi
+    - `api.rs`: API công khai DefiApi
+    - `crypto.rs`: Mã hóa/giải mã bằng AES-256-GCM và PBKDF2
+    - `blockchain/non_evm/`: Providers cho blockchain non-EVM
   - `users`: Người dùng và quyền
     - `subscription`: Dịch vụ theo gói
     - `vip_user`: Người dùng VIP
@@ -119,8 +133,33 @@
 - **Mô tả**: Tương tác với blockchain, quản lý EIP-2535
 - **Đường dẫn**: /blockchain
 - **Cấu trúc**:
+  - `smartcontracts`: Tương tác với smart contracts
+    - `mod.rs`: Định nghĩa traits TokenInterface, BridgeInterface
+    - `dmd_token.rs`: Tương tác với DMD Token
+    - `dmd_bsc_bridge.rs`: Bridge DMD token
+    - `bsc_contract/`: DMD token trên BSC
+    - `near_contract/`: DMD token trên NEAR
+    - `solana_contract/`: DMD token trên Solana
+    - `eth_contract/`: DMD token trên Ethereum
+    - `arb_contract/`: DMD token trên Arbitrum
+    - `base_contract/`: DMD token trên Base L2
+    - `polygon_contract/`: DMD token trên Polygon
+  - `stake`: Logic staking
+    - `mod.rs`: Re-export StakeManager và FarmManager
+    - `stake_logic.rs`: StakeManager, core staking logic
+    - `farm_logic.rs`: FarmManager, farm liên quan đến staking
+    - `constants.rs`: Hằng số cho staking
+    - `validator.rs`: Validator cho proof-of-stake
+    - `rewards.rs`: Tính toán và phân phối rewards
+    - `routers.rs`: Routers cho staking pools
+  - `farm`: Yield farming
+    - `mod.rs`: Khai báo submodule farm
+    - `farm_logic.rs`: Logic farming chính
+    - `factorry.rs`: Factory cho các farm mới
+  - `exchange`: Tương tác với DEX
+    - `pairs.rs`: Quản lý token pairs và liquidity pools
+  - `brigde`: Bridge giữa các blockchain
   - `chains`: Hỗ trợ đa blockchain
-  - `contracts`: Smart contracts
   - `eip2535`: Diamond standard
   - `abi`: Contract ABIs
   - `events`: Xử lý blockchain events
@@ -135,6 +174,65 @@
 - **SnipeBot → Wallet**: Sử dụng ví để giao dịch.
 - **SnipeBot → Blockchain**: Giám sát và tương tác với blockchain.
 - **Network → Blockchain**: Kết nối và đồng bộ node blockchain.
+
+### Blockchain → Wallet
+- **Cung cấp các thư viện cốt lõi**:
+  - `blockchain::stake::stake_logic::StakeManager`: Cung cấp logic quản lý staking
+  - `blockchain::farm::farm_logic::FarmManager`: Cung cấp logic quản lý farming
+  - `blockchain::stake::stake_logic::StakePoolConfig`: Cấu hình cho staking pools
+  - `blockchain::farm::farm_logic::FarmPoolConfig`: Cấu hình cho farming pools
+  - `blockchain::smartcontracts`: Cung cấp các smart contract interfaces
+
+### Wallet → Blockchain
+- **Import từ blockchain**:
+  - `wallet::defi::provider`: Re-export `blockchain::farm::farm_logic::FarmManager` và `blockchain::stake::stake_logic::StakeManager`
+  - `wallet::defi::provider`: Chuyển đổi kiểu dữ liệu giữa wallet và blockchain
+  - `wallet::defi::provider::DefiProvider`: Wrapper cho logic trong blockchain
+
+### API và Traits
+- **Blockchain Traits**:
+  - `blockchain::smartcontracts::TokenInterface`: Interface cho tương tác với tokens
+  - `blockchain::smartcontracts::BridgeInterface`: Interface cho chức năng bridge
+  - `blockchain::stake::stake_logic::StakeManager`: Logic staking chính
+  - `blockchain::farm::farm_logic::FarmManager`: Logic farming chính
+
+- **Wallet Traits**:
+  - `wallet::defi::provider::DefiProvider`: Interface cao cấp cho DeFi
+  - `wallet::defi::blockchain::BlockchainProvider`: Interface cho blockchain adapters
+  - `wallet::defi::contracts::ContractInterface`: Interface cho smart contracts
+  - `wallet::defi::erc20::Erc20Contract`: Interface cho ERC20 tokens
+  - `wallet::defi::erc721::Erc721Contract`: Interface cho ERC721 NFTs
+  - `wallet::defi::erc1155::Erc1155Contract`: Interface cho ERC1155 Multi-Tokens
+
+### Luồng dữ liệu DeFi:
+- UI → Common → Wallet → DefiManager → DefiProvider → BlockchainFarmManager/BlockchainStakeManager → Blockchain
+
+## Import/Export giữa Blockchain và Wallet
+- **Wallet re-export từ Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  pub use blockchain::farm::farm_logic::FarmManager as BlockchainFarmManager;
+  pub use blockchain::stake::stake_logic::StakeManager as BlockchainStakeManager;
+  pub use blockchain::farm::farm_logic::FarmPoolConfig as BlockchainFarmPoolConfig;
+  pub use blockchain::stake::stake_logic::StakePoolConfig as BlockchainStakePoolConfig;
+  ```
+
+- **Wallet chuyển đổi kiểu dữ liệu từ/đến Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  impl From<FarmPoolConfig> for BlockchainFarmPoolConfig { ... }
+  impl From<StakePoolConfig> for BlockchainStakePoolConfig { ... }
+  ```
+
+- **Wallet sử dụng các module Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  pub struct DefiProviderImpl {
+      blockchain_provider: Box<dyn BlockchainProvider>,
+      farm_manager: Arc<BlockchainFarmManager>,
+      stake_manager: Arc<BlockchainStakeManager>,
+  }
+  ```
 
 ## Luồng dữ liệu
 1. **UI → Common → Wallet → Blockchain**:

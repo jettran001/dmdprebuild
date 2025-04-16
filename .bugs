@@ -1,155 +1,110 @@
-# Danh sách lỗi đã tìm thấy trong wallet/src/defi
+# Danh sách lỗi đã phát hiện và cần sửa
 
-## Lỗi đã sửa
+## Domain: Blockchain
 
-- [x] Sử dụng f64 cho APY thay vì Decimal
-- [x] Thiếu doc comments cho một số phương thức quan trọng
-- [x] Thiếu caching cho các thông tin thường xuyên truy cập
-- [x] Thiếu logging chi tiết cho các hoạt động quan trọng
-- [x] Thiếu metrics cho monitoring
-- [x] Cần thêm bảo mật cho các cuộc gọi blockchain
-- [x] Cần triển khai các contract tương ứng
-- [x] Cần triển khai đầy đủ các blockchain providers cho non-EVM chains
-- [x] Cần cập nhật BlockchainProviderFactory trong blockchain.rs để sử dụng async/await đúng cách, hiện tại gọi hàm async trong context không phải async
-- [x] URL của Diamond RPC không nhất quán giữa các file (diamondnetwork.io vs diamondprotocol.co)
-- [x] Cần thêm các validator cho Diamond address format
-- [x] Cần implement Diamond token standards (tương tự như ERC20/ERC721)
-- [x] Thiếu error handling cho Diamond blockchain provider khi network không khả dụng
-- [x] Mâu thuẫn giữa hai enum ChainId (một trong blockchain.rs và một trong chain.rs), cần hợp nhất để tránh nhầm lẫn
-- [x] Cần tiếp tục hoàn thiện các implements cho Contract Interface
-- [x] Cần thêm các unit tests cho module contract
-- [x] wallet/src/contracts/mod.rs:400-423: Các phương thức trong `ContractFactory` đều là stub code, chỉ trả về lỗi "Not implemented yet"
-- [x] wallet/src/contracts/erc20.rs:302-321: Phương thức `decode_transfer_event` giả định cấu trúc topic không đúng chuẩn ERC20, đang xử lý sai topic index
-- [x] wallet/src/contracts/erc20.rs:322-341: Phương thức `decode_approval_event` giả định cấu trúc topic không đúng chuẩn ERC20, đang xử lý sai topic index
-- [x] wallet/src/contracts/erc20.rs:398-413: Phương thức `check_permission` thiếu triển khai đầy đủ, không hỗ trợ nhiều permission
-- [x] wallet/src/contracts/mod.rs:393-396: Phương thức `decode_logs` không được triển khai đúng cách, luôn trả về lỗi
-- [x] wallet/src/contracts/mod.rs:425-448: Thiếu triển khai tạo các loại contract khác (ERC721, ERC1155, DEX, v.v.) trong phương thức `create_contract`
+### Module: Stake
+- [x] blockchain/src/stake/mod.rs:1: File trống, không có khai báo module hoặc re-export các submodule
+- [x] blockchain/src/stake/routers.rs:1: File trống, không có implementation cho StakingRouter
+- [x] blockchain/src/stake/rewards.rs:1: File trống, không có implementation cho RewardCalculator
+- [x] blockchain/src/stake/validator.rs:1: File trống, không có implementation cho Validator
+- [x] blockchain/src/stake: Thiếu triển khai hoàn chỉnh cho module stake
+- [x] blockchain/src/stake: Thiếu triển khai cho stake pools
+- [x] blockchain/src/stake: Không có logic kết nối với smart contract
+- [x] blockchain/src/stake: Thiếu cơ chế cache và retry cho các thao tác staking
+- [x] blockchain/src/stake: Không có triển khai cho việc tính toán APY và rewards
+- [x] blockchain/src/stake: Không có cơ chế quản lý multi-chain staking
+- [x] blockchain/src/stake: Cần triển khai cơ chế lưu trữ persistant
+- [x] blockchain/src/stake: Thiếu các unit tests và integration test
 
-## Lỗi cần sửa 
+### Module: Farm và Stake
+- [ ] blockchain/src/stake/farm_logic.rs:1-502: Trùng lặp với blockchain/src/farm/farm_logic.rs
+- [ ] blockchain/src/farm/factorry.rs:0: File trống nhưng vẫn được tạo ra
+- [ ] blockchain/src/farm/farm_logic.rs:1-458: Trùng lặp về chức năng với blockchain/src/stake/farm_logic.rs
 
-### Lỗi trong wallet/src/contracts
-
-- [ ] wallet/src/contracts/mod.rs:36-41: Các module khai báo (erc721, erc1155, dex, staking, multisig, proxy) không tồn tại hoặc chưa được triển khai
-- [ ] wallet/src/contracts/erc20.rs:377-384: Thiếu cơ chế retry cho transaction failed, chỉ xử lý lỗi đơn giản
-- [ ] wallet/src/contracts/erc20.rs:521-536: Thiếu unit test và integration test đầy đủ, chỉ có một test đơn giản
-- [ ] wallet/src/contracts/mod.rs:270-306: Phương thức `search_contracts` thiếu xử lý cho các tham số tìm kiếm `verified_only` và `audited_only`
-- [ ] wallet/src/contracts/mod.rs:315-329: Có thuộc tính `address` trong `ContractSearchQuery` nhưng không được sử dụng trong phương thức `search_contracts`
-- [ ] wallet/src/contracts/mod.rs:175-197: Sử dụng RwLock nhưng chưa có xử lý cho race condition khi đọc/ghi cùng lúc
-
-### Lỗi trong wallet/src/defi
-
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:200-225: Thiếu thuật toán checksum đầy đủ cho địa chỉ Diamond, hiện chỉ dựa vào regex đơn giản
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:235-280: Hàm `call_rpc` thiếu cơ chế retry và xử lý lỗi chi tiết theo từng mã lỗi
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:290-320: Tiềm ẩn race condition khi có nhiều giao dịch truy vấn RPC cùng lúc
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:322-350: Hàm `get_account_balance` thiếu xử lý tối ưu cho trường hợp địa chỉ không tồn tại
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:400-420: Parse balance từ string không an toàn, thiếu xử lý cho định dạng số đặc biệt
-- [ ] wallet/src/defi/blockchain.rs:280-307: BlockchainProviderFactory sử dụng phương thức gọi không nhất quán với các providers khác nhau
-- [ ] wallet/src/defi/farm.rs:127-136: Không có cơ chế fallback cho kết nối pool khi có lỗi
-- [ ] wallet/src/defi/farm.rs:226-285: Thiếu xử lý đồng thời khi nhiều người dùng thêm thanh khoản cùng lúc
-- [ ] wallet/src/defi/stake.rs:662-670: Phương thức `get_user_wallet_address` thiếu caching, có thể gây tốn tài nguyên khi gọi nhiều lần
-- [ ] wallet/src/defi/mod.rs:108-134: Phương thức `init_default_pools` chỉ khởi tạo stake pools mà không khởi tạo farm pools
-- [ ] wallet/src/defi/blockchain/non_evm/tron.rs:388-422: Thiếu đồng bộ hóa cache giữa tài nguyên băng thông và năng lượng trong Tron
-- [ ] wallet/src/defi/stake.rs:740-776: Thuật toán tính toán rewards (`calculate_pending_rewards`) sử dụng cách tính đơn giản, không đảm bảo độ chính xác cao khi thay đổi APY
-
-### Lỗi trong walletmanager
-
-- [ ] wallet/src/walletmanager/api.rs:489: Sử dụng `unwrap()` trong test thay vì xử lý lỗi đúng quy tắc theo .rules
-- [ ] wallet/src/walletmanager/api.rs:317-344: Thiếu xử lý lỗi khi provider không khả dụng hoặc network bị gián đoạn trong phương thức `send_transaction`
-- [ ] wallet/src/walletmanager/chain.rs:136-145: Thiếu xử lý ngoại lệ khi RPC URL không hợp lệ hoặc không kết nối được trong phương thức `add_chain` của `SimpleChainManager`
-- [ ] wallet/src/walletmanager/chain.rs:17-25: Enum `ChainType` thiếu các loại blockchain quan trọng mới như Diamond, Tron đã được triển khai trong module defi, dẫn đến không đồng bộ giữa hai module
-- [ ] wallet/src/walletmanager/chain.rs:99-134: Thiếu chức năng xác thực và giới hạn tỷ lệ truy cập (rate limiting) cho RPC requests trong `SimpleChainManager`
-- [ ] wallet/src/walletmanager/api.rs:345-365: Phương thức `get_balance` chỉ hoạt động với địa chỉ EVM, không hỗ trợ các blockchain non-EVM
-- [ ] wallet/src/walletmanager/lib.rs:3-4: Thiếu import `chain::*` dẫn đến không re-export module chain, làm cho API không nhất quán
-- [ ] wallet/src/walletmanager/types.rs:45-62: Struct `WalletInfo` không có serde traits (Serialize, Deserialize) cho việc lưu trữ và khôi phục dữ liệu
-- [ ] wallet/src/walletmanager/api.rs:92-117: Không kiểm tra đúng mọi trường hợp của seed/private key trong `import_wallet`
-
-### Lỗi trong walletlogic
-
-- [ ] wallet/src/walletlogic/handler.rs:221-250: Phương thức `sign_transaction` chỉ hỗ trợ EVM và không có lộ trình mở rộng cho các blockchain non-EVM
-- [ ] wallet/src/walletlogic/handler.rs:253-285: Phương thức `send_transaction` chỉ hỗ trợ EVM và thiếu xử lý lỗi nâng cao
-- [ ] wallet/src/walletlogic/handler.rs:287-309: Phương thức `get_balance` bị giới hạn chỉ cho EVM, không phù hợp với hệ thống hỗ trợ đa blockchain
-- [ ] wallet/src/walletlogic/handler.rs:381-395: Test `test_sign_transaction` sử dụng đối tượng `ChainManager` không tồn tại, đúng ra phải dùng mocking object
-- [ ] wallet/src/walletlogic/handler.rs:398-408: Test `test_get_balance` thiếu mocking và phụ thuộc vào kết nối mạng thật, vi phạm nguyên tắc unit test
-- [ ] wallet/src/walletlogic/init.rs:126-134: Phương thức `import_wallet_internal` không xác thực đúng định dạng của seed phrase trước khi tạo mnemonic
-- [ ] wallet/src/walletlogic/init.rs:126-175: Thiếu bảo mật khi lưu trữ private key/seed, cần giới hạn thời gian tồn tại trong bộ nhớ
-- [ ] wallet/src/walletlogic/crypto.rs:35-61: Thiếu xoay khóa (key rotation) và logging cho hoạt động mã hóa nhạy cảm
-- [ ] wallet/src/walletlogic/utils.rs:61-67: Hàm `is_seed_phrase` chỉ kiểm tra cấu hình mà không kiểm tra nội dung của seed phrase
-
-### Lỗi trong users module
-
-- [ ] wallet/src/users/subscription/manager.rs:153-175: Nguy cơ circular reference và deadlock giữa `SubscriptionManager` và `AutoTradeManager`
-- [ ] wallet/src/users/subscription/manager.rs:488-596: Phương thức `upgrade_user_account` sử dụng unwrap() tại dòng 519 và 566, vi phạm quy tắc xử lý lỗi
-- [ ] wallet/src/users/subscription/auto_trade.rs:564-598: Phương thức `can_use_auto_trade_with_time` thiếu xử lý đồng thời (race condition) khi nhiều người dùng truy cập cùng lúc
-- [ ] wallet/src/users/subscription/auto_trade.rs:753-790: Thiếu persistence cho auto trade data, dữ liệu sẽ bị mất khi khởi động lại
-- [ ] wallet/src/users/vip_user.rs:134-171: Phương thức `check_nft_ownership` chỉ là stub code chưa được triển khai đầy đủ, luôn trả về `true`
-- [ ] wallet/src/users/vip_user.rs:173-257: Phương thức `check_all_vip_nft_status` thiếu xử lý lỗi khi kiểm tra NFT không thành công
-- [ ] wallet/src/users/vip_user.rs:288-350: Phương thức `upgrade_premium_to_vip` gọi đến `check_nft_ownership` không đáng tin cậy
-- [ ] wallet/src/users/subscription/nft.rs:92-115: Thiếu cơ chế kiểm tra chéo (cross-check) cho NFT từ nhiều nguồn dữ liệu
-- [ ] wallet/src/users/mod.rs:17-22: Re-export quá nhiều types, vi phạm nguyên tắc encapsulation
-- [ ] wallet/src/users/subscription/mod.rs:92-113: Hàm `has_feature_access` giả định rằng struct `User` có trường `subscription`, nhưng không tìm thấy định nghĩa trong codebase
-- [ ] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup và khôi phục dữ liệu người dùng
-
-### Lỗi trong blockchain/src/smartcontracts
-
-- [x] blockchain/src/smartcontracts/dmd_token.rs:758-800: Các phương thức transfer cho các blockchain (Solana, NEAR, Avalanche, Polygon, Arbitrum, Optimism, Fantom) chưa được triển khai, chỉ là stub code trả về lỗi "not implemented yet"
-- [x] blockchain/src/smartcontracts/dmd_token.rs:1332-1378: Phương thức bridge_tokens thiếu xử lý lỗi thực tế cho các tình huống lỗi mạng, gián đoạn giao dịch, và cơ chế retry
-- [x] blockchain/src/smartcontracts/dmd_token.rs:887-929: Các phương thức lấy tổng cung (get_solana_total_supply, get_near_total_supply, etc.) cho các blockchain non-EVM chỉ trả về giá trị giả định, không có triển khai thực tế
-- [x] blockchain/src/smartcontracts/dmd_token.rs:114-167: Cấu hình địa chỉ token giống nhau ("0x90fE084F877C65e1b577c7b2eA64B8D8dd1AB278") trên nhiều blockchain khác nhau (Avalanche, Polygon, Arbitrum, Optimism, Fantom), không thực tế
-- [x] blockchain/src/smartcontracts/dmd_token.rs:116: URL RPC cho Ethereum sử dụng placeholder "your-api-key" thay vì giá trị thực: "https://mainnet.infura.io/v3/your-api-key"
-- [x] blockchain/src/smartcontracts/dmd_token.rs:2149-2196: Phương thức init_layerzero_bridge() và init_standard_modules() sử dụng các địa chỉ cứng nhắc không linh hoạt, cần cấu hình từ môi trường hoặc database
-- [x] blockchain/src/smartcontracts/bsc_contract/contract.rs:1-373: Trùng lặp code với file dmd_bsc_contract.sol, tạo ra sự dư thừa không cần thiết. File contract.rs sử dụng doc comments Rust (//!) để lưu trữ mã nguồn Solidity, không tuân theo quy ước Rust doc comment tiêu chuẩn.
-- [x] blockchain/src/smartcontracts/bsc_contract/dmd_bsc_contract.sol:1-349: Trùng lặp với nội dung trong contract.rs, dẫn đến vấn đề đồng bộ khi cập nhật một trong hai file.
-- [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:307-324: get_total_supply() chỉ bao gồm một phương thức đơn giản mà không có cơ chế cache hoặc fallback khi chức năng totalSupply() không khả dụng trên contract.
-- [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:342-345: Function khai báo trả về kết quả dạng U256 nhưng chỉ giới hạn ở 18 decimals, cần kiểm tra và làm rõ về thông tin kỹ thuật.
-- [x] blockchain/src/smartcontracts/solana_contract/mod.rs:1-203: Module không triển khai TokenInterface hoàn chỉnh, thiếu phương thức total_supply().
-- [x] blockchain/src/smartcontracts/solana_contract/mod.rs:143-166: Phương thức execute_transfer_transaction chỉ trả về hash giả lập, không có triển khai thực tế khi không bật feature "solana_sdk".
-- [x] blockchain/src/smartcontracts/solana_contract/mod.rs:171-202: Phương thức verify_transaction_status sử dụng random để mô phỏng kết quả thay vì triển khai thực.
-- [x] blockchain/src/smartcontracts/near_contract/mod.rs:143-151: Phương thức get_balance_of chỉ là stub function trả về giá trị mẫu, không có triển khai thực tế.
-- [x] blockchain/src/smartcontracts/near_contract/mod.rs:254-261: Phương thức bridge_to_solana chỉ trả về transaction hash giả, không triển khai thực tế.
-- [x] blockchain/src/smartcontracts/arb_contract/mod.rs:52-68: Thiếu xử lý lỗi khi kết nối với Arbitrum RPC
-- [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:41-60: Không có fallback URL khi BSC RPC không phản hồi
-- [x] blockchain/src/smartcontracts/eth_contract/mod.rs:37-48: Thời gian cache quá ngắn (5 phút), nên tăng lên 15-30 phút cho Ethereum
-- [x] blockchain/src/smartcontracts/dmd_token.rs:220-235: Phương thức kiểm tra allow list token đang không đồng bộ với smart contract
-- [x] blockchain/src/smartcontracts/dmd_token.rs:352-375: Sử dụng hard-coded decimal thay vì lấy từ contract
-- [x] blockchain/src/stake/stake_logic.rs:257-262: Phương thức update_apy() không lưu lịch sử thay đổi APY
-- [x] blockchain/src/farm/farm_logic.rs:181-192: Chưa cập nhật lại timestamp khi add_liquidity
-
-### Lỗi trong blockchain/src/stake
-
-- [ ] blockchain/src/stake/mod.rs:1: File trống, không có khai báo module hoặc re-export các submodule
-- [ ] blockchain/src/stake/routers.rs:1: File trống, không có implementation cho StakingRouter như đã mô tả trong manifest.rs
-- [ ] blockchain/src/stake/rewards.rs:1: File trống, không có implementation cho RewardCalculator như đã mô tả trong manifest.rs
-- [ ] blockchain/src/stake/validator.rs:1: File trống, không có implementation cho Validator như đã mô tả trong manifest.rs
-- [ ] blockchain/src/stake: Thiếu triển khai hoàn chỉnh cho module stake mặc dù đã được mô tả chi tiết trong manifest.rs và được liệt kê là dependency của các module khác
-- [ ] blockchain/src/stake: Thiếu triển khai cho stake pools, không có cấu trúc dữ liệu để lưu trữ và quản lý các pool staking
-- [ ] blockchain/src/stake: Không có logic kết nối với smart contract để tương tác với stake pools trên blockchain
-- [ ] blockchain/src/stake: Thiếu cơ chế cache và retry cho các thao tác staking, có thể gây lỗi khi mạng blockchain bị gián đoạn
-- [ ] blockchain/src/stake: Không có triển khai cho việc tính toán APY và rewards dựa trên thời gian staking và số lượng token đã stake
-- [ ] blockchain/src/stake: Không có cơ chế quản lý multi-chain staking, mặc dù dự án hỗ trợ nhiều blockchain
-- [ ] blockchain/src/stake: Cần triển khai cơ chế lưu trữ persistant để không mất dữ liệu staking khi khởi động lại ứng dụng
-- [ ] blockchain/src/stake: Thiếu các unit test và integration test để đảm bảo tính chính xác của quá trình staking và tính toán rewards
-
-# Các bugs và vấn đề trong dự án
-# Format: - [ ] file_path:line_start-line_end: Mô tả lỗi
-
-# Blockchain module bugs
+### Module: Smart Contracts
 - [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:94-108: Thực hiện quá nhiều request khi kiểm tra thông tin token
 
-# Wallet module bugs
-- [ ] wallet/src/user/profile.rs:173-190: Không kiểm tra định dạng email hợp lệ
-- [ ] wallet/src/user/authentication.rs:210-225: Token hết hạn không được xử lý đúng
-- [ ] wallet/src/transactions/history.rs:52-70: Giới hạn lấy lịch sử giao dịch quá ít (25), nên tăng lên 100
-- [ ] wallet/src/wallet_creation.rs:95-142: Không kiểm tra độ mạnh của passphrase
-- [ ] wallet/src/crypto/keys.rs:40-53: Sử dụng phương thức tạo key không an toàn
-- [ ] wallet/src/cache/wallet_cache.rs:58-82: Cache không được xóa khi logout
-- [ ] wallet/src/defi/blockchain.rs:210-228: Không có retry mechanism khi gọi blockchain API
-- [ ] wallet/src/defi/adapter/farm.rs:65-70: Không kiểm tra đầy đủ tham số đầu vào cho phương thức add_pool
-- [ ] wallet/src/defi/adapter/stake.rs:54-60: Thiếu kiểm tra edge case khi lock_time = 0
+## Domain: Wallet
 
-# Snipebot module bugs
-- [ ] snipebot/src/config.rs:28-40: Thiếu validate cho gas limit và slippage
-- [ ] snipebot/src/api/endpoints.rs:48-62: API endpoint không có rate limiting
+### Module: Defi/Contracts
+- [x] wallet/src/defi/contracts.rs:175-197: Race condition với RwLock
+- [x] wallet/src/defi/contracts.rs:270-306: Thiếu xử lý cho các tham số tìm kiếm
+- [x] wallet/src/defi/contracts.rs:315-329: Thuộc tính `address` không được sử dụng
+- [x] wallet/src/defi/erc20.rs:377-384: Thiếu cơ chế retry cho transaction
+- [ ] wallet/src/defi/erc20.rs:521-536: Thiếu unit test và integration test
+- [x] wallet/src/defi/erc20.rs: Sử dụng transmute_copy không an toàn trong decode_logs
+- [x] wallet/src/defi/erc20.rs: Thiếu xử lý lỗi chi tiết trong các phương thức
+- [x] wallet/src/defi/erc20.rs: Thiếu logging cho các hoạt động quan trọng
+
+### Module: Defi/Blockchain
+- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:200-225: Thiếu thuật toán checksum đầy đủ
+- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:235-280: Thiếu cơ chế retry và xử lý lỗi
+- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:290-320: Race condition trong RPC
+- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:322-350: Thiếu xử lý tối ưu
+- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:400-420: Parse balance không an toàn
+- [ ] wallet/src/defi/blockchain.rs:280-307: BlockchainProviderFactory không nhất quán
+- [ ] wallet/src/defi/blockchain/non_evm/tron.rs:388-422: Thiếu đồng bộ hóa cache
+
+### Module: Defi/Farm và Stake
+- [ ] wallet/src/defi/farm.rs:127-136: Không có cơ chế fallback
+- [ ] wallet/src/defi/farm.rs:226-285: Thiếu xử lý đồng thời
+- [ ] wallet/src/defi/stake.rs:662-670: Thiếu caching
+- [ ] wallet/src/defi/stake.rs:740-776: Thuật toán tính rewards chưa chính xác
+- [ ] wallet/src/defi/mod.rs:108-134: Khởi tạo pools không đầy đủ
+
+### Module: Defi/Token Standards
+- [ ] wallet/src/defi/erc20.rs:358-438: Unsafe code
+- [ ] wallet/src/defi/erc721.rs:430-505: Unsafe code
+- [ ] wallet/src/defi/erc1155.rs:420-495: Unsafe code
+
+### Module: WalletLogic
+- [ ] wallet/src/walletlogic/handler.rs:221-250: Hạn chế hỗ trợ blockchain
+- [ ] wallet/src/walletlogic/handler.rs:253-285: Thiếu xử lý lỗi nâng cao
+- [ ] wallet/src/walletlogic/handler.rs:287-309: Giới hạn chỉ cho EVM
+- [ ] wallet/src/walletlogic/handler.rs:381-395: Test không đúng chuẩn
+- [ ] wallet/src/walletlogic/handler.rs:398-408: Test thiếu mocking
+- [ ] wallet/src/walletlogic/init.rs:126-134: Thiếu validation seed phrase
+- [ ] wallet/src/walletlogic/init.rs:126-175: Thiếu bảo mật lưu trữ
+- [ ] wallet/src/walletlogic/crypto.rs:35-61: Thiếu key rotation
+- [ ] wallet/src/walletlogic/utils.rs:61-67: Kiểm tra seed phrase chưa đầy đủ
+
+### Module: Users/Subscription
+- [ ] wallet/src/users/subscription/manager.rs:153-175: Nguy cơ deadlock
+- [ ] wallet/src/users/subscription/manager.rs:488-596: Sử dụng unwrap()
+- [ ] wallet/src/users/subscription/manager.rs:234-256: Thiếu xử lý lỗi
+- [ ] wallet/src/users/subscription/manager.rs:312-345: Thiếu kiểm tra trạng thái
+- [ ] wallet/src/users/subscription/manager.rs:456-478: Thiếu validation
+- [ ] wallet/src/users/subscription/auto_trade.rs:564-598: Race condition
+- [ ] wallet/src/users/subscription/auto_trade.rs:753-790: Thiếu persistence
+- [ ] wallet/src/users/subscription/auto_trade.rs:123-156: Thiếu rate limiting
+- [ ] wallet/src/users/subscription/auto_trade.rs:234-267: Thiếu retry mechanism
+- [ ] wallet/src/users/subscription/nft.rs:92-115: Thiếu cross-check
+- [ ] wallet/src/users/subscription/nft.rs:45-78: Thiếu caching
+- [ ] wallet/src/users/subscription/nft.rs:156-189: Thiếu timeout
+- [ ] wallet/src/users/subscription/mod.rs:92-113: Giả định không an toàn
+
+### Module: Users/VIP
+- [ ] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện
+- [ ] wallet/src/users/vip_user.rs:173-257: Thiếu xử lý lỗi
+- [ ] wallet/src/users/vip_user.rs:288-350: Gọi hàm không đáng tin cậy
+
+### Module: Users/Free
+- [ ] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup
+- [ ] wallet/src/users/mod.rs:17-22: Vi phạm encapsulation
+
+## Domain: Snipebot
+
+### Module: Core
+- [ ] snipebot/src/config.rs:28-40: Thiếu validate
+- [ ] snipebot/src/api/endpoints.rs:48-62: Thiếu rate limiting
 - [ ] snipebot/src/executor/tx_builder.rs:81-102: Gas estimation không chính xác
-- [ ] snipebot/src/scanner/token_scanner.rs:40-65: Scanner có thể miss event nếu có nhiều block cùng lúc
-- [ ] snipebot/src/strategy/base_strategy.rs:110-132: Không có cơ chế phát hiện rugpull
+- [ ] snipebot/src/scanner/token_scanner.rs:40-65: Scanner có thể miss event
+- [ ] snipebot/src/strategy/base_strategy.rs:110-132: Thiếu cơ chế phát hiện rugpull
+
+## Các vấn đề chung cần cải thiện
+- [ ] Thêm unit test cho các module chính
+- [ ] Cải thiện error handling tổng thể
+- [ ] Thêm logging chi tiết
+- [ ] Tối ưu hóa performance
+- [ ] Cập nhật documentation
 

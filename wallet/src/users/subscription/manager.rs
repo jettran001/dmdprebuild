@@ -1317,4 +1317,155 @@ impl SubscriptionManager {
             manager.set_event_emitter(emitter);
         }
     }
+
+    /// Gia hạn đăng ký
+    ///
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// * `months` - Số tháng gia hạn
+    ///
+    /// # Returns
+    /// `Ok(())` nếu gia hạn thành công, `Err` nếu có lỗi
+    pub async fn renew_subscription(&self, user_id: &str, months: u32) -> Result<(), WalletError> {
+        if months == 0 {
+            return Err(WalletError::InvalidInput("Số tháng gia hạn phải lớn hơn 0".to_string()));
+        }
+
+        let mut subscriptions = self.user_subscriptions.write().await;
+        let subscription = subscriptions.get_mut(user_id)
+            .ok_or_else(|| WalletError::NotFound(format!("Không tìm thấy đăng ký cho user {}", user_id)))?;
+
+        // Kiểm tra trạng thái đăng ký hiện tại
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(WalletError::InvalidState(
+                format!("Không thể gia hạn đăng ký với trạng thái {}", subscription.status)
+            ));
+        }
+
+        // Tính toán ngày hết hạn mới
+        let current_end_date = subscription.end_date;
+        let new_end_date = current_end_date + chrono::Duration::days(months as i64 * 30);
+
+        // Cập nhật thông tin đăng ký
+        subscription.end_date = new_end_date;
+        subscription.last_renewal_date = Utc::now();
+        subscription.renewal_count += 1;
+
+        // Lưu vào database
+        self.db.update_subscription(user_id, subscription)
+            .await
+            .map_err(|e| WalletError::DatabaseError(e.to_string()))?;
+
+        // Gửi event thông báo
+        if let Some(emitter) = &self.event_emitter {
+            emitter.emit(EventType::SubscriptionRenewed, SubscriptionEvent {
+                user_id: user_id.to_string(),
+                subscription_type: subscription.subscription_type,
+                end_date: new_end_date,
+            });
+        }
+
+        info!("Đã gia hạn đăng ký cho user {} thêm {} tháng", user_id, months);
+        Ok(())
+    }
+
+    /// Gia hạn đăng ký với thời gian cụ thể
+    ///
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    /// * `start_date` - Ngày bắt đầu
+    /// * `end_date` - Ngày kết thúc
+    ///
+    /// # Returns
+    /// `Ok(())` nếu gia hạn thành công, `Err` nếu có lỗi
+    pub async fn extend_subscription(
+        &self,
+        user_id: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+    ) -> Result<(), WalletError> {
+        // Validate dates
+        if start_date >= end_date {
+            return Err(WalletError::InvalidInput("Ngày bắt đầu phải trước ngày kết thúc".to_string()));
+        }
+
+        let now = Utc::now();
+        if end_date <= now {
+            return Err(WalletError::InvalidInput("Ngày kết thúc phải trong tương lai".to_string()));
+        }
+
+        let mut subscriptions = self.user_subscriptions.write().await;
+        let subscription = subscriptions.get_mut(user_id)
+            .ok_or_else(|| WalletError::NotFound(format!("Không tìm thấy đăng ký cho user {}", user_id)))?;
+
+        // Kiểm tra trạng thái đăng ký
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(WalletError::InvalidState(
+                format!("Không thể gia hạn đăng ký với trạng thái {}", subscription.status)
+            ));
+        }
+
+        // Cập nhật thông tin đăng ký
+        subscription.start_date = start_date;
+        subscription.end_date = end_date;
+        subscription.last_renewal_date = now;
+
+        // Lưu vào database
+        self.db.update_subscription(user_id, subscription)
+            .await
+            .map_err(|e| WalletError::DatabaseError(e.to_string()))?;
+
+        // Gửi event thông báo
+        if let Some(emitter) = &self.event_emitter {
+            emitter.emit(EventType::SubscriptionExtended, SubscriptionEvent {
+                user_id: user_id.to_string(),
+                subscription_type: subscription.subscription_type,
+                end_date,
+            });
+        }
+
+        info!("Đã gia hạn đăng ký cho user {} từ {} đến {}", user_id, start_date, end_date);
+        Ok(())
+    }
+
+    /// Hủy đăng ký
+    ///
+    /// # Arguments
+    /// * `user_id` - ID người dùng
+    ///
+    /// # Returns
+    /// `Ok(())` nếu hủy thành công, `Err` nếu có lỗi
+    pub async fn cancel_subscription(&self, user_id: &str) -> Result<(), WalletError> {
+        let mut subscriptions = self.user_subscriptions.write().await;
+        let subscription = subscriptions.get_mut(user_id)
+            .ok_or_else(|| WalletError::NotFound(format!("Không tìm thấy đăng ký cho user {}", user_id)))?;
+
+        // Kiểm tra trạng thái đăng ký
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(WalletError::InvalidState(
+                format!("Không thể hủy đăng ký với trạng thái {}", subscription.status)
+            ));
+        }
+
+        // Cập nhật trạng thái
+        subscription.status = SubscriptionStatus::Cancelled;
+        subscription.cancellation_date = Some(Utc::now());
+
+        // Lưu vào database
+        self.db.update_subscription(user_id, subscription)
+            .await
+            .map_err(|e| WalletError::DatabaseError(e.to_string()))?;
+
+        // Gửi event thông báo
+        if let Some(emitter) = &self.event_emitter {
+            emitter.emit(EventType::SubscriptionCancelled, SubscriptionEvent {
+                user_id: user_id.to_string(),
+                subscription_type: subscription.subscription_type,
+                end_date: subscription.end_date,
+            });
+        }
+
+        info!("Đã hủy đăng ký cho user {}", user_id);
+        Ok(())
+    }
 } 

@@ -31,6 +31,9 @@ use tracing::{debug, info, warn, error};
 use reqwest::{Client, ClientBuilder};
 use serde_json::{json, Value};
 use regex::Regex;
+use bs58;
+use sha2::{Sha256};
+use std::time::Instant;
 
 use crate::defi::blockchain::{
     BlockchainProvider, BlockchainType, BlockchainConfig
@@ -52,6 +55,8 @@ pub struct DiamondConfig {
     pub timeout_ms: u64,
     /// Số lần retry tối đa
     pub max_retries: u32,
+    /// Thời gian chờ giữa các lần retry (ms)
+    pub retry_delay_ms: u64,
 }
 
 impl DiamondConfig {
@@ -75,6 +80,7 @@ impl DiamondConfig {
             explorer_url: explorer_url.to_string(),
             timeout_ms: BLOCKCHAIN_TIMEOUT,
             max_retries: 3,
+            retry_delay_ms: 1000, // 1 giây
         }
     }
 
@@ -99,6 +105,12 @@ impl DiamondConfig {
     /// Thiết lập số lần retry tối đa
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
+        self
+    }
+
+    /// Thiết lập thời gian chờ giữa các lần retry
+    pub fn with_retry_delay(mut self, retry_delay_ms: u64) -> Self {
+        self.retry_delay_ms = retry_delay_ms;
         self
     }
 }
@@ -146,6 +158,10 @@ pub struct DiamondProvider {
     pub config: DiamondConfig,
     /// HTTP client
     client: Client,
+    /// Lock cho RPC calls
+    rpc_lock: tokio::sync::Mutex<()>,
+    /// Cache cho các kết quả RPC
+    rpc_cache: RwLock<HashMap<String, (Value, Instant)>>,
 }
 
 impl DiamondProvider {
@@ -159,6 +175,8 @@ impl DiamondProvider {
         Ok(Self {
             config,
             client,
+            rpc_lock: tokio::sync::Mutex::new(()),
+            rpc_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -195,70 +213,174 @@ impl DiamondProvider {
         Ok(provider)
     }
 
-    /// Kiểm tra tính hợp lệ của địa chỉ Diamond
+    /// Kiểm tra địa chỉ Diamond có hợp lệ không
     pub fn validate_address(&self, address: &str) -> bool {
-        if address.is_empty() {
-            return false;
-        }
-
         // Kiểm tra độ dài
-        if address.len() < 32 || address.len() > 36 {
+        if address.len() != 34 {
             return false;
         }
 
-        // Kiểm tra tiền tố D
+        // Kiểm tra prefix
         if !address.starts_with('D') {
             return false;
         }
 
-        // Kiểm tra các ký tự hợp lệ trong chuỗi địa chỉ
-        let regex = Regex::new(r"^D[a-zA-Z0-9]{31,35}$").unwrap();
-        if !regex.is_match(address) {
+        // Kiểm tra ký tự hợp lệ
+        let valid_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        if !address.chars().all(|c| valid_chars.contains(c)) {
             return false;
         }
 
-        // Kiểm tra checksum nếu cần thiết
-        // Note: Trong thực tế, Diamond blockchain có thể có thuật toán checksum riêng
-        
-        true
+        // Kiểm tra checksum
+        let base58 = bs58::decode(address)
+            .into_vec()
+            .map_err(|_| false)
+            .unwrap_or_default();
+            
+        if base58.len() != 25 {
+            return false;
+        }
+
+        // Tách version và payload
+        let version = base58[0];
+        let payload = &base58[1..21];
+        let checksum = &base58[21..];
+
+        // Tính checksum
+        let mut hasher = Sha256::new();
+        hasher.update(&[version]);
+        hasher.update(payload);
+        let hash1 = hasher.finalize();
+
+        let mut hasher = Sha256::new();
+        hasher.update(hash1);
+        let hash2 = hasher.finalize();
+
+        // So sánh checksum
+        &hash2[..4] == checksum
     }
 
-    /// Gọi JSON-RPC API
-    async fn call_rpc<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T, DefiError> {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params
-        });
+    /// Thêm cơ chế retry cho RPC calls
+    async fn call_rpc_with_retry<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, DefiError> {
+        let mut retries = 0;
+        let mut last_error = None;
 
+        while retries < self.config.max_retries {
+            match self.call_rpc(method, params.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    retries += 1;
+                    if retries < self.config.max_retries {
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_delay_ms)).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            DefiError::ProviderError("Max retries exceeded".to_string())
+        }))
+    }
+
+    /// Gọi RPC với caching và đồng bộ hóa
+    async fn call_rpc<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, DefiError> {
+        // Tạo cache key
+        let cache_key = format!("{}_{}", method, params.to_string());
+        
+        // Kiểm tra cache
+        {
+            let cache = self.rpc_cache.read().await;
+            if let Some((cached_value, timestamp)) = cache.get(&cache_key) {
+                if timestamp.elapsed() < Duration::from_secs(30) {
+                    return serde_json::from_value(cached_value.clone())
+                        .map_err(|e| DefiError::ProviderError(format!(
+                            "Failed to deserialize cached value: {}", e
+                        )));
+                }
+            }
+        }
+
+        // Lấy lock trước khi gọi RPC
+        let _guard = self.rpc_lock.lock().await;
+
+        // Gọi RPC
         let response = self.client
             .post(&self.config.rpc_url)
-            .json(&request)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params
+            }))
             .send()
             .await
-            .map_err(|e| DefiError::ProviderError(format!("RPC request failed: {}", e)))?;
+            .map_err(|e| DefiError::ProviderError(format!("RPC call failed: {}", e)))?;
 
-        let response_json: Value = response
-            .json()
-            .await
+        // Parse response
+        let result: Value = response.json().await
             .map_err(|e| DefiError::ProviderError(format!("Failed to parse RPC response: {}", e)))?;
 
-        // Xử lý lỗi từ RPC
-        if let Some(error) = response_json.get("error") {
-            let error_msg = error.get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown RPC error");
-            
-            return Err(DefiError::ProviderError(format!("RPC error: {}", error_msg)));
+        // Kiểm tra lỗi
+        if let Some(error) = result.get("error") {
+            return Err(DefiError::ProviderError(format!(
+                "RPC error: {}", error
+            )));
         }
 
         // Lấy kết quả
-        let result = response_json.get("result")
-            .ok_or_else(|| DefiError::ProviderError("RPC response missing 'result' field".to_string()))?;
+        let result_value = result.get("result")
+            .ok_or_else(|| DefiError::ProviderError("No result in RPC response".to_string()))?
+            .clone();
 
-        serde_json::from_value(result.clone())
-            .map_err(|e| DefiError::ProviderError(format!("Failed to parse RPC result: {}", e)))
+        // Cập nhật cache
+        {
+            let mut cache = self.rpc_cache.write().await;
+            cache.insert(cache_key, (result_value.clone(), Instant::now()));
+        }
+
+        // Parse kết quả
+        serde_json::from_value(result_value)
+            .map_err(|e| DefiError::ProviderError(format!(
+                "Failed to deserialize RPC result: {}", e
+            )))
+    }
+
+    /// Xóa cache cũ
+    async fn cleanup_cache(&self) {
+        let mut cache = self.rpc_cache.write().await;
+        cache.retain(|_, (_, timestamp)| timestamp.elapsed() < Duration::from_secs(30));
+    }
+
+    /// Lấy số dư an toàn
+    pub async fn get_balance(&self, address: &str) -> Result<U256, DefiError> {
+        if !self.validate_address(address) {
+            return Err(DefiError::InvalidAddress(format!(
+                "Invalid Diamond address: {}",
+                address
+            )));
+        }
+
+        let balance = self.call_rpc_with_retry(
+            "getbalance",
+            json!([address])
+        ).await?;
+
+        // Parse balance an toàn
+        let balance_str = balance.to_string();
+        U256::from_dec_str(&balance_str)
+            .map_err(|e| DefiError::ProviderError(format!(
+                "Failed to parse balance: {}",
+                e
+            )))
     }
 
     /// Lấy chiều cao block hiện tại
@@ -283,27 +405,41 @@ impl DiamondProvider {
         self.call_rpc("blockchain.getTransaction", json!([tx_hash])).await
     }
 
-    /// Lấy số dư tài khoản (native token)
+    /// Lấy số dư tài khoản với xử lý tối ưu
     pub async fn get_account_balance(&self, address: &str) -> Result<U256, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::ProviderError(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::InvalidAddress(format!("Invalid Diamond address: {}", address)));
         }
 
-        #[derive(Deserialize)]
+        // Kiểm tra địa chỉ có tồn tại không
+        let is_valid = self.is_address_valid(address).await?;
+        if !is_valid {
+            return Ok(U256::zero());
+        }
+
         struct AccountBalanceResult {
             balance: String,
         }
 
-        let result: AccountBalanceResult = self.call_rpc(
-            "accounts.getBalance", 
-            json!([address])
-        ).await?;
-        
-        let balance = U256::from_dec_str(&result.balance).map_err(|e| 
-            DefiError::ProviderError(format!("Failed to parse account balance: {}", e))
-        )?;
-        
-        Ok(balance)
+        let params = json!([address]);
+        let result: AccountBalanceResult = self.call_rpc("diamond_getBalance", params).await?;
+
+        // Parse balance an toàn
+        match result.balance.parse::<U256>() {
+            Ok(balance) => Ok(balance),
+            Err(e) => Err(DefiError::ProviderError(format!(
+                "Failed to parse balance: {} for address: {}", 
+                e, address
+            )))
+        }
+    }
+
+    /// Kiểm tra địa chỉ có tồn tại không
+    async fn is_address_valid(&self, address: &str) -> Result<bool, DefiError> {
+        let params = json!([address]);
+        let result: bool = self.call_rpc("diamond_isAddressValid", params).await?;
+        Ok(result)
     }
 
     /// Lấy số dư token DRC-20 (tương tự ERC-20)
