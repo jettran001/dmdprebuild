@@ -1,20 +1,5 @@
 # Danh sách lỗi đã phát hiện và cần sửa
 
-## Domain: Blockchain
-
-### Module: Stake
-- [x] blockchain/src/stake/mod.rs:1: File trống, không có khai báo module hoặc re-export các submodule
-- [x] blockchain/src/stake/routers.rs:1: File trống, không có implementation cho StakingRouter
-- [x] blockchain/src/stake/rewards.rs:1: File trống, không có implementation cho RewardCalculator
-- [x] blockchain/src/stake/validator.rs:1: File trống, không có implementation cho Validator
-- [x] blockchain/src/stake: Thiếu triển khai hoàn chỉnh cho module stake
-- [x] blockchain/src/stake: Thiếu triển khai cho stake pools
-- [x] blockchain/src/stake: Không có logic kết nối với smart contract
-- [x] blockchain/src/stake: Thiếu cơ chế cache và retry cho các thao tác staking
-- [x] blockchain/src/stake: Không có triển khai cho việc tính toán APY và rewards
-- [x] blockchain/src/stake: Không có cơ chế quản lý multi-chain staking
-- [x] blockchain/src/stake: Cần triển khai cơ chế lưu trữ persistant
-- [x] blockchain/src/stake: Thiếu các unit tests và integration test
 
 ### Module: Farm và Stake
 - [ ] blockchain/src/stake/farm_logic.rs:1-502: Trùng lặp với blockchain/src/farm/farm_logic.rs
@@ -37,51 +22,51 @@
 - [x] wallet/src/defi/erc20.rs: Thiếu logging cho các hoạt động quan trọng
 
 ### Module: Defi/Blockchain
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:200-225: Thiếu thuật toán checksum đầy đủ
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:235-280: Thiếu cơ chế retry và xử lý lỗi
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:290-320: Race condition trong RPC
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:322-350: Thiếu xử lý tối ưu
-- [ ] wallet/src/defi/blockchain/non_evm/diamond.rs:400-420: Parse balance không an toàn
-- [ ] wallet/src/defi/blockchain.rs:280-307: BlockchainProviderFactory không nhất quán
-- [ ] wallet/src/defi/blockchain/non_evm/tron.rs:388-422: Thiếu đồng bộ hóa cache
+- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:200-225: Thiếu thuật toán checksum đầy đủ
+- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:235-280: Thiếu cơ chế retry và xử lý lỗi
+- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:290-320: Race condition trong RPC
+- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:322-350: Thiếu xử lý tối ưu
+- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:400-420: Parse balance không an toàn
+- [x] wallet/src/defi/blockchain.rs:280-307: BlockchainProviderFactory không nhất quán
+- [x] wallet/src/defi/blockchain/non_evm/tron.rs:388-422: Thiếu đồng bộ hóa cache
 
 ### Module: Defi/Farm và Stake
-- [ ] wallet/src/defi/farm.rs:127-136: Không có cơ chế fallback
+- [x] wallet/src/defi/farm.rs:127-136: Không có cơ chế fallback
 - [ ] wallet/src/defi/farm.rs:226-285: Thiếu xử lý đồng thời
 - [ ] wallet/src/defi/stake.rs:662-670: Thiếu caching
 - [ ] wallet/src/defi/stake.rs:740-776: Thuật toán tính rewards chưa chính xác
-- [ ] wallet/src/defi/mod.rs:108-134: Khởi tạo pools không đầy đủ
+- [x] wallet/src/defi/mod.rs:108-134: Khởi tạo pools không đầy đủ
 
 ### Module: Defi/Token Standards
-- [ ] wallet/src/defi/erc20.rs:358-438: Unsafe code
-- [ ] wallet/src/defi/erc721.rs:430-505: Unsafe code
-- [ ] wallet/src/defi/erc1155.rs:420-495: Unsafe code
+- [x] wallet/src/defi/erc20.rs:358-438: Unsafe code
+- [x] wallet/src/defi/erc721.rs:430-505: Unsafe code
+- [x] wallet/src/defi/erc1155.rs:420-495: Unsafe code
 
 ### Module: WalletLogic
-- [ ] wallet/src/walletlogic/handler.rs:221-250: Hạn chế hỗ trợ blockchain
-- [ ] wallet/src/walletlogic/handler.rs:253-285: Thiếu xử lý lỗi nâng cao
-- [ ] wallet/src/walletlogic/handler.rs:287-309: Giới hạn chỉ cho EVM
-- [ ] wallet/src/walletlogic/handler.rs:381-395: Test không đúng chuẩn
-- [ ] wallet/src/walletlogic/handler.rs:398-408: Test thiếu mocking
-- [ ] wallet/src/walletlogic/init.rs:126-134: Thiếu validation seed phrase
-- [ ] wallet/src/walletlogic/init.rs:126-175: Thiếu bảo mật lưu trữ
-- [ ] wallet/src/walletlogic/crypto.rs:35-61: Thiếu key rotation
-- [ ] wallet/src/walletlogic/utils.rs:61-67: Kiểm tra seed phrase chưa đầy đủ
+- [x] wallet/src/walletlogic/handler.rs:221-250: Hạn chế hỗ trợ blockchain
+- [x] wallet/src/walletlogic/handler.rs:253-285: Thiếu xử lý lỗi nâng cao
+- [x] wallet/src/walletlogic/handler.rs:287-309: Giới hạn chỉ cho EVM
+- [x] wallet/src/walletlogic/handler.rs:381-395: Test không đúng chuẩn
+- [x] wallet/src/walletlogic/handler.rs:398-408: Test thiếu mocking
+- [x] wallet/src/walletlogic/init.rs:126-134: Thiếu validation seed phrase
+- [x] wallet/src/walletlogic/init.rs:126-175: Thiếu bảo mật lưu trữ
+- [x] wallet/src/walletlogic/crypto.rs:35-61: Thiếu key rotation
+- [x] wallet/src/walletlogic/utils.rs:61-67: Kiểm tra seed phrase chưa đầy đủ
 
 ### Module: Users/Subscription
-- [ ] wallet/src/users/subscription/manager.rs:153-175: Nguy cơ deadlock
-- [ ] wallet/src/users/subscription/manager.rs:488-596: Sử dụng unwrap()
-- [ ] wallet/src/users/subscription/manager.rs:234-256: Thiếu xử lý lỗi
-- [ ] wallet/src/users/subscription/manager.rs:312-345: Thiếu kiểm tra trạng thái
-- [ ] wallet/src/users/subscription/manager.rs:456-478: Thiếu validation
-- [ ] wallet/src/users/subscription/auto_trade.rs:564-598: Race condition
-- [ ] wallet/src/users/subscription/auto_trade.rs:753-790: Thiếu persistence
-- [ ] wallet/src/users/subscription/auto_trade.rs:123-156: Thiếu rate limiting
-- [ ] wallet/src/users/subscription/auto_trade.rs:234-267: Thiếu retry mechanism
-- [ ] wallet/src/users/subscription/nft.rs:92-115: Thiếu cross-check
-- [ ] wallet/src/users/subscription/nft.rs:45-78: Thiếu caching
-- [ ] wallet/src/users/subscription/nft.rs:156-189: Thiếu timeout
-- [ ] wallet/src/users/subscription/mod.rs:92-113: Giả định không an toàn
+- [x] wallet/src/users/subscription/manager.rs:153-175: Deadlock risk in init_auto_trade_manager
+- [x] wallet/src/users/subscription/manager.rs:488-596: Using unwrap()
+- [x] wallet/src/users/subscription/manager.rs:234-256: Lack of error handling in check_transaction_status
+- [x] wallet/src/users/subscription/manager.rs:312-345: Lack of state checks in process_payment
+- [x] wallet/src/users/subscription/manager.rs:456-478: Lack of validation in check_nft_ownership
+- [x] wallet/src/users/subscription/auto_trade.rs:564-598: Race condition
+- [x] wallet/src/users/subscription/auto_trade.rs:753-790: Thiếu persistence
+- [x] wallet/src/users/subscription/auto_trade.rs:123-156: Thiếu rate limiting
+- [x] wallet/src/users/subscription/auto_trade.rs:234-267: Thiếu retry mechanism
+- [x] wallet/src/users/subscription/nft.rs:92-115: Thiếu cross-check
+- [x] wallet/src/users/subscription/nft.rs:45-78: Thiếu caching
+- [x] wallet/src/users/subscription/nft.rs:156-189: Thiếu timeout
+- [x] wallet/src/users/subscription/mod.rs:92-113: Giả định không an toàn
 
 ### Module: Users/VIP
 - [ ] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện

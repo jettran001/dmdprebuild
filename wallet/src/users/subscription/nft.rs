@@ -23,11 +23,19 @@ use chrono::{DateTime, Duration, Utc};
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use log::{debug, error, info, warn};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::time::Duration as StdDuration;
+use tokio::time::timeout;
 
 use crate::blockchain::types::NftInfo;
 use crate::error::AppResult;
 use crate::users::subscription::constants::{NFT_SUBSCRIPTION_DAYS, VIP_NFT_COLLECTION_ADDRESS};
 use crate::users::subscription::types::SubscriptionType;
+use crate::cache;
+use crate::blockchain::BlockchainProvider;
 
 /// Trạng thái của VIP user
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,12 +259,28 @@ impl VipNftInfo {
 pub struct NftManager {
     /// Danh sách NFT của người dùng
     pub user_nfts: Vec<VipNftInfo>,
+    /// Cache cho các NFT đã xác minh
+    nft_cache: Arc<RwLock<HashMap<Uuid, (bool, DateTime<Utc>)>>>,
+    /// Blockchain providers cho việc cross-check
+    blockchain_providers: Option<Arc<Vec<Box<dyn BlockchainProvider>>>>,
+    /// Cache cho xác minh NFT
+    verification_cache: Arc<cache::AsyncCache<String, bool, cache::LRUCache<String, bool>>>,
 }
 
 impl NftManager {
     /// Tạo manager mới với danh sách NFT
     pub fn new(user_nfts: Vec<VipNftInfo>) -> Self {
-        Self { user_nfts }
+        Self { 
+            user_nfts,
+            nft_cache: Arc::new(RwLock::new(HashMap::new())),
+            blockchain_providers: None,
+            verification_cache: Arc::new(cache::AsyncCache::new(100)), // Cache 100 kết quả xác minh
+        }
+    }
+
+    /// Thiết lập blockchain providers để xác minh NFT
+    pub fn set_blockchain_providers(&mut self, providers: Arc<Vec<Box<dyn BlockchainProvider>>>) {
+        self.blockchain_providers = Some(providers);
     }
 
     /// Kiểm tra người dùng có NFT VIP đang hoạt động không
@@ -281,6 +305,94 @@ impl NftManager {
         match self.user_nfts.iter_mut().find(|nft| nft.nft_id == nft_id) {
             Some(nft) => nft.activate(),
             None => Err("Không tìm thấy NFT".into()),
+        }
+    }
+    
+    /// Xác minh NFT với cross-check trên nhiều blockchain providers
+    /// 
+    /// Thực hiện xác minh quyền sở hữu NFT trên nhiều blockchain providers
+    /// với cơ chế kiểm tra chéo và timeout để đảm bảo độ tin cậy và hiệu năng.
+    ///
+    /// # Arguments
+    /// * `wallet_address` - Địa chỉ ví cần kiểm tra
+    /// * `contract_address` - Địa chỉ hợp đồng NFT
+    /// * `token_id` - Token ID của NFT
+    /// * `chain_id` - Chain ID của blockchain
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - Kết quả xác minh, true nếu có quyền sở hữu
+    /// * `Err(String)` - Lỗi nếu có
+    pub async fn verify_nft_ownership(
+        &self,
+        wallet_address: &str,
+        contract_address: &str,
+        token_id: U256,
+        chain_id: u64,
+    ) -> Result<bool, String> {
+        // Tạo cache key
+        let cache_key = format!("{}_{}_{}_{}",
+            wallet_address, contract_address, token_id.to_string(), chain_id);
+
+        // Kiểm tra trong cache trước
+        if let Some(result) = self.verification_cache.get(&cache_key).await {
+            debug!("NFT verification result from cache for {}: {}", cache_key, result);
+            return Ok(result);
+        }
+
+        // Xác minh quyền sở hữu với timeout
+        let providers = match &self.blockchain_providers {
+            Some(p) => p,
+            None => return Err("Không có blockchain providers".to_string()),
+        };
+
+        let mut verification_results = Vec::new();
+        let mut errors = Vec::new();
+        
+        // Timeout cho toàn bộ quá trình xác minh
+        match timeout(StdDuration::from_secs(30), async {
+            // Xác minh trên từng provider
+            for (i, provider) in providers.iter().enumerate() {
+                match provider.verify_nft_ownership(
+                    wallet_address,
+                    contract_address,
+                    token_id,
+                    chain_id,
+                ).await {
+                    Ok(result) => {
+                        debug!("Provider {} NFT verification: {}", i, result);
+                        verification_results.push(result);
+                    },
+                    Err(e) => {
+                        errors.push(format!("Provider {} error: {}", i, e));
+                    }
+                }
+            }
+        }).await {
+            Ok(_) => {
+                if verification_results.is_empty() {
+                    return Err(format!("Không thể xác minh NFT: {}", errors.join(", ")));
+                }
+                
+                // Cross-check: cần ít nhất 2/3 số kết quả khớp nhau
+                let truthy_count = verification_results.iter().filter(|&&r| r).count();
+                let falsy_count = verification_results.len() - truthy_count;
+                
+                let required_threshold = (verification_results.len() as f64 * 0.66).ceil() as usize;
+                let final_result = if truthy_count >= required_threshold {
+                    true
+                } else if falsy_count >= required_threshold {
+                    false
+                } else {
+                    return Err("Không đủ độ tin cậy từ kết quả xác minh".to_string());
+                };
+                
+                // Lưu kết quả vào cache
+                self.verification_cache.insert(cache_key, final_result).await
+                    .map_err(|e| format!("Lỗi cache: {}", e))?;
+                
+                Ok(final_result)
+            },
+            Err(_) => Err("Timeout khi xác minh NFT".to_string()),
         }
     }
 } 

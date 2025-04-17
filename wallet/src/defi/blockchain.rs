@@ -272,43 +272,101 @@ pub struct BlockchainProviderFactory;
 impl BlockchainProviderFactory {
     /// Tạo provider phù hợp với blockchain type
     pub async fn create_provider(config: BlockchainConfig) -> Result<Box<dyn BlockchainProvider>, DefiError> {
+        // Kiểm tra tính hợp lệ của config
+        if config.chain_id.as_u64() == 0 {
+            return Err(DefiError::InvalidConfig("Chain ID không được là 0".to_string()));
+        }
+        
+        if config.timeout_ms == 0 {
+            return Err(DefiError::InvalidConfig("Timeout không được là 0".to_string()));
+        }
+        
+        // Ghi log chi tiết
+        debug!("Tạo provider cho chain {:?} với RPC URL: {}", 
+            config.chain_id, 
+            if config.rpc_url.is_empty() { "mặc định" } else { &config.rpc_url });
+        
         let blockchain_type = BlockchainType::from_chain_id(config.chain_id);
         
+        // Chuyển tiếp đến provider cụ thể
         match blockchain_type {
             BlockchainType::Evm => {
-                let provider = EvmProvider::new(config)?;
+                let provider = EvmProvider::new(config.clone())?;
                 Ok(Box::new(provider))
             },
             BlockchainType::Solana => {
                 // Solana provider implementation
                 use crate::defi::blockchain::non_evm::solana::create_solana_provider;
-                create_solana_provider(config).await
+                create_solana_provider(config.clone()).await
             },
             BlockchainType::Near => {
                 // Near provider implementation
                 use crate::defi::blockchain::non_evm::near::create_near_provider;
-                create_near_provider(config).await
+                create_near_provider(config.clone()).await
             },
             BlockchainType::Tron => {
                 // Tron provider implementation
                 use crate::defi::blockchain::non_evm::tron::create_tron_provider;
-                create_tron_provider(config).await
+                create_tron_provider(config.clone()).await
             },
             BlockchainType::Cosmos => {
                 // Cosmos provider implementation
                 use crate::defi::blockchain::non_evm::cosmos::create_cosmos_provider;
-                create_cosmos_provider(config).await
+                create_cosmos_provider(config.clone()).await
             },
             BlockchainType::Hedera => {
                 // Hedera provider implementation
                 use crate::defi::blockchain::non_evm::hedera::create_hedera_provider;
-                create_hedera_provider(config).await
+                create_hedera_provider(config.clone()).await
             },
             BlockchainType::Diamond => {
                 // Sử dụng Diamond provider đã triển khai
                 use crate::defi::blockchain::non_evm::diamond::create_diamond_provider;
-                create_diamond_provider(config).await
+                create_diamond_provider(config.clone()).await
             },
+        }
+    }
+    
+    /// Tạo provider theo chain ID
+    pub async fn create_provider_by_chain_id(chain_id: ChainId) -> Result<Box<dyn BlockchainProvider>, DefiError> {
+        let config = BlockchainConfig::new(chain_id);
+        Self::create_provider(config).await
+    }
+    
+    /// Kiểm tra xem chain có được hỗ trợ không
+    pub fn is_chain_supported(chain_id: &ChainId) -> bool {
+        match chain_id {
+            ChainId::EthereumMainnet | 
+            ChainId::EthereumGoerli | 
+            ChainId::BscMainnet | 
+            ChainId::BscTestnet |
+            ChainId::PolygonMainnet |
+            ChainId::PolygonMumbai |
+            ChainId::ArbitrumMainnet |
+            ChainId::ArbitrumTestnet |
+            ChainId::AvalancheMainnet |
+            ChainId::AvalancheFuji |
+            ChainId::OptimismMainnet |
+            ChainId::OptimismGoerli |
+            ChainId::BaseMainnet |
+            ChainId::BaseGoerli |
+            ChainId::ZkSyncMainnet |
+            ChainId::ZkSyncTestnet |
+            ChainId::SolanaMainnet |
+            ChainId::SolanaDevnet |
+            ChainId::SolanaTestnet |
+            ChainId::NearMainnet |
+            ChainId::NearTestnet |
+            ChainId::TronMainnet |
+            ChainId::TronNile |
+            ChainId::TronShasta |
+            ChainId::CosmosMainnet |
+            ChainId::CosmosTestnet |
+            ChainId::HederaMainnet |
+            ChainId::HederaTestnet |
+            ChainId::DiamondMainnet |
+            ChainId::DiamondTestnet => true,
+            _ => false
         }
     }
 }

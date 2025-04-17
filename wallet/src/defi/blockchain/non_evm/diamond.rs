@@ -362,6 +362,7 @@ impl DiamondProvider {
 
     /// Lấy số dư an toàn
     pub async fn get_balance(&self, address: &str) -> Result<U256, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
             return Err(DefiError::InvalidAddress(format!(
                 "Invalid Diamond address: {}",
@@ -369,6 +370,10 @@ impl DiamondProvider {
             )));
         }
 
+        // Log thông tin
+        debug!("Getting balance for address: {}", address);
+
+        // Gọi RPC với retry
         let balance = self.call_rpc_with_retry(
             "getbalance",
             json!([address])
@@ -376,11 +381,19 @@ impl DiamondProvider {
 
         // Parse balance an toàn
         let balance_str = balance.to_string();
-        U256::from_dec_str(&balance_str)
-            .map_err(|e| DefiError::ProviderError(format!(
-                "Failed to parse balance: {}",
-                e
-            )))
+        match U256::from_dec_str(&balance_str) {
+            Ok(balance) => {
+                debug!("Successfully parsed balance: {} for address: {}", balance, address);
+                Ok(balance)
+            },
+            Err(e) => {
+                error!("Failed to parse balance: {} for address: {}", e, address);
+                Err(DefiError::ProviderError(format!(
+                    "Failed to parse balance: {}",
+                    e
+                )))
+            }
+        }
     }
 
     /// Lấy chiều cao block hiện tại
@@ -409,15 +422,23 @@ impl DiamondProvider {
     pub async fn get_account_balance(&self, address: &str) -> Result<U256, DefiError> {
         // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::InvalidAddress(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::InvalidAddress(format!(
+                "Invalid Diamond address: {}", 
+                address
+            )));
         }
+
+        // Log thông tin
+        debug!("Getting account balance for address: {}", address);
 
         // Kiểm tra địa chỉ có tồn tại không
         let is_valid = self.is_address_valid(address).await?;
         if !is_valid {
+            debug!("Address {} does not exist, returning zero balance", address);
             return Ok(U256::zero());
         }
 
+        #[derive(Deserialize)]
         struct AccountBalanceResult {
             balance: String,
         }
@@ -427,11 +448,17 @@ impl DiamondProvider {
 
         // Parse balance an toàn
         match result.balance.parse::<U256>() {
-            Ok(balance) => Ok(balance),
-            Err(e) => Err(DefiError::ProviderError(format!(
-                "Failed to parse balance: {} for address: {}", 
-                e, address
-            )))
+            Ok(balance) => {
+                debug!("Successfully parsed account balance: {} for address: {}", balance, address);
+                Ok(balance)
+            },
+            Err(e) => {
+                error!("Failed to parse account balance: {} for address: {}", e, address);
+                Err(DefiError::ProviderError(format!(
+                    "Failed to parse balance: {} for address: {}", 
+                    e, address
+                )))
+            }
         }
     }
 
@@ -444,32 +471,65 @@ impl DiamondProvider {
 
     /// Lấy số dư token DRC-20 (tương tự ERC-20)
     pub async fn get_drc20_balance(&self, address: &str, token_id: &str) -> Result<U256, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::ProviderError(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::ProviderError(format!(
+                "Invalid Diamond address: {}", 
+                address
+            )));
         }
+
+        // Log thông tin
+        debug!("Getting DRC-20 balance for address: {}, token: {}", address, token_id);
 
         #[derive(Deserialize)]
         struct TokenBalanceResult {
             balance: String,
         }
 
-        let result: TokenBalanceResult = self.call_rpc(
+        // Gọi RPC với retry và caching
+        let result: TokenBalanceResult = self.call_rpc_with_retry(
             "tokens.getDRC20Balance", 
             json!([address, token_id])
         ).await?;
         
-        let balance = U256::from_dec_str(&result.balance).map_err(|e| 
-            DefiError::ProviderError(format!("Failed to parse DRC-20 token balance: {}", e))
-        )?;
-        
-        Ok(balance)
+        // Parse balance an toàn
+        match U256::from_dec_str(&result.balance) {
+            Ok(balance) => {
+                debug!("Successfully parsed DRC-20 balance: {} for address: {}, token: {}", 
+                    balance, address, token_id);
+                Ok(balance)
+            },
+            Err(e) => {
+                error!("Failed to parse DRC-20 balance: {} for address: {}, token: {}", 
+                    e, address, token_id);
+                Err(DefiError::ProviderError(format!(
+                    "Failed to parse DRC-20 token balance: {}", 
+                    e
+                )))
+            }
+        }
     }
 
     /// Gửi token DRC-20
-    pub async fn send_drc20_token(&self, private_key: &str, to_address: &str, token_id: &str, amount: U256) -> Result<String, DefiError> {
+    pub async fn send_drc20_token(
+        &self, 
+        private_key: &str, 
+        to_address: &str, 
+        token_id: &str, 
+        amount: U256
+    ) -> Result<String, DefiError> {
+        // Kiểm tra địa chỉ người nhận
         if !self.validate_address(to_address) {
-            return Err(DefiError::ProviderError(format!("Invalid recipient address: {}", to_address)));
+            return Err(DefiError::ProviderError(format!(
+                "Invalid recipient address: {}", 
+                to_address
+            )));
         }
+
+        // Log thông tin
+        debug!("Sending DRC-20 token: {} amount: {} to: {}", 
+            token_id, amount, to_address);
 
         #[derive(Deserialize)]
         struct TransactionResult {
@@ -478,16 +538,24 @@ impl DiamondProvider {
 
         let amount_str = amount.to_string();
 
-        let result: TransactionResult = self.call_rpc(
+        // Gọi RPC với retry
+        let result: TransactionResult = self.call_rpc_with_retry(
             "tokens.transferDRC20", 
             json!([private_key, to_address, token_id, amount_str])
         ).await?;
+        
+        // Log kết quả
+        info!("Successfully sent DRC-20 token: {} amount: {} to: {}, tx: {}", 
+            token_id, amount, to_address, result.tx_hash);
         
         Ok(result.tx_hash)
     }
 
     /// Lấy thông tin về token
     pub async fn get_token_info(&self, token_id: &str) -> Result<DiamondTokenInfo, DefiError> {
+        // Log thông tin
+        debug!("Getting token info for token: {}", token_id);
+
         #[derive(Deserialize)]
         struct TokenInfoResult {
             id: String,
@@ -499,22 +567,41 @@ impl DiamondProvider {
             token_type: String,
         }
 
-        let result: TokenInfoResult = self.call_rpc(
+        // Gọi RPC với retry và caching
+        let result: TokenInfoResult = self.call_rpc_with_retry(
             "tokens.getTokenInfo", 
             json!([token_id])
         ).await?;
         
+        // Parse token type
         let token_type = match result.token_type.as_str() {
             "native" => DiamondTokenType::Native,
             "drc20" => DiamondTokenType::DRC20,
             "drc721" => DiamondTokenType::DRC721,
             "drc1155" => DiamondTokenType::DRC1155,
-            _ => return Err(DefiError::ProviderError(format!("Unknown token type: {}", result.token_type))),
+            _ => {
+                error!("Unknown token type: {} for token: {}", result.token_type, token_id);
+                return Err(DefiError::ProviderError(format!(
+                    "Unknown token type: {}", 
+                    result.token_type
+                )));
+            }
         };
 
-        let total_supply = U256::from_dec_str(&result.total_supply).map_err(|e| 
-            DefiError::ProviderError(format!("Failed to parse token total supply: {}", e))
-        )?;
+        // Parse total supply an toàn
+        let total_supply = match U256::from_dec_str(&result.total_supply) {
+            Ok(supply) => supply,
+            Err(e) => {
+                error!("Failed to parse total supply: {} for token: {}", e, token_id);
+                return Err(DefiError::ProviderError(format!(
+                    "Failed to parse token total supply: {}", 
+                    e
+                )));
+            }
+        };
+
+        // Log kết quả
+        debug!("Successfully retrieved token info for token: {}", token_id);
 
         Ok(DiamondTokenInfo {
             id: result.id,
@@ -529,67 +616,164 @@ impl DiamondProvider {
 
     /// Lấy số dư token DRC-721 (NFT)
     pub async fn get_drc721_balance(&self, address: &str, token_id: &str) -> Result<U256, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::ProviderError(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::ProviderError(format!(
+                "Invalid Diamond address: {}", 
+                address
+            )));
         }
+
+        // Log thông tin
+        debug!("Getting DRC-721 balance for address: {}, token: {}", address, token_id);
 
         #[derive(Deserialize)]
         struct TokenBalanceResult {
             balance: String,
         }
 
-        let result: TokenBalanceResult = self.call_rpc(
+        // Gọi RPC với retry và caching
+        let result: TokenBalanceResult = self.call_rpc_with_retry(
             "tokens.getDRC721Balance", 
             json!([address, token_id])
         ).await?;
         
-        let balance = U256::from_dec_str(&result.balance).map_err(|e| 
-            DefiError::ProviderError(format!("Failed to parse DRC-721 token balance: {}", e))
-        )?;
-        
-        Ok(balance)
+        // Parse balance an toàn
+        match U256::from_dec_str(&result.balance) {
+            Ok(balance) => {
+                debug!("Successfully parsed DRC-721 balance: {} for address: {}, token: {}", 
+                    balance, address, token_id);
+                Ok(balance)
+            },
+            Err(e) => {
+                error!("Failed to parse DRC-721 balance: {} for address: {}, token: {}", 
+                    e, address, token_id);
+                Err(DefiError::ProviderError(format!(
+                    "Failed to parse DRC-721 token balance: {}", 
+                    e
+                )))
+            }
+        }
     }
 
     /// Lấy danh sách token ID của NFT cho một địa chỉ
     pub async fn get_drc721_tokens(&self, address: &str, token_id: &str) -> Result<Vec<String>, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::ProviderError(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::ProviderError(format!(
+                "Invalid Diamond address: {}", 
+                address
+            )));
         }
+
+        // Log thông tin
+        debug!("Getting DRC-721 tokens for address: {}, token: {}", address, token_id);
 
         #[derive(Deserialize)]
         struct TokensResult {
             token_ids: Vec<String>,
         }
 
-        let result: TokensResult = self.call_rpc(
+        // Gọi RPC với retry và caching
+        let result: TokensResult = self.call_rpc_with_retry(
             "tokens.getDRC721TokensOwned", 
             json!([address, token_id])
         ).await?;
+        
+        // Log kết quả
+        debug!("Successfully retrieved {} DRC-721 tokens for address: {}, token: {}", 
+            result.token_ids.len(), address, token_id);
         
         Ok(result.token_ids)
     }
 
     /// Lấy số dư token DRC-1155 (Multi-token)
-    pub async fn get_drc1155_balance(&self, address: &str, token_id: &str, item_id: &str) -> Result<U256, DefiError> {
+    pub async fn get_drc1155_balance(
+        &self, 
+        address: &str, 
+        token_id: &str, 
+        item_id: &str
+    ) -> Result<U256, DefiError> {
+        // Kiểm tra địa chỉ hợp lệ
         if !self.validate_address(address) {
-            return Err(DefiError::ProviderError(format!("Invalid Diamond address: {}", address)));
+            return Err(DefiError::ProviderError(format!(
+                "Invalid Diamond address: {}", 
+                address
+            )));
         }
+
+        // Log thông tin
+        debug!("Getting DRC-1155 balance for address: {}, token: {}, item: {}", 
+            address, token_id, item_id);
 
         #[derive(Deserialize)]
         struct TokenBalanceResult {
             balance: String,
         }
 
-        let result: TokenBalanceResult = self.call_rpc(
+        // Gọi RPC với retry và caching
+        let result: TokenBalanceResult = self.call_rpc_with_retry(
             "tokens.getDRC1155Balance", 
             json!([address, token_id, item_id])
         ).await?;
         
-        let balance = U256::from_dec_str(&result.balance).map_err(|e| 
-            DefiError::ProviderError(format!("Failed to parse DRC-1155 token balance: {}", e))
-        )?;
+        // Parse balance an toàn
+        match U256::from_dec_str(&result.balance) {
+            Ok(balance) => {
+                debug!("Successfully parsed DRC-1155 balance: {} for address: {}, token: {}, item: {}", 
+                    balance, address, token_id, item_id);
+                Ok(balance)
+            },
+            Err(e) => {
+                error!("Failed to parse DRC-1155 balance: {} for address: {}, token: {}, item: {}", 
+                    e, address, token_id, item_id);
+                Err(DefiError::ProviderError(format!(
+                    "Failed to parse DRC-1155 token balance: {}", 
+                    e
+                )))
+            }
+        }
+    }
+
+    /// Gửi token DRC-1155
+    pub async fn send_drc1155_token(
+        &self,
+        private_key: &str,
+        to_address: &str,
+        token_id: &str,
+        item_id: &str,
+        amount: U256
+    ) -> Result<String, DefiError> {
+        // Kiểm tra địa chỉ người nhận
+        if !self.validate_address(to_address) {
+            return Err(DefiError::ProviderError(format!(
+                "Invalid recipient address: {}", 
+                to_address
+            )));
+        }
+
+        // Log thông tin
+        debug!("Sending DRC-1155 token: {} item: {} amount: {} to: {}", 
+            token_id, item_id, amount, to_address);
+
+        #[derive(Deserialize)]
+        struct TransactionResult {
+            tx_hash: String,
+        }
+
+        let amount_str = amount.to_string();
+
+        // Gọi RPC với retry
+        let result: TransactionResult = self.call_rpc_with_retry(
+            "tokens.transferDRC1155", 
+            json!([private_key, to_address, token_id, item_id, amount_str])
+        ).await?;
         
-        Ok(balance)
+        // Log kết quả
+        info!("Successfully sent DRC-1155 token: {} item: {} amount: {} to: {}, tx: {}", 
+            token_id, item_id, amount, to_address, result.tx_hash);
+        
+        Ok(result.tx_hash)
     }
 }
 

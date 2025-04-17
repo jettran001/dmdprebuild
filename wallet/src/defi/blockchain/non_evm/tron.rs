@@ -19,10 +19,10 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use once_cell::sync::Lazy;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
@@ -40,6 +40,11 @@ use crate::defi::blockchain::{
 };
 use crate::defi::error::DefiError;
 use crate::defi::constants::BLOCKCHAIN_TIMEOUT;
+
+/// Cache cho các providers
+static TRON_PROVIDER_CACHE: Lazy<RwLock<HashMap<ChainId, Arc<TronProvider>>>> = Lazy::new(|| {
+    RwLock::new(HashMap::new())
+});
 
 /// Cấu hình cho Tron Provider
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +64,7 @@ pub struct TronConfig {
 }
 
 impl TronConfig {
-    /// Tạo cấu hình mới với giá trị mặc định cho chain đã cho
+    /// Tạo cấu hình mới dựa trên chain
     pub fn new(chain_id: ChainId) -> Self {
         match chain_id {
             ChainId::TronMainnet => Self {
@@ -67,66 +72,69 @@ impl TronConfig {
                 full_node_url: "https://api.trongrid.io".to_string(),
                 solidity_node_url: "https://api.trongrid.io".to_string(),
                 event_server_url: Some("https://api.trongrid.io".to_string()),
-                timeout_ms: BLOCKCHAIN_TIMEOUT,
-                max_retries: crate::defi::constants::MAX_RETRIES,
+                timeout_ms: 30000, // 30 giây
+                max_retries: 3,
+            },
+            ChainId::TronNile => Self {
+                chain_id,
+                full_node_url: "https://api.nileex.io".to_string(),
+                solidity_node_url: "https://api.nileex.io".to_string(),
+                event_server_url: Some("https://api.nileex.io".to_string()),
+                timeout_ms: 30000,
+                max_retries: 3,
             },
             ChainId::TronShasta => Self {
                 chain_id,
                 full_node_url: "https://api.shasta.trongrid.io".to_string(),
                 solidity_node_url: "https://api.shasta.trongrid.io".to_string(),
                 event_server_url: Some("https://api.shasta.trongrid.io".to_string()),
-                timeout_ms: BLOCKCHAIN_TIMEOUT,
-                max_retries: crate::defi::constants::MAX_RETRIES,
+                timeout_ms: 30000,
+                max_retries: 3,
             },
-            ChainId::TronNile => Self {
-                chain_id,
-                full_node_url: "https://api.nileex.io".to_string(),
-                solidity_node_url: "https://api.nileex.io".to_string(),
-                event_server_url: Some("https://event.nileex.io".to_string()),
-                timeout_ms: BLOCKCHAIN_TIMEOUT,
-                max_retries: crate::defi::constants::MAX_RETRIES,
-            },
-            _ => panic!("Unsupported Tron chain ID: {:?}", chain_id),
+            _ => panic!("Unsupported Tron chain ID"),
         }
     }
-
-    /// Thiết lập Full Node URL
+    
+    /// Cập nhật URL cho Full Node API
     pub fn with_full_node_url(mut self, url: &str) -> Self {
         self.full_node_url = url.to_string();
         self
     }
-
-    /// Thiết lập Solidity Node URL
+    
+    /// Cập nhật URL cho Solidity Node API
     pub fn with_solidity_node_url(mut self, url: &str) -> Self {
         self.solidity_node_url = url.to_string();
         self
     }
-
-    /// Thiết lập Event Server URL
+    
+    /// Cập nhật URL cho Event Server API
     pub fn with_event_server_url(mut self, url: Option<&str>) -> Self {
         self.event_server_url = url.map(|s| s.to_string());
         self
     }
-
-    /// Thiết lập timeout
+    
+    /// Cập nhật timeout
     pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
-
-    /// Thiết lập số lần retry tối đa
+    
+    /// Cập nhật số lần retry tối đa
     pub fn with_max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
     }
 }
 
-/// Cache cho các Tron provider
-static TRON_PROVIDER_CACHE: Lazy<RwLock<HashMap<ChainId, Arc<TronProvider>>>> = Lazy::new(|| {
-    RwLock::new(HashMap::new())
-});
+/// Kết quả cache
+#[derive(Clone, Debug)]
+struct CacheEntry<T> {
+    value: T,
+    timestamp: Instant,
+    ttl_seconds: u64,
+}
 
-/// Tron Provider
+/// Tron blockchain provider
 pub struct TronProvider {
     /// Cấu hình
     pub config: TronConfig,
@@ -136,6 +144,12 @@ pub struct TronProvider {
     solidity_node_client: Client,
     /// HTTP Client cho Event Server API (nếu có)
     event_server_client: Option<Client>,
+    /// Cache cho các kết quả API 
+    cache: RwLock<HashMap<String, CacheEntry<Value>>>,
+    /// Lock cho các hoạt động quan trọng
+    operation_lock: Mutex<()>,
+    /// Thời gian TTL mặc định cho cache (giây)
+    default_cache_ttl: u64,
 }
 
 impl TronProvider {
@@ -144,39 +158,40 @@ impl TronProvider {
         let full_node_client = ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
-            .map_err(|e| DefiError::ProviderError(format!("Failed to create Full Node client: {}", e)))?;
-
+            .map_err(|e| DefiError::ProviderError(format!("Failed to create Tron Full Node client: {}", e)))?;
+            
         let solidity_node_client = ClientBuilder::new()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
-            .map_err(|e| DefiError::ProviderError(format!("Failed to create Solidity Node client: {}", e)))?;
-
-        let event_server_client = match &config.event_server_url {
-            Some(_) => {
-                Some(ClientBuilder::new()
-                    .timeout(Duration::from_millis(config.timeout_ms))
-                    .build()
-                    .map_err(|e| DefiError::ProviderError(format!("Failed to create Event Server client: {}", e)))?)
-            },
-            None => None,
+            .map_err(|e| DefiError::ProviderError(format!("Failed to create Tron Solidity Node client: {}", e)))?;
+            
+        let event_server_client = if config.event_server_url.is_some() {
+            Some(ClientBuilder::new()
+                .timeout(Duration::from_millis(config.timeout_ms))
+                .build()
+                .map_err(|e| DefiError::ProviderError(format!("Failed to create Tron Event Server client: {}", e)))?)
+        } else {
+            None
         };
-
+        
         Ok(Self {
             config,
             full_node_client,
             solidity_node_client,
             event_server_client,
+            cache: RwLock::new(HashMap::new()),
+            operation_lock: Mutex::new(()),
+            default_cache_ttl: 30, // 30 giây mặc định
         })
     }
-
-    /// Lấy Tron provider từ cache hoặc tạo mới
+    
+    /// Lấy provider cho chain cụ thể
     pub async fn get_provider(chain_id: ChainId) -> Result<Arc<Self>, DefiError> {
-        // Kiểm tra chain ID có phải là Tron chain không
         match chain_id {
-            ChainId::TronMainnet | ChainId::TronShasta | ChainId::TronNile => {},
-            _ => return Err(DefiError::ChainNotSupported(chain_id.to_string())),
+            ChainId::TronMainnet | ChainId::TronNile | ChainId::TronShasta => {},
+            _ => return Err(DefiError::ChainNotSupported(format!("Expected Tron chains, got {:?}", chain_id))),
         }
-
+        
         // Thử lấy từ cache trước
         {
             let cache = TRON_PROVIDER_CACHE.read().await;
@@ -184,36 +199,76 @@ impl TronProvider {
                 return Ok(provider.clone());
             }
         }
-
+        
         // Nếu không có trong cache, tạo mới
         let config = TronConfig::new(chain_id);
-        let provider = Arc::new(
-            Self::new(config)
-                .map_err(|e| DefiError::ProviderError(format!("Failed to create Tron provider: {}", e)))?
-        );
-
+        let provider = Self::new(config)?;
+        let provider = Arc::new(provider);
+        
         // Lưu vào cache
         {
             let mut cache = TRON_PROVIDER_CACHE.write().await;
             cache.insert(chain_id, provider.clone());
         }
-
+        
         Ok(provider)
     }
-
-    /// Gọi Full Node API
+    
+    /// Thiết lập TTL mặc định cho cache
+    pub fn set_default_cache_ttl(&mut self, ttl_seconds: u64) {
+        self.default_cache_ttl = ttl_seconds;
+    }
+    
+    /// Xóa cache theo key
+    pub async fn clear_cache_item(&self, cache_key: &str) {
+        let mut cache = self.cache.write().await;
+        cache.remove(cache_key);
+    }
+    
+    /// Xóa toàn bộ cache
+    pub async fn clear_all_cache(&self) {
+        let mut cache = self.cache.write().await;
+        cache.clear();
+    }
+    
+    /// Dọn dẹp các mục cache hết hạn
+    pub async fn cleanup_cache(&self) {
+        let mut cache = self.cache.write().await;
+        cache.retain(|_, entry| {
+            entry.timestamp.elapsed().as_secs() < entry.ttl_seconds
+        });
+    }
+    
+    /// Gọi Full Node API với cơ chế caching
     async fn call_full_node_api<T: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
         payload: Option<Value>,
     ) -> Result<T, DefiError> {
+        // Tạo cache key
+        let cache_key = match &payload {
+            Some(p) => format!("full_node_{}{}", endpoint, p.to_string()),
+            None => format!("full_node_{}", endpoint),
+        };
+        
+        // Kiểm tra cache
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.timestamp.elapsed().as_secs() < entry.ttl_seconds {
+                    return serde_json::from_value(entry.value.clone())
+                        .map_err(|e| DefiError::ProviderError(format!("Failed to deserialize cached value: {}", e)));
+                }
+            }
+        }
+        
+        // Không có trong cache hoặc đã hết hạn, gọi API
         let url = format!("{}{}", self.config.full_node_url, endpoint);
-
         let response = match payload {
-            Some(body) => {
+            Some(json_data) => {
                 self.full_node_client
                     .post(&url)
-                    .json(&body)
+                    .json(&json_data)
                     .send()
                     .await
             },
@@ -222,33 +277,73 @@ impl TronProvider {
                     .get(&url)
                     .send()
                     .await
-            },
-        }.map_err(|e| DefiError::ProviderError(format!("Full Node request failed: {}", e)))?;
-
+            }
+        };
+        
+        let response = response.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to call Tron Full Node API: {}", e))
+        })?;
+        
         let status = response.status();
         if !status.is_success() {
-            return Err(DefiError::ProviderError(format!("Full Node request failed with status: {}", status)));
+            return Err(DefiError::ProviderError(
+                format!("Tron Full Node API returned error status: {}", status)
+            ));
         }
-
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| DefiError::ProviderError(format!("Failed to parse Full Node response: {}", e)))
+        
+        let result: Value = response.json().await.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to parse Tron Full Node API response: {}", e))
+        })?;
+        
+        // Lưu vào cache
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(cache_key, CacheEntry {
+                value: result.clone(),
+                timestamp: Instant::now(),
+                ttl_seconds: self.default_cache_ttl,
+            });
+        }
+        
+        // Parse kết quả
+        serde_json::from_value(result).map_err(|e| {
+            DefiError::ProviderError(format!("Failed to deserialize Tron Full Node API result: {}", e))
+        })
     }
-
-    /// Gọi Solidity Node API
+    
+    /// Gọi Solidity Node API với cơ chế caching
     async fn call_solidity_node_api<T: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
         payload: Option<Value>,
     ) -> Result<T, DefiError> {
+        // Tạo cache key
+        let cache_key = match &payload {
+            Some(p) => format!("solidity_node_{}{}", endpoint, p.to_string()),
+            None => format!("solidity_node_{}", endpoint),
+        };
+        
+        // Kiểm tra cache
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.timestamp.elapsed().as_secs() < entry.ttl_seconds {
+                    return serde_json::from_value(entry.value.clone())
+                        .map_err(|e| DefiError::ProviderError(format!("Failed to deserialize cached value: {}", e)));
+                }
+            }
+        }
+        
+        // Cơ chế lock để tránh quá nhiều request đồng thời
+        let _guard = self.operation_lock.lock().await;
+        
+        // Không có trong cache hoặc đã hết hạn, gọi API
         let url = format!("{}{}", self.config.solidity_node_url, endpoint);
-
         let response = match payload {
-            Some(body) => {
+            Some(json_data) => {
                 self.solidity_node_client
                     .post(&url)
-                    .json(&body)
+                    .json(&json_data)
                     .send()
                     .await
             },
@@ -257,39 +352,87 @@ impl TronProvider {
                     .get(&url)
                     .send()
                     .await
-            },
-        }.map_err(|e| DefiError::ProviderError(format!("Solidity Node request failed: {}", e)))?;
-
+            }
+        };
+        
+        let response = response.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to call Tron Solidity Node API: {}", e))
+        })?;
+        
         let status = response.status();
         if !status.is_success() {
-            return Err(DefiError::ProviderError(format!("Solidity Node request failed with status: {}", status)));
+            return Err(DefiError::ProviderError(
+                format!("Tron Solidity Node API returned error status: {}", status)
+            ));
         }
-
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| DefiError::ProviderError(format!("Failed to parse Solidity Node response: {}", e)))
+        
+        let result: Value = response.json().await.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to parse Tron Solidity Node API response: {}", e))
+        })?;
+        
+        // Lưu vào cache với TTL dài hơn cho dữ liệu Solidity Node
+        // (thường là dữ liệu như ABI, bytecode ít thay đổi)
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(cache_key, CacheEntry {
+                value: result.clone(),
+                timestamp: Instant::now(),
+                ttl_seconds: self.default_cache_ttl * 2, // TTL dài hơn
+            });
+        }
+        
+        // Parse kết quả
+        serde_json::from_value(result).map_err(|e| {
+            DefiError::ProviderError(format!("Failed to deserialize Tron Solidity Node API result: {}", e))
+        })
     }
-
-    /// Gọi Event Server API
+    
+    /// Gọi Event Server API với cơ chế caching
     async fn call_event_server_api<T: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
         payload: Option<Value>,
     ) -> Result<T, DefiError> {
-        let event_server_url = self.config.event_server_url.as_ref()
-            .ok_or_else(|| DefiError::ProviderError("Event Server URL not configured".to_string()))?;
+        // Không có event server URL
+        let event_server_url = match &self.config.event_server_url {
+            Some(url) => url,
+            None => return Err(DefiError::ProviderError(
+                "Event server URL not configured".to_string()
+            )),
+        };
         
-        let event_server_client = self.event_server_client.as_ref()
-            .ok_or_else(|| DefiError::ProviderError("Event Server client not initialized".to_string()))?;
-
+        // Không có event server client
+        let event_server_client = match &self.event_server_client {
+            Some(client) => client,
+            None => return Err(DefiError::ProviderError(
+                "Event server client not initialized".to_string()
+            )),
+        };
+        
+        // Tạo cache key
+        let cache_key = match &payload {
+            Some(p) => format!("event_server_{}{}", endpoint, p.to_string()),
+            None => format!("event_server_{}", endpoint),
+        };
+        
+        // Kiểm tra cache
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.timestamp.elapsed().as_secs() < entry.ttl_seconds {
+                    return serde_json::from_value(entry.value.clone())
+                        .map_err(|e| DefiError::ProviderError(format!("Failed to deserialize cached value: {}", e)));
+                }
+            }
+        }
+        
+        // Không có trong cache hoặc đã hết hạn, gọi API
         let url = format!("{}{}", event_server_url, endpoint);
-
         let response = match payload {
-            Some(body) => {
+            Some(json_data) => {
                 event_server_client
                     .post(&url)
-                    .json(&body)
+                    .json(&json_data)
                     .send()
                     .await
             },
@@ -298,18 +441,39 @@ impl TronProvider {
                     .get(&url)
                     .send()
                     .await
-            },
-        }.map_err(|e| DefiError::ProviderError(format!("Event Server request failed: {}", e)))?;
-
+            }
+        };
+        
+        let response = response.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to call Tron Event Server API: {}", e))
+        })?;
+        
         let status = response.status();
         if !status.is_success() {
-            return Err(DefiError::ProviderError(format!("Event Server request failed with status: {}", status)));
+            return Err(DefiError::ProviderError(
+                format!("Tron Event Server API returned error status: {}", status)
+            ));
         }
-
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| DefiError::ProviderError(format!("Failed to parse Event Server response: {}", e)))
+        
+        let result: Value = response.json().await.map_err(|e| {
+            DefiError::ProviderError(format!("Failed to parse Tron Event Server API response: {}", e))
+        })?;
+        
+        // Lưu vào cache
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(cache_key, CacheEntry {
+                value: result.clone(),
+                timestamp: Instant::now(),
+                // Events thường thay đổi nhanh hơn, TTL ngắn hơn
+                ttl_seconds: self.default_cache_ttl / 2,
+            });
+        }
+        
+        // Parse kết quả
+        serde_json::from_value(result).map_err(|e| {
+            DefiError::ProviderError(format!("Failed to deserialize Tron Event Server API result: {}", e))
+        })
     }
 
     /// Kiểm tra địa chỉ Tron có hợp lệ không

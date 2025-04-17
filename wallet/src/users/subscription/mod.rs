@@ -89,24 +89,73 @@ pub enum SubscriptionError {
 }
 
 /// Kiểm tra nhanh xem người dùng có quyền sử dụng tính năng hay không
+/// 
+/// Hàm này kiểm tra quyền truy cập tính năng dựa trên loại gói đăng ký của người dùng
+/// và tình trạng kích hoạt. Hàm đảm bảo xử lý an toàn cho mọi trường hợp đầu vào.
+/// 
+/// # Arguments
+/// * `user` - Tham chiếu đến đối tượng User cần kiểm tra
+/// * `feature` - Tính năng cần kiểm tra quyền truy cập
+/// 
+/// # Returns
+/// Trả về `true` nếu người dùng có quyền truy cập tính năng, ngược lại trả về `false`
 pub fn has_feature_access(user: &crate::users::User, feature: Feature) -> bool {
-    if let Some(subscription) = &user.subscription {
-        if subscription.is_active() {
-            return subscription.has_feature(feature);
-        }
+    // Kiểm tra user có hợp lệ không
+    if user.status != crate::users::UserStatus::Active {
+        // Người dùng không active thì không có quyền truy cập các tính năng cao cấp
+        return match feature {
+            Feature::RealTimeAlerts => true, // Tính năng miễn phí cho tất cả
+            _ => false,
+        };
     }
     
-    // Mặc định cho các tính năng miễn phí
-    match feature {
-        Feature::RealTimeAlerts => true,
-        _ => false,
+    // Kiểm tra subscription có tồn tại và còn hạn không
+    match &user.subscription {
+        Some(subscription) => {
+            if subscription.is_active() {
+                // Kiểm tra quyền truy cập dựa trên loại gói
+                subscription.has_feature(feature)
+            } else {
+                // Gói đã hết hạn, chỉ có các tính năng miễn phí
+                match feature {
+                    Feature::RealTimeAlerts => true,
+                    _ => false,
+                }
+            }
+        },
+        None => {
+            // Người dùng không có gói đăng ký, chỉ có các tính năng miễn phí
+            match feature {
+                Feature::RealTimeAlerts => true,
+                _ => false,
+            }
+        }
     }
 }
 
 /// Kiểm tra và cập nhật trạng thái đăng ký theo thời gian
+/// 
+/// Hàm này cập nhật trạng thái đăng ký dựa trên thời gian hiện tại, kiểm tra
+/// hạn sử dụng và các yếu tố khác để đảm bảo trạng thái đăng ký luôn chính xác.
+/// 
+/// # Arguments
+/// * `user` - Tham chiếu đến đối tượng User cần cập nhật
+/// 
+/// # Returns
+/// Trả về `Ok(())` nếu cập nhật thành công, ngược lại trả về lỗi
 pub fn refresh_subscription_status(user: &mut crate::users::User) -> crate::error::AppResult<()> {
+    if user.status != crate::users::UserStatus::Active {
+        return Ok(());  // Không cần cập nhật cho người dùng không active
+    }
+    
     if let Some(subscription) = &mut user.subscription {
         subscription.refresh_status()?;
+        
+        // Kiểm tra nếu subscription đã hết hạn nhưng user vẫn active
+        if !subscription.is_active() {
+            // Đảm bảo subscription được đặt về trạng thái chính xác
+            subscription.status = SubscriptionStatus::Expired;
+        }
     }
     Ok(())
 } 

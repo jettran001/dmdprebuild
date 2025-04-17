@@ -39,6 +39,7 @@ use crate::users::subscription::{
     events::{EventEmitter, SubscriptionEvent, EventType},
 };
 use crate::cache;
+use crate::database::Database;
 
 /// Lỗi liên quan đến tính năng auto trade
 #[derive(Debug, Error)]
@@ -362,10 +363,18 @@ pub struct AutoTradeManager {
     event_emitter: Option<EventEmitter>,
     /// Tham chiếu yếu đến subscription manager để tránh circular reference
     subscription_manager: Weak<super::manager::SubscriptionManager>,
-    usage: Arc<AutoTradeUsage>,
-    request_count: AtomicU32,
-    last_reset: std::time::Instant,
-    retry_count: HashMap<String, u32>,
+    /// Thông tin sử dụng hiện tại
+    usage: Arc<RwLock<AutoTradeUsage>>,
+    /// Đếm số request
+    request_count: Arc<AtomicU32>,
+    /// Thời gian reset cuối cùng
+    last_reset: Arc<RwLock<std::time::Instant>>,
+    /// Số lần retry cho mỗi user
+    retry_count: Arc<RwLock<HashMap<String, u32>>>,
+    /// Database connection
+    db: Arc<Database>,
+    /// Lock cho việc đồng bộ hóa
+    sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AutoTradeManager {
@@ -377,6 +386,7 @@ impl AutoTradeManager {
     /// 
     /// # Arguments
     /// * `subscription_manager` - Tham chiếu đến SubscriptionManager
+    /// * `db` - Tham chiếu đến Database
     /// 
     /// # Returns
     /// Một instance mới của AutoTradeManager với các giá trị mặc định
@@ -390,16 +400,18 @@ impl AutoTradeManager {
     /// let subscription_manager = Arc::new(SubscriptionManager::new());
     /// let auto_trade_manager = AutoTradeManager::new(subscription_manager);
     /// ```
-    pub fn new(subscription_manager: Arc<super::manager::SubscriptionManager>) -> Self {
+    pub fn new(subscription_manager: Arc<super::manager::SubscriptionManager>, db: Arc<Database>) -> Self {
         Self {
             auto_trade_usages: Arc::new(RwLock::new(HashMap::new())),
-            auto_trade_cache: cache::create_async_lru_cache(500, 300), // Cache 5 phút (300 giây)
+            auto_trade_cache: cache::AsyncCache::new(1000), // Cache 1000 entries
             event_emitter: None,
             subscription_manager: Arc::downgrade(&subscription_manager),
-            usage: Arc::new(AutoTradeUsage::new_default("default_user", &SubscriptionType::Free)),
-            request_count: AtomicU32::new(0),
-            last_reset: std::time::Instant::now(),
-            retry_count: HashMap::new(),
+            usage: Arc::new(RwLock::new(AutoTradeUsage::new_default("", &SubscriptionType::Free))),
+            request_count: Arc::new(AtomicU32::new(0)),
+            last_reset: Arc::new(RwLock::new(std::time::Instant::now())),
+            retry_count: Arc::new(RwLock::new(HashMap::new())),
+            db,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     
@@ -767,6 +779,8 @@ impl AutoTradeManager {
         subscription_type: &SubscriptionType,
         is_vip_staking: bool,
     ) -> Result<(), AutoTradeError> {
+        let _lock = self.sync_lock.lock().await;
+        
         let mut auto_trade_usages = self.auto_trade_usages.write().await;
         
         if let Some(auto_trade_usage) = auto_trade_usages.get_mut(user_id) {
@@ -776,7 +790,7 @@ impl AutoTradeManager {
             // Cập nhật lại vào cache
             let usage_clone = auto_trade_usage.clone();
             drop(auto_trade_usages); // Giải phóng lock trước khi cập nhật cache
-            self.auto_trade_cache.insert(user_id.to_string(), usage_clone).await;
+            self.auto_trade_cache.insert(user_id.to_string(), usage_clone).await?;
             
             info!("Đã reset thời gian auto-trade cho user {}", user_id);
             
@@ -803,7 +817,7 @@ impl AutoTradeManager {
             
             // Cập nhật vào cache
             drop(auto_trade_usages); // Giải phóng lock trước khi cập nhật cache
-            self.auto_trade_cache.insert(user_id.to_string(), usage).await;
+            self.auto_trade_cache.insert(user_id.to_string(), usage).await?;
             
             info!("Đã tạo và kích hoạt auto-trade mới cho user {}", user_id);
             Ok(())
@@ -911,9 +925,9 @@ impl AutoTradeManager {
     /// Kiểm tra rate limit
     fn check_rate_limit(&mut self) -> Result<(), WalletError> {
         // Reset counter nếu đã qua window
-        if self.last_reset.elapsed().as_secs() >= RATE_LIMIT_WINDOW {
+        if self.last_reset.read().await.elapsed().as_secs() >= RATE_LIMIT_WINDOW {
             self.request_count.store(0, Ordering::SeqCst);
-            self.last_reset = std::time::Instant::now();
+            self.last_reset.write().await.0 = std::time::Instant::now();
         }
 
         // Tăng counter và kiểm tra
@@ -931,7 +945,7 @@ impl AutoTradeManager {
         self.check_rate_limit()?;
 
         // Lấy số lần retry hiện tại
-        let retry_count = self.retry_count.entry(trade_id.to_string())
+        let retry_count = self.retry_count.write().await.entry(trade_id.to_string())
             .or_insert(0);
 
         // Thực hiện operation với retry
@@ -939,7 +953,7 @@ impl AutoTradeManager {
             match operation() {
                 Ok(_) => {
                     // Reset retry count khi thành công
-                    self.retry_count.remove(trade_id);
+                    self.retry_count.write().await.remove(trade_id);
                     return Ok(());
                 }
                 Err(e) => {
@@ -970,7 +984,7 @@ impl AutoTradeManager {
 
     /// Kiểm tra giới hạn sử dụng
     pub fn check_usage_limit(&self) -> Result<(), WalletError> {
-        if self.usage.used_trades >= self.usage.max_trades {
+        if self.usage.read().await.used_trades >= self.usage.read().await.max_trades {
             return Err(WalletError::UsageLimitExceeded);
         }
         Ok(())
@@ -978,6 +992,72 @@ impl AutoTradeManager {
 
     /// Tăng số lần sử dụng
     pub fn increment_usage(&mut self) {
-        self.usage.used_trades += 1;
+        self.usage.write().await.used_trades += 1;
+    }
+
+    /// Lưu trữ thông tin auto-trade vào database
+    async fn persist_auto_trade_usage(&self, usage: &AutoTradeUsage) -> Result<(), AutoTradeError> {
+        let _lock = self.sync_lock.lock().await;
+        
+        // Lưu vào database
+        self.db.save_auto_trade_usage(usage)
+            .await
+            .map_err(|e| AutoTradeError::Database(e.to_string()))?;
+            
+        // Cập nhật cache
+        self.auto_trade_cache.insert(usage.user_id.clone(), usage.clone())
+            .await
+            .map_err(|e| AutoTradeError::Other(e.to_string()))?;
+            
+        Ok(())
+    }
+
+    /// Đồng bộ hóa thông tin auto-trade từ database
+    async fn sync_from_database(&self) -> Result<(), AutoTradeError> {
+        let _lock = self.sync_lock.lock().await;
+        
+        // Lấy tất cả thông tin từ database
+        let usages = self.db.get_all_auto_trade_usages()
+            .await
+            .map_err(|e| AutoTradeError::Database(e.to_string()))?;
+            
+        // Cập nhật vào bộ nhớ
+        let mut auto_trade_usages = self.auto_trade_usages.write().await;
+        for usage in usages {
+            auto_trade_usages.insert(usage.user_id.clone(), usage);
+        }
+        
+        Ok(())
+    }
+
+    /// Thực hiện giao dịch với cơ chế retry
+    pub async fn execute_trade_with_retry(
+        &self,
+        trade_id: &str,
+        operation: impl Fn() -> Result<(), WalletError>,
+        max_retries: u32,
+        retry_delay: Duration,
+    ) -> Result<(), WalletError> {
+        let mut retry_count = 0;
+        let mut last_error = None;
+
+        while retry_count < max_retries {
+            match operation() {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    retry_count += 1;
+                    
+                    // Cập nhật số lần retry
+                    let mut retries = self.retry_count.write().await;
+                    retries.insert(trade_id.to_string(), retry_count);
+                    
+                    // Đợi trước khi retry
+                    sleep(retry_delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(WalletError::Other("Unknown error".to_string())))
     }
 } 

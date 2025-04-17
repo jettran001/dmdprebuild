@@ -465,47 +465,83 @@ impl ContractInterface for Erc1155Contract {
     
     fn decode_logs<T: Send + Sync + 'static>(&self, logs: &[Log]) -> Result<Vec<T>, ContractError> {
         if std::any::TypeId::of::<T>() == std::any::TypeId::of::<TransferSingleEvent>() {
-            let mut events = Vec::new();
+            let events: Vec<TransferSingleEvent> = logs.iter()
+                .filter_map(|log| {
+                    match self.decode_transfer_single_event(log) {
+                        Ok(event) => Some(event),
+                        Err(e) => {
+                            error!("Failed to decode transfer single event: {}", e);
+                            None
+                        }
+                    }
+                })
+                .collect();
             
-            for log in logs {
-                if let Ok(event) = self.decode_transfer_single_event(log) {
-                    // This is safe because we've checked that T is TransferSingleEvent
-                    let event_as_t = unsafe { 
-                        std::mem::transmute_copy::<TransferSingleEvent, T>(&event)
-                    };
-                    events.push(event_as_t);
-                }
-            }
+            // Convert Vec<TransferSingleEvent> to Vec<T> using safe conversion
+            let events_as_t: Vec<T> = events.into_iter()
+                .map(|event| {
+                    // Safe conversion since we've verified the type
+                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
+                    match boxed.downcast::<T>() {
+                        Ok(t) => *t,
+                        Err(_) => panic!("Failed to downcast TransferSingleEvent to T")
+                    }
+                })
+                .collect();
             
-            Ok(events)
+            Ok(events_as_t)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<TransferBatchEvent>() {
-            let mut events = Vec::new();
+            let events: Vec<TransferBatchEvent> = logs.iter()
+                .filter_map(|log| {
+                    match self.decode_transfer_batch_event(log) {
+                        Ok(event) => Some(event),
+                        Err(e) => {
+                            error!("Failed to decode transfer batch event: {}", e);
+                            None
+                        }
+                    }
+                })
+                .collect();
             
-            for log in logs {
-                if let Ok(event) = self.decode_transfer_batch_event(log) {
-                    // This is safe because we've checked that T is TransferBatchEvent
-                    let event_as_t = unsafe { 
-                        std::mem::transmute_copy::<TransferBatchEvent, T>(&event)
-                    };
-                    events.push(event_as_t);
-                }
-            }
+            // Convert Vec<TransferBatchEvent> to Vec<T> using safe conversion
+            let events_as_t: Vec<T> = events.into_iter()
+                .map(|event| {
+                    // Safe conversion since we've verified the type
+                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
+                    match boxed.downcast::<T>() {
+                        Ok(t) => *t,
+                        Err(_) => panic!("Failed to downcast TransferBatchEvent to T")
+                    }
+                })
+                .collect();
             
-            Ok(events)
+            Ok(events_as_t)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ApprovalForAllEvent>() {
-            let mut events = Vec::new();
+            let events: Vec<ApprovalForAllEvent> = logs.iter()
+                .filter_map(|log| {
+                    match self.decode_approval_for_all_event(log) {
+                        Ok(event) => Some(event),
+                        Err(e) => {
+                            error!("Failed to decode approval for all event: {}", e);
+                            None
+                        }
+                    }
+                })
+                .collect();
             
-            for log in logs {
-                if let Ok(event) = self.decode_approval_for_all_event(log) {
-                    // This is safe because we've checked that T is ApprovalForAllEvent
-                    let event_as_t = unsafe { 
-                        std::mem::transmute_copy::<ApprovalForAllEvent, T>(&event)
-                    };
-                    events.push(event_as_t);
-                }
-            }
+            // Convert Vec<ApprovalForAllEvent> to Vec<T> using safe conversion
+            let events_as_t: Vec<T> = events.into_iter()
+                .map(|event| {
+                    // Safe conversion since we've verified the type
+                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
+                    match boxed.downcast::<T>() {
+                        Ok(t) => *t,
+                        Err(_) => panic!("Failed to downcast ApprovalForAllEvent to T")
+                    }
+                })
+                .collect();
             
-            Ok(events)
+            Ok(events_as_t)
         } else {
             Err(ContractError::CallError(format!(
                 "Unsupported event type for decode_logs"

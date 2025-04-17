@@ -59,10 +59,63 @@ pub fn generate_default_user_id() -> String {
 /// # Returns
 /// `true` nếu là seed phrase, `false` nếu là private key.
 pub fn is_seed_phrase(config: &WalletConfig) -> bool {
-    matches!(
+    // Kiểm tra config.seed_length
+    let is_seed_length_valid = matches!(
         config.seed_length,
         Some(SeedLength::Twelve) | Some(SeedLength::TwentyFour)
-    )
+    );
+    
+    if !is_seed_length_valid {
+        return false;
+    }
+    
+    // Kiểm tra format và số lượng từ 
+    let words = config.seed_or_key.split_whitespace().collect::<Vec<&str>>();
+    let word_count = words.len();
+    
+    // BIP39 standard yêu cầu 12, 15, 18, 21, hoặc 24 từ
+    let is_valid_word_count = match config.seed_length {
+        Some(SeedLength::Twelve) => word_count == 12,
+        Some(SeedLength::TwentyFour) => word_count == 24,
+        _ => [12, 15, 18, 21, 24].contains(&word_count),
+    };
+    
+    if !is_valid_word_count {
+        tracing::warn!("Invalid seed phrase word count: {}", word_count);
+        return false;
+    }
+    
+    // Kiểm tra từng từ trong BIP39 wordlist để xác nhận hợp lệ
+    is_valid_bip39_wordlist(&words)
+}
+
+/// Kiểm tra xem các từ có nằm trong danh sách BIP39 không
+fn is_valid_bip39_wordlist(words: &[&str]) -> bool {
+    use bip39::{Language, Wordlist};
+    
+    let wordlist = Language::English.wordlist();
+    
+    for word in words {
+        if !wordlist.contains(word) {
+            tracing::warn!("Word '{}' not in BIP39 wordlist", word);
+            return false;
+        }
+    }
+    
+    true
+}
+
+/// Kiểm tra xem seed phrase có thỏa mãn checksum BIP39 không
+pub fn is_valid_bip39_seed(seed_phrase: &str) -> bool {
+    use bip39::{Mnemonic, Language};
+    
+    match Mnemonic::from_phrase(seed_phrase, Language::English) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Invalid BIP39 seed phrase: {}", e);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

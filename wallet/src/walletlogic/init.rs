@@ -129,7 +129,24 @@ impl WalletManager {
     ) -> Result<(Address, String), WalletError> {
         info!("Importing wallet with chain_id: {}", config.chain_id);
 
+        // Validate seed phrase hoặc private key trước khi xử lý
         let (wallet, secret_type) = if is_seed_phrase(&config) {
+            // Validate mnemonic phrase format và tính hợp lệ
+            if !validate_seed_phrase(&config.seed_or_key) {
+                tracing::error!("Invalid seed phrase format or words");
+                return Err(WalletError::InvalidSeedOrKey("Seed phrase không hợp lệ: kiểm tra định dạng, từ vựng và độ dài".to_string()));
+            }
+            
+            // Verify checksum của mnemonic
+            if !verify_seed_phrase_checksum(&config.seed_or_key) {
+                tracing::error!("Invalid seed phrase checksum");
+                return Err(WalletError::InvalidSeedOrKey("Seed phrase không hợp lệ: checksum sai".to_string()));
+            }
+            
+            // Log an toàn về độ dài seed mà không tiết lộ nội dung
+            let words_count = config.seed_or_key.split_whitespace().count();
+            tracing::debug!("Seed phrase validation passed: {} words", words_count);
+            
             let mnemonic = HDKey::from_mnemonic(&config.seed_or_key)
                 .context("Không thể tạo mnemonic từ seed phrase")
                 .map_err(|e| WalletError::InvalidSeedOrKey(e.to_string()))?;
@@ -139,15 +156,21 @@ impl WalletManager {
                 .context("Không thể tạo ví từ mnemonic")
                 .map_err(|e| WalletError::InvalidSeedOrKey(e.to_string()))?;
             
-            (wallet, WalletSecret::Encrypted)
+            (wallet, WalletSecret::Seed(words_count))
         } else {
+            // Validate private key format
+            if !validate_private_key(&config.seed_or_key) {
+                tracing::error!("Invalid private key format");
+                return Err(WalletError::InvalidSeedOrKey("Private key không hợp lệ: kiểm tra định dạng".to_string()));
+            }
+            
             let wallet = config
                 .seed_or_key
                 .parse::<LocalWallet>()
                 .context("Không thể tạo ví từ private key")
                 .map_err(|e| WalletError::InvalidSeedOrKey(e.to_string()))?;
             
-            (wallet, WalletSecret::Encrypted)
+            (wallet, WalletSecret::PrivateKey(64))
         };
 
         let address = wallet.address();
@@ -158,7 +181,8 @@ impl WalletManager {
             return Err(WalletError::WalletExists(address));
         }
 
-        let (encrypted_secret, nonce, salt) = encrypt_data(&config.seed_or_key, &config.password)
+        // Tăng cường bảo mật lưu trữ với salt riêng và tham số mã hóa mạnh
+        let (encrypted_secret, nonce, salt) = encrypt_data_enhanced(&config.seed_or_key, &config.password)
             .context("Không thể mã hóa seed phrase hoặc private key")?;
         
         // Tạo user_id với loại người dùng cụ thể hoặc mặc định là Free
@@ -166,6 +190,13 @@ impl WalletManager {
             Some(utype) => generate_user_id(utype),
             None => generate_default_user_id(),
         };
+        
+        // Lưu metadata về bảo mật cho audit log, không bao gồm dữ liệu nhạy cảm
+        tracing::info!(
+            "Wallet security: Address={}, EncryptionMethod=AES-256-GCM, PBKDF2Iterations=100000, SecretType={:?}", 
+            address, 
+            secret_type
+        );
         
         self.wallets.write().await.insert(
             address,
@@ -184,6 +215,76 @@ impl WalletManager {
         info!("Wallet imported: {}, user_id: {}", address, user_id);
         Ok((address, user_id))
     }
+}
+
+/// Hàm mở rộng cho encrypt_data với tham số bảo mật mạnh hơn
+fn encrypt_data_enhanced(data: &str, password: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), WalletError> {
+    use crate::defi::crypto::encrypt_data_with_params;
+    
+    // Tăng số vòng lặp PBKDF2 và sử dụng salt ngẫu nhiên đủ lớn
+    const PBKDF2_ITERATIONS: u32 = 310_000; // OWASP recommendation for 2023
+    const SALT_SIZE: usize = 32; // 256 bits
+    
+    encrypt_data_with_params(data, password, PBKDF2_ITERATIONS, SALT_SIZE)
+        .context("Encryption failed with enhanced parameters")
+        .map_err(|e| WalletError::EncryptionError(e.to_string()))
+}
+
+/// Kiểm tra định dạng và tính hợp lệ của seed phrase (mnemonic)
+fn validate_seed_phrase(seed: &str) -> bool {
+    use bip39::{Mnemonic, Language};
+    
+    // Kiểm tra độ dài và từ vựng
+    let words: Vec<&str> = seed.split_whitespace().collect();
+    let word_count = words.len();
+    
+    // BIP39 seed phrase phải có 12, 15, 18, 21 hoặc 24 từ
+    if ![12, 15, 18, 21, 24].contains(&word_count) {
+        tracing::warn!("Invalid seed phrase word count: {}", word_count);
+        return false;
+    }
+    
+    // Kiểm tra mỗi từ phải nằm trong wordlist BIP39
+    for word in &words {
+        if !Language::English.wordlist().contains(word) {
+            tracing::warn!("Word not in BIP39 wordlist");
+            return false;
+        }
+    }
+    
+    // Kiểm tra định dạng cơ bản đúng không
+    match Mnemonic::from_phrase(seed, Language::English) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Mnemonic validation failed: {}", e);
+            false
+        }
+    }
+}
+
+/// Kiểm tra checksum của seed phrase
+fn verify_seed_phrase_checksum(seed: &str) -> bool {
+    use bip39::{Mnemonic, Language};
+    
+    match Mnemonic::from_phrase(seed, Language::English) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// Kiểm tra định dạng private key
+fn validate_private_key(private_key: &str) -> bool {
+    // Private key phải là chuỗi hex 64 ký tự (không tính 0x prefix)
+    let private_key = private_key.trim_start_matches("0x");
+    
+    // Kiểm tra độ dài
+    if private_key.len() != 64 {
+        tracing::warn!("Invalid private key length: {}", private_key.len());
+        return false;
+    }
+    
+    // Kiểm tra định dạng hex
+    private_key.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

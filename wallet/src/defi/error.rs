@@ -129,4 +129,12 @@ pub enum DefiError {
     /// Lỗi khi không tìm thấy ví
     #[error("Không tìm thấy ví với địa chỉ: {0:?}")]
     WalletNotFound(Address),
+    
+    /// Lỗi khi địa chỉ không hợp lệ
+    #[error("Địa chỉ không hợp lệ: {0}")]
+    InvalidAddress(String),
+    
+    /// Lỗi khi token ID không hợp lệ
+    #[error("Token ID không hợp lệ: {0}")]
+    InvalidTokenId(String),
 } 

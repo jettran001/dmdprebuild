@@ -455,7 +455,10 @@ impl ContractInterface for Erc20Contract {
                 .map(|event| {
                     // Safe conversion since we've verified the type
                     let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    *boxed.downcast::<T>().unwrap()
+                    match boxed.downcast::<T>() {
+                        Ok(t) => *t,
+                        Err(_) => panic!("Failed to downcast TransferEvent to T")
+                    }
                 })
                 .collect();
             
@@ -478,7 +481,10 @@ impl ContractInterface for Erc20Contract {
                 .map(|event| {
                     // Safe conversion since we've verified the type
                     let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    *boxed.downcast::<T>().unwrap()
+                    match boxed.downcast::<T>() {
+                        Ok(t) => *t,
+                        Err(_) => panic!("Failed to downcast ApprovalEvent to T")
+                    }
                 })
                 .collect();
             

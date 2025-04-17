@@ -94,18 +94,47 @@ impl DefiManager {
 
     /// Khởi tạo pools mặc định với các tham số đã cài đặt sẵn
     pub async fn init_default_pools(&mut self, token_address: String) -> Result<(), String> {
+        info!(
+            token_address = %token_address,
+            "Bắt đầu khởi tạo pools mặc định"
+        );
+        
         // Gọi phương thức thông qua provider
         // Logic đã được chuyển sang blockchain/stake/stake_logic.rs và blockchain/farm/farm_logic.rs
         let blockchain_farm_manager = self.provider.farm_manager();
         let blockchain_stake_manager = self.provider.stake_manager();
         
-        // Khởi tạo các farm và stake pools mặc định
-        blockchain_farm_manager.create_default_pools(token_address.clone()).await?;
-        blockchain_stake_manager.create_default_pools(token_address.clone()).await?;
+        // Cơ chế fallback: Nếu lỗi khi tạo một loại pool, vẫn tiếp tục tạo loại pool khác
+        let farm_result = blockchain_farm_manager.create_default_pools(token_address.clone()).await;
+        if let Err(e) = &farm_result {
+            warn!(
+                token_address = %token_address,
+                error = %e,
+                "Lỗi khi khởi tạo farm pools, tiếp tục với stake pools"
+            );
+        }
+        
+        let stake_result = blockchain_stake_manager.create_default_pools(token_address.clone()).await;
+        if let Err(e) = &stake_result {
+            warn!(
+                token_address = %token_address,
+                error = %e,
+                "Lỗi khi khởi tạo stake pools"
+            );
+        }
+
+        // Chỉ báo lỗi nếu cả hai đều thất bại
+        if farm_result.is_err() && stake_result.is_err() {
+            return Err(format!(
+                "Không thể khởi tạo pools mặc định. Farm error: {:?}, Stake error: {:?}",
+                farm_result.err().unwrap(),
+                stake_result.err().unwrap()
+            ));
+        }
 
         info!(
             token_address = %token_address,
-            "Đã khởi tạo các pools mặc định"
+            "Đã khởi tạo các pools mặc định thành công"
         );
 
         Ok(())
