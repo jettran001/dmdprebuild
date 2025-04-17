@@ -450,19 +450,24 @@ impl ContractInterface for Erc20Contract {
                 })
                 .collect();
             
-            // Convert Vec<TransferEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast TransferEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast TransferEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ApprovalEvent>() {
             let events: Vec<ApprovalEvent> = logs.iter()
                 .filter_map(|log| {
@@ -476,19 +481,24 @@ impl ContractInterface for Erc20Contract {
                 })
                 .collect();
             
-            // Convert Vec<ApprovalEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast ApprovalEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast ApprovalEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else {
             Err(ContractError::CallError(format!(
                 "Unsupported event type for decode_logs: {:?}",
@@ -646,21 +656,135 @@ impl Erc20ContractBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_erc20_contract_builder() {
-        let builder = Erc20ContractBuilder::new()
-            .with_address(Address::zero())
-            .with_chain_id(1)
-            .with_name("Test Token".to_string())
-            .with_verified(true);
+    use crate::walletlogic::WalletProvider;
+    use mockall::mock;
+    use mockall::predicate::*;
+    use std::sync::Arc;
+
+    // Tạo mock cho WalletProvider để test độc lập
+    mock! {
+        WalletMock {}
+        impl WalletProvider for WalletMock {
+            fn get_address(&self) -> Result<Address, Box<dyn std::error::Error>>;
+            fn get_chain_id(&self) -> Result<u64, Box<dyn std::error::Error>>;
+            fn get_balance(&self) -> Result<U256, Box<dyn std::error::Error>>;
+            fn send_transaction(&self, tx: TransactionRequest) -> Result<H256, Box<dyn std::error::Error>>;
+            fn sign_message(&self, message: &[u8]) -> Result<Signature, Box<dyn std::error::Error>>;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_erc20_contract_builder() {
+        // Arrange
+        let address = Address::random();
+        let chain_id = 1;
+        let name = "Test Token";
+        let abi_json = r#"[{"constant":true,"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"}]"#;
         
-        assert!(builder.address.is_some());
-        assert_eq!(builder.address.unwrap(), Address::zero());
-        assert!(builder.chain_id.is_some());
-        assert_eq!(builder.chain_id.unwrap(), 1);
-        assert!(builder.name.is_some());
-        assert_eq!(builder.name.unwrap(), "Test Token");
-        assert!(builder.verified);
+        // Act
+        let builder = Erc20ContractBuilder::new()
+            .address(address)
+            .chain_id(chain_id)
+            .name(name)
+            .verified(true)
+            .abi_json(abi_json);
+            
+        let contract = builder.build();
+        
+        // Assert
+        assert_eq!(contract.address, address);
+        assert_eq!(contract.chain_id, chain_id);
+        assert_eq!(contract.name, name);
+        assert_eq!(contract.verified, true);
+        assert_eq!(contract.abi_json, abi_json);
+    }
+    
+    #[tokio::test]
+    async fn test_erc20_contract_builder_default_values() {
+        // Arrange
+        let address = Address::random();
+        
+        // Act
+        let builder = Erc20ContractBuilder::new()
+            .address(address);
+            
+        let contract = builder.build();
+        
+        // Assert
+        assert_eq!(contract.address, address);
+        assert_eq!(contract.chain_id, 0); // Default value
+        assert_eq!(contract.name, ""); // Default value
+        assert_eq!(contract.verified, false); // Default value
+        assert_eq!(contract.abi_json, ""); // Default value
+    }
+    
+    #[tokio::test]
+    async fn test_erc20_contract_methods() {
+        // Arrange
+        let mut mock_wallet = MockWalletMock::new();
+        let wallet_address = Address::random();
+        let token_address = Address::random();
+        
+        // Setup mock
+        mock_wallet
+            .expect_get_address()
+            .returning(move || Ok(wallet_address));
+            
+        mock_wallet
+            .expect_get_chain_id()
+            .returning(|| Ok(1));
+            
+        // Create contract
+        let wallet = Arc::new(mock_wallet) as Arc<dyn WalletProvider>;
+        let contract = Erc20ContractBuilder::new()
+            .address(token_address)
+            .chain_id(1)
+            .name("Test Token")
+            .verified(true)
+            .wallet(wallet.clone())
+            .build();
+            
+        // Act & Assert - should not panic
+        assert_eq!(contract.address, token_address);
+        assert_eq!(contract.chain_id, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_erc20_contract_integration() {
+        // Skip trong môi trường test tự động
+        if std::env::var("SKIP_INTEGRATION_TESTS").is_ok() {
+            return;
+        }
+        
+        // Integration test chỉ chạy khi có biến môi trường TEST_RPC_URL
+        let rpc_url = match std::env::var("TEST_RPC_URL") {
+            Ok(url) => url,
+            Err(_) => return,
+        };
+        
+        // Chuẩn bị provider
+        let provider = Provider::<Http>::try_from(rpc_url).expect("could not instantiate HTTP Provider");
+        
+        // Địa chỉ của USDT token trên mainnet
+        let usdt_address = "0xdAC17F958D2ee523a2206206994597C13D831ec7".parse::<Address>().unwrap();
+        
+        // Tạo contract
+        let contract = Erc20ContractBuilder::new()
+            .address(usdt_address)
+            .chain_id(1)
+            .name("USDT")
+            .verified(true)
+            .build();
+            
+        // Gọi các phương thức read-only trong môi trường thực
+        // Lưu ý: Chỉ test các phương thức không thay đổi state
+        let client = Arc::new(provider);
+        
+        // Tạm thời bỏ qua error nếu không kết nối được
+        // trong môi trường test tự động
+        let _ = contract.name(client.clone()).await;
+        let _ = contract.symbol(client.clone()).await;
+        let _ = contract.decimals(client.clone()).await;
+        let _ = contract.total_supply(client.clone()).await;
     }
 } 

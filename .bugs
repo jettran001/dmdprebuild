@@ -5,77 +5,70 @@
 - [ ] blockchain/src/stake/farm_logic.rs:1-502: Trùng lặp với blockchain/src/farm/farm_logic.rs
 - [ ] blockchain/src/farm/factorry.rs:0: File trống nhưng vẫn được tạo ra
 - [ ] blockchain/src/farm/farm_logic.rs:1-458: Trùng lặp về chức năng với blockchain/src/stake/farm_logic.rs
+- [ ] blockchain/src/farm/mod.rs:1-2: File trống, thiếu khai báo exports cho module
+- [ ] blockchain/src/farm/farm_logic.rs:143-155: Phương thức create_default_pools không được implement (chỉ chứa TODO comment)
+- [ ] blockchain/src/farm/farm_logic.rs:358-364: Phương thức sync_pools_from_blockchain không được implement (chỉ trả về Ok(()))
+
+### Module: Bridge
+- [ ] blockchain/src/brigde: Thư mục không chứa file nào, module được khai báo trong manifest nhưng chưa được implemented
+
+### Module: Exchange
+- [ ] blockchain/src/exchange/pairs.rs: File trống, chưa được implement dù đã được khai báo trong manifest
 
 ### Module: Smart Contracts
 - [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:94-108: Thực hiện quá nhiều request khi kiểm tra thông tin token
 
+### Module: Defi/Blockchain
+- [x] blockchain/src/smartcontracts/arb_contract/mod.rs:249-293: Thiếu xử lý race condition khi chuyển giữa các provider
+- [x] blockchain/src/stake/stake_logic.rs:84-125: Thiếu validation dữ liệu trước khi cập nhật vào cache
+- [x] blockchain/src/smartcontracts/eth_contract/mod.rs:233-268: Không đồng bộ cache giữa các node trong một hệ thống phân tán
+- [ ] blockchain/src/farm/factorry.rs:165-201: Thiếu xử lý đồng bộ tải giữa các thread khi đồng bộ nhiều pools
+- [ ] blockchain/src/farm/factorry.rs:71-87: Thiếu xử lý lỗi khi dữ liệu không thể backup
+- [ ] blockchain/src/farm/factorry.rs:143-164: Phương thức restore_from_backup không được gọi trong flow chính
+
+### Module: Defi/Validation
+- [x] blockchain/src/stake/validator.rs:67-113: Không kiểm tra đầy đủ quyền hạn trước khi đăng ký validator
+- [x] blockchain/src/stake/constants.rs:1-54: Các hằng số không được định nghĩa từ cấu hình bên ngoài
+- [x] blockchain/src/stake/stake_logic.rs:130-156: Thiếu validate address trước khi tạo pool
+
+### Module: Error Handling
+- [ ] blockchain/src/farm/farm_logic.rs:41-65: Chưa implement error chain và context đầy đủ
+- [x] blockchain/src/smartcontracts/near_contract/mod.rs:269-309: Xử lý lỗi chưa đồng nhất giữa các phương thức
+- [x] blockchain/src/stake/stake_logic.rs:157-180: Sử dụng anyhow::anyhow! thay vì custom error types
+
+### Module: Import/Export
+- [x] blockchain/src/smartcontracts/mod.rs:1-31: Thiếu re-export cho một số module cần thiết 
+- [x] blockchain/src/smartcontracts/near_contract/mod.rs:1-53: Dependency quá chặt với các module khác
+- [x] blockchain/src/stake/mod.rs:1-66: Thiếu dependency injection cho các thành phần
+
+### Module: Unit Testing
+- [ ] blockchain/src/farm/farm_logic.rs:403-452: Tests không kiểm tra đầy đủ các edge cases và lỗi có thể xảy ra
+- [ ] blockchain/src/farm/factorry.rs:239-246: Test chỉ kiểm tra basic functionality, thiếu tests cho error cases
+
+### Module: Project Structure
+- [ ] blockchain/src/lib.rs: Module brigde được khai báo là public nhưng không chứa mã nào
+- [ ] blockchain/src/lib.rs: Thiếu documentation cho các module chính
+
 ## Domain: Wallet
 
-### Module: Defi/Contracts
-- [x] wallet/src/defi/contracts.rs:175-197: Race condition với RwLock
-- [x] wallet/src/defi/contracts.rs:270-306: Thiếu xử lý cho các tham số tìm kiếm
-- [x] wallet/src/defi/contracts.rs:315-329: Thuộc tính `address` không được sử dụng
-- [x] wallet/src/defi/erc20.rs:377-384: Thiếu cơ chế retry cho transaction
-- [ ] wallet/src/defi/erc20.rs:521-536: Thiếu unit test và integration test
-- [x] wallet/src/defi/erc20.rs: Sử dụng transmute_copy không an toàn trong decode_logs
-- [x] wallet/src/defi/erc20.rs: Thiếu xử lý lỗi chi tiết trong các phương thức
-- [x] wallet/src/defi/erc20.rs: Thiếu logging cho các hoạt động quan trọng
-
 ### Module: Defi/Blockchain
-- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:200-225: Thiếu thuật toán checksum đầy đủ
-- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:235-280: Thiếu cơ chế retry và xử lý lỗi
-- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:290-320: Race condition trong RPC
-- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:322-350: Thiếu xử lý tối ưu
-- [x] wallet/src/defi/blockchain/non_evm/diamond.rs:400-420: Parse balance không an toàn
-- [x] wallet/src/defi/blockchain.rs:280-307: BlockchainProviderFactory không nhất quán
-- [x] wallet/src/defi/blockchain/non_evm/tron.rs:388-422: Thiếu đồng bộ hóa cache
-
-### Module: Defi/Farm và Stake
-- [x] wallet/src/defi/farm.rs:127-136: Không có cơ chế fallback
-- [ ] wallet/src/defi/farm.rs:226-285: Thiếu xử lý đồng thời
-- [ ] wallet/src/defi/stake.rs:662-670: Thiếu caching
-- [ ] wallet/src/defi/stake.rs:740-776: Thuật toán tính rewards chưa chính xác
-- [x] wallet/src/defi/mod.rs:108-134: Khởi tạo pools không đầy đủ
+- [x] wallet/src/defi/blockchain.rs:157-178: Tính không nhất quán trong BlockchainProviderFactory
+- [x] wallet/src/defi/blockchain/non_evm/tron.rs:380-450: Thiếu đồng bộ hóa cache
+- [x] wallet/src/defi/blockchain.rs:200-220: Thiếu phương thức để quản lý cache
 
 ### Module: Defi/Token Standards
-- [x] wallet/src/defi/erc20.rs:358-438: Unsafe code
-- [x] wallet/src/defi/erc721.rs:430-505: Unsafe code
-- [x] wallet/src/defi/erc1155.rs:420-495: Unsafe code
-
-### Module: WalletLogic
-- [x] wallet/src/walletlogic/handler.rs:221-250: Hạn chế hỗ trợ blockchain
-- [x] wallet/src/walletlogic/handler.rs:253-285: Thiếu xử lý lỗi nâng cao
-- [x] wallet/src/walletlogic/handler.rs:287-309: Giới hạn chỉ cho EVM
-- [x] wallet/src/walletlogic/handler.rs:381-395: Test không đúng chuẩn
-- [x] wallet/src/walletlogic/handler.rs:398-408: Test thiếu mocking
-- [x] wallet/src/walletlogic/init.rs:126-134: Thiếu validation seed phrase
-- [x] wallet/src/walletlogic/init.rs:126-175: Thiếu bảo mật lưu trữ
-- [x] wallet/src/walletlogic/crypto.rs:35-61: Thiếu key rotation
-- [x] wallet/src/walletlogic/utils.rs:61-67: Kiểm tra seed phrase chưa đầy đủ
-
-### Module: Users/Subscription
-- [x] wallet/src/users/subscription/manager.rs:153-175: Deadlock risk in init_auto_trade_manager
-- [x] wallet/src/users/subscription/manager.rs:488-596: Using unwrap()
-- [x] wallet/src/users/subscription/manager.rs:234-256: Lack of error handling in check_transaction_status
-- [x] wallet/src/users/subscription/manager.rs:312-345: Lack of state checks in process_payment
-- [x] wallet/src/users/subscription/manager.rs:456-478: Lack of validation in check_nft_ownership
-- [x] wallet/src/users/subscription/auto_trade.rs:564-598: Race condition
-- [x] wallet/src/users/subscription/auto_trade.rs:753-790: Thiếu persistence
-- [x] wallet/src/users/subscription/auto_trade.rs:123-156: Thiếu rate limiting
-- [x] wallet/src/users/subscription/auto_trade.rs:234-267: Thiếu retry mechanism
-- [x] wallet/src/users/subscription/nft.rs:92-115: Thiếu cross-check
-- [x] wallet/src/users/subscription/nft.rs:45-78: Thiếu caching
-- [x] wallet/src/users/subscription/nft.rs:156-189: Thiếu timeout
-- [x] wallet/src/users/subscription/mod.rs:92-113: Giả định không an toàn
+- [x] wallet/src/defi/erc20.rs:500-550: Code không an toàn
+- [x] wallet/src/defi/erc721.rs:230-280: Code không an toàn
+- [x] wallet/src/defi/erc1155.rs:175-210: Code không an toàn
 
 ### Module: Users/VIP
-- [ ] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện
-- [ ] wallet/src/users/vip_user.rs:173-257: Thiếu xử lý lỗi
-- [ ] wallet/src/users/vip_user.rs:288-350: Gọi hàm không đáng tin cậy
+- [x] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện
+- [x] wallet/src/users/vip_user.rs:173-257: Thiếu xử lý lỗi
+- [x] wallet/src/users/vip_user.rs:288-350: Gọi hàm không đáng tin cậy
 
 ### Module: Users/Free
-- [ ] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup
-- [ ] wallet/src/users/mod.rs:17-22: Vi phạm encapsulation
+- [x] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup
+- [x] wallet/src/users/mod.rs:17-22: Vi phạm encapsulation
 
 ## Domain: Snipebot
 

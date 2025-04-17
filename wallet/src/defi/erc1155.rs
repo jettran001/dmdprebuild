@@ -296,17 +296,75 @@ impl Erc1155Contract {
         amount: U256,
         data: Vec<u8>
     ) -> Result<TransactionReceipt, ContractError> {
-        self.send_transaction(
-            "safeTransferFrom",
-            vec![
-                Token::Address(from), 
-                Token::Address(to), 
-                Token::Uint(id),
-                Token::Uint(amount),
-                Token::Bytes(data),
-            ],
-            None,
-        ).await
+        // Kiểm tra địa chỉ
+        if to == Address::zero() {
+            return Err(ContractError::CallError("Cannot transfer to zero address".into()));
+        }
+        
+        // Kiểm tra số lượng
+        if amount == U256::zero() {
+            return Err(ContractError::CallError("Cannot transfer zero amount".into()));
+        }
+        
+        // Kiểm tra quyền
+        let sender = match &self.wallet {
+            Some(wallet) => wallet.address(),
+            None => return Err(ContractError::SignatureError("No wallet provided for transaction".into())),
+        };
+        
+        if from != sender {
+            let is_approved = self.is_approved_for_all(from, sender).await?;
+            if !is_approved {
+                return Err(ContractError::CallError(
+                    format!("Not approved to transfer tokens on behalf of {:?}", from)
+                ));
+            }
+        }
+        
+        // Kiểm tra số dư
+        let balance = self.balance_of(from, id).await?;
+        if balance < amount {
+            return Err(ContractError::CallError(
+                format!("Insufficient balance: has {:?}, needs {:?}", balance, amount)
+            ));
+        }
+        
+        // Log giao dịch
+        info!("Transferring ERC1155 token: id={}, amount={}, from={:?}, to={:?}", 
+            id, amount, from, to);
+        
+        // Thực hiện giao dịch với retry
+        let max_retries = 3;
+        let mut attempt = 0;
+        
+        loop {
+            attempt += 1;
+            match self.send_transaction(
+                "safeTransferFrom",
+                vec![
+                    Token::Address(from), 
+                    Token::Address(to), 
+                    Token::Uint(id),
+                    Token::Uint(amount),
+                    Token::Bytes(data.clone()),
+                ],
+                None,
+            ).await {
+                Ok(receipt) => {
+                    info!("ERC1155 token transfer successful: tx_hash={}", receipt.transaction_hash);
+                    return Ok(receipt);
+                },
+                Err(e) => {
+                    if attempt >= max_retries {
+                        error!("Failed to transfer ERC1155 token after {} attempts: {}", max_retries, e);
+                        return Err(e);
+                    }
+                    
+                    warn!("Transfer attempt {} failed: {}. Retrying...", attempt, e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+        }
     }
     
     /// Chuyển nhiều token an toàn
@@ -383,12 +441,75 @@ impl Erc1155Contract {
         let from = Address::from(log.topics[2]);
         let to = Address::from(log.topics[3]);
         
-        // Giải mã ABI để lấy mảng ids và values
-        // Lưu ý: đây là giải mã đơn giản, trong thực tế cần dùng ethers-rs để giải mã chính xác
+        // Sử dụng ethers ABI coder để giải mã chính xác data
+        // Data format: offset của mảng ids, offset của mảng values, 
+        // kích thước mảng ids, các ids, kích thước mảng values, các values
         
-        // Đây là một cách đơn giản hóa để minh họa, không nên dùng trong production
-        let ids = vec![U256::from(0)]; // Placeholder
-        let values = vec![U256::from(0)]; // Placeholder
+        if log.data.0.len() < 64 {
+            return Err(ContractError::CallError("Invalid data length for TransferBatch event".into()));
+        }
+        
+        // Giải mã data theo cách an toàn
+        let mut ids = Vec::new();
+        let mut values = Vec::new();
+        
+        // Đọc offset của mảng ids (thường là 0x40 = 64)
+        let ids_offset = U256::from_big_endian(&log.data.0[0..32]).as_usize();
+        
+        // Đọc offset của mảng values
+        let values_offset = U256::from_big_endian(&log.data.0[32..64]).as_usize();
+        
+        if ids_offset >= log.data.0.len() || values_offset >= log.data.0.len() {
+            return Err(ContractError::CallError("Invalid offsets in TransferBatch event data".into()));
+        }
+        
+        // Đọc kích thước mảng ids
+        let ids_start = ids_offset;
+        if ids_start + 32 > log.data.0.len() {
+            return Err(ContractError::CallError("Invalid ids array start position".into()));
+        }
+        
+        let ids_length = U256::from_big_endian(&log.data.0[ids_start..ids_start+32]).as_usize();
+        
+        // Đọc các ids
+        for i in 0..ids_length {
+            let pos = ids_start + 32 + i * 32;
+            if pos + 32 > log.data.0.len() {
+                return Err(ContractError::CallError(format!("Invalid id position at index {}", i)));
+            }
+            
+            let id = U256::from_big_endian(&log.data.0[pos..pos+32]);
+            ids.push(id);
+        }
+        
+        // Đọc kích thước mảng values
+        let values_start = values_offset;
+        if values_start + 32 > log.data.0.len() {
+            return Err(ContractError::CallError("Invalid values array start position".into()));
+        }
+        
+        let values_length = U256::from_big_endian(&log.data.0[values_start..values_start+32]).as_usize();
+        
+        // Kiểm tra hai mảng có cùng kích thước không
+        if ids_length != values_length {
+            return Err(ContractError::CallError(
+                format!("Mismatched array lengths: ids={}, values={}", ids_length, values_length)
+            ));
+        }
+        
+        // Đọc các values
+        for i in 0..values_length {
+            let pos = values_start + 32 + i * 32;
+            if pos + 32 > log.data.0.len() {
+                return Err(ContractError::CallError(format!("Invalid value position at index {}", i)));
+            }
+            
+            let value = U256::from_big_endian(&log.data.0[pos..pos+32]);
+            values.push(value);
+        }
+        
+        debug!("Decoded TransferBatch event: operator={:?}, from={:?}, to={:?}, ids_count={}, values_count={}",
+            operator, from, to, ids.len(), values.len());
         
         Ok(TransferBatchEvent { operator, from, to, ids, values })
     }
@@ -477,19 +598,24 @@ impl ContractInterface for Erc1155Contract {
                 })
                 .collect();
             
-            // Convert Vec<TransferSingleEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast TransferSingleEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast TransferSingleEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<TransferBatchEvent>() {
             let events: Vec<TransferBatchEvent> = logs.iter()
                 .filter_map(|log| {
@@ -503,19 +629,24 @@ impl ContractInterface for Erc1155Contract {
                 })
                 .collect();
             
-            // Convert Vec<TransferBatchEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast TransferBatchEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast TransferBatchEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ApprovalForAllEvent>() {
             let events: Vec<ApprovalForAllEvent> = logs.iter()
                 .filter_map(|log| {
@@ -529,22 +660,59 @@ impl ContractInterface for Erc1155Contract {
                 })
                 .collect();
             
-            // Convert Vec<ApprovalForAllEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast ApprovalForAllEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast ApprovalForAllEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
+                    }
+                }
+            }
+            
+            Ok(result)
+        } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<UriEvent>() {
+            let events: Vec<UriEvent> = logs.iter()
+                .filter_map(|log| {
+                    match self.decode_uri_event(log) {
+                        Ok(event) => Some(event),
+                        Err(e) => {
+                            error!("Failed to decode URI event: {}", e);
+                            None
+                        }
                     }
                 })
                 .collect();
             
-            Ok(events_as_t)
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast UriEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
+                    }
+                }
+            }
+            
+            Ok(result)
         } else {
             Err(ContractError::CallError(format!(
-                "Unsupported event type for decode_logs"
+                "Unsupported event type for decode_logs: {:?}",
+                std::any::type_name::<T>()
             )))
         }
     }

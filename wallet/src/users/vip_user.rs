@@ -138,33 +138,70 @@ impl VipUserManager {
         token_id: U256,
         chain_id: u64,
     ) -> Result<bool, WalletError> {
-        // Sử dụng RwLock an toàn trong async context
-        let wallet_api_guard = match self.wallet_api.read().await {
-            guard => guard
-        };
-        
-        // Thêm validation trước khi kiểm tra
+        // Thực hiện validation đầu vào
         if wallet_address.is_zero() {
             warn!("Địa chỉ ví không hợp lệ (zero address) khi kiểm tra NFT");
-            return Err(WalletError::Other("Địa chỉ ví không hợp lệ".to_string()));
+            return Err(WalletError::InvalidAddress("Địa chỉ ví không hợp lệ".to_string()));
         }
         
         if nft_contract.is_zero() {
             warn!("Địa chỉ hợp đồng NFT không hợp lệ (zero address)");
-            return Err(WalletError::Other("Địa chỉ hợp đồng NFT không hợp lệ".to_string()));
+            return Err(WalletError::InvalidAddress("Địa chỉ hợp đồng NFT không hợp lệ".to_string()));
         }
         
-        // TODO: Triển khai thực tế để kiểm tra NFT trên blockchain
-        // Đây là ví dụ đơn giản, cần kết nối đến blockchain thực tế để kiểm tra balance của NFT
+        if chain_id == 0 {
+            warn!("Chain ID không hợp lệ (0)");
+            return Err(WalletError::InvalidChainId(0));
+        }
         
-        // Trong thực tế, cần gọi hàm balanceOf từ smart contract ERC-1155
-        // Và kiểm tra nếu balance > 0
+        // Sử dụng wallet API để kiểm tra NFT
+        let wallet_api_guard = match self.wallet_api.read().await {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("Lỗi khi truy cập wallet API: {}", e);
+                return Err(WalletError::Other(format!("Lỗi truy cập WalletAPI: {}", e)));
+            }
+        };
         
-        info!("Kiểm tra NFT: address={:?}, contract={:?}, token_id={}, chain_id={}", 
-              wallet_address, nft_contract, token_id, chain_id);
+        debug!("Kiểm tra NFT: wallet={:?}, contract={:?}, token_id={}, chain_id={}", 
+               wallet_address, nft_contract, token_id, chain_id);
         
-        // Giả lập trả về true
-        Ok(true)
+        // Sử dụng WalletApi để lấy thông tin ERC-1155 NFT
+        let balance = match wallet_api_guard.get_erc1155_balance(
+            wallet_address,
+            nft_contract,
+            token_id,
+            chain_id
+        ).await {
+            Ok(balance) => balance,
+            Err(e) => {
+                error!("Lỗi khi kiểm tra balance ERC-1155: {}", e);
+                // Retry với backup provider nếu cần
+                match wallet_api_guard.get_erc1155_balance_with_backup(
+                    wallet_address,
+                    nft_contract,
+                    token_id,
+                    chain_id
+                ).await {
+                    Ok(balance) => balance,
+                    Err(retry_err) => {
+                        error!("Lỗi khi retry kiểm tra balance ERC-1155: {}", retry_err);
+                        return Err(retry_err);
+                    }
+                }
+            }
+        };
+        
+        // Kiểm tra balance > 0
+        let has_nft = balance > U256::zero();
+        
+        if has_nft {
+            info!("Xác nhận user có NFT tại địa chỉ {} (balance: {})", wallet_address, balance);
+        } else {
+            warn!("Không tìm thấy NFT tại địa chỉ {} (balance: 0)", wallet_address);
+        }
+        
+        Ok(has_nft)
     }
 
     /// Kiểm tra NFT của tất cả VIP users
@@ -182,40 +219,88 @@ impl VipUserManager {
             return Ok(Vec::new());
         }
         
+        // Đảm bảo user_subscriptions không rỗng
+        if user_subscriptions.is_empty() {
+            warn!("Danh sách user_subscriptions rỗng, không có gì để kiểm tra");
+            return Ok(Vec::new());
+        }
+        
         // Danh sách user_ids cần thông báo
         let mut users_without_nft = Vec::new();
         let mut total_checked = 0;
         let mut error_count = 0;
+        let mut processed_count = 0;
         
-        info!("Bắt đầu kiểm tra NFT cho {} VIP users", 
-              user_subscriptions.iter().filter(|(_, s)| s.subscription_type == SubscriptionType::VIP).count());
+        let vip_count = user_subscriptions
+            .iter()
+            .filter(|(_, s)| s.subscription_type == SubscriptionType::VIP)
+            .count();
+            
+        info!("Bắt đầu kiểm tra NFT cho {} VIP users", vip_count);
+        
+        // Danh sách user_ids đã xử lý
+        let mut processed_user_ids = Vec::with_capacity(vip_count);
         
         for (user_id, subscription) in user_subscriptions.iter_mut() {
+            processed_count += 1;
+            
             // Chỉ kiểm tra các VIP user đang active
-            if subscription.subscription_type == SubscriptionType::VIP && 
-               subscription.status == SubscriptionStatus::Active {
+            if subscription.subscription_type != SubscriptionType::VIP || 
+               subscription.status != SubscriptionStatus::Active {
+                continue;
+            }
+            
+            processed_user_ids.push(user_id.clone());
+            
+            // Kiểm tra hạn sử dụng subscription
+            if subscription.end_date < now {
+                warn!("User {} có subscription đã hết hạn vào {}. Cần xử lý riêng.", 
+                     user_id, subscription.end_date);
+                continue;
+            }
+            
+            // Bỏ qua kiểm tra NFT cho người dùng VIP 12 tháng đã stake token
+            if subscription.non_nft_status == NonNftVipStatus::StakedDMD {
+                debug!("Bỏ qua kiểm tra NFT cho user {}: đã stake DMD token", user_id);
+                continue;
+            }
+            
+            // Kiểm tra thông tin NFT
+            if let Some(nft_info) = &mut subscription.nft_info {
+                // Kiểm tra nếu đã kiểm tra trong ngày
+                let nft_last_checked_day = nft_info.last_verified.date_naive().day();
+                let current_day = now.date_naive().day();
                 
-                // Bỏ qua kiểm tra NFT cho người dùng VIP 12 tháng đã stake token
-                if subscription.non_nft_status == NonNftVipStatus::StakedDMD {
-                    debug!("Bỏ qua kiểm tra NFT cho user {}: đã stake DMD token", user_id);
-                    continue;
-                }
-                
-                if let Some(nft_info) = &mut subscription.nft_info {
-                    // Kiểm tra nếu đã kiểm tra trong ngày
-                    let nft_last_checked_day = nft_info.last_verified.date_naive().day();
-                    let current_day = now.date_naive().day();
+                // Chỉ kiểm tra mỗi ngày một lần
+                if nft_last_checked_day != current_day {
+                    total_checked += 1;
                     
-                    // Chỉ kiểm tra mỗi ngày một lần
-                    if nft_last_checked_day != current_day {
-                        total_checked += 1;
-                        
-                        // Kiểm tra NFT trên blockchain
+                    // Kiểm tra chain_id hợp lệ
+                    let chain_id = nft_info.chain_id.unwrap_or(1);
+                    if chain_id == 0 {
+                        error!("User {} có chain_id không hợp lệ: {}", user_id, chain_id);
+                        error_count += 1;
+                        continue;
+                    }
+                    
+                    // Kiểm tra địa chỉ ví và contract hợp lệ
+                    if subscription.payment_address.is_zero() || nft_info.contract_address.is_zero() {
+                        error!("User {} có địa chỉ ví hoặc địa chỉ contract không hợp lệ", user_id);
+                        error_count += 1;
+                        continue;
+                    }
+                    
+                    // Thêm retry mechanism và xử lý lỗi chi tiết
+                    let max_retries = 3;
+                    let mut current_retry = 0;
+                    let mut last_error: Option<WalletError> = None;
+                    
+                    while current_retry < max_retries {
                         match self.check_nft_ownership(
                             subscription.payment_address,
                             nft_info.contract_address,
                             nft_info.token_id,
-                            nft_info.chain_id.unwrap_or(1) // Sử dụng chain_id từ nft_info hoặc mặc định
+                            chain_id
                         ).await {
                             Ok(has_nft) => {
                                 // Cập nhật trạng thái
@@ -224,27 +309,66 @@ impl VipUserManager {
                                 if !has_nft {
                                     warn!("User {} không có NFT VIP, cần thông báo", user_id);
                                     users_without_nft.push(user_id.clone());
+                                    
+                                    // Cập nhật trạng thái non_nft_status
+                                    subscription.non_nft_status = NonNftVipStatus::Missing;
                                 } else {
                                     debug!("Xác nhận user {} có NFT VIP hợp lệ", user_id);
+                                    subscription.non_nft_status = NonNftVipStatus::Valid;
                                 }
+                                
+                                // Thành công, thoát khỏi vòng lặp retry
+                                last_error = None;
+                                break;
                             },
                             Err(e) => {
-                                error_count += 1;
-                                error!("Lỗi khi kiểm tra NFT cho người dùng {}: {}", user_id, e);
-                                // Không thay đổi trạng thái nếu có lỗi
+                                current_retry += 1;
+                                last_error = Some(e.clone());
+                                error!("Lỗi khi kiểm tra NFT cho người dùng {}, lần thử {}/{}: {}", 
+                                      user_id, current_retry, max_retries, e);
+                                
+                                if current_retry < max_retries {
+                                    // Chờ một chút trước khi retry
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                }
                             }
                         }
                     }
-                } else {
-                    warn!("User {} là VIP nhưng không có thông tin NFT", user_id);
+                    
+                    // Nếu tất cả các lần thử đều thất bại
+                    if let Some(e) = last_error {
+                        error_count += 1;
+                        error!("Đã thử {} lần nhưng vẫn thất bại khi kiểm tra NFT cho user {}: {}", 
+                              max_retries, user_id, e);
+                        // Không thay đổi trạng thái nếu có lỗi
+                    }
                 }
+            } else {
+                warn!("User {} là VIP nhưng không có thông tin NFT", user_id);
+            }
+            
+            // Log tiến trình nếu có nhiều user
+            if vip_count > 100 && processed_count % 100 == 0 {
+                info!("Đã kiểm tra NFT cho {}/{} VIP users", processed_count, vip_count);
             }
         }
         
-        info!("Hoàn thành kiểm tra NFT: {} users được kiểm tra, {} không có NFT, {} lỗi", 
-              total_checked, users_without_nft.len(), error_count);
+        info!("Hoàn thành kiểm tra NFT: {} users đang active, {} được kiểm tra, {} không có NFT, {} lỗi", 
+              processed_user_ids.len(), total_checked, users_without_nft.len(), error_count);
+        
+        // Lưu trữ kết quả kiểm tra để theo dõi
+        self.save_nft_check_results(users_without_nft.clone(), error_count, total_checked).await;
         
         Ok(users_without_nft)
+    }
+    
+    /// Lưu trữ kết quả kiểm tra NFT
+    async fn save_nft_check_results(&self, users_without_nft: Vec<String>, error_count: usize, total_checked: usize) {
+        // Lưu vào database hoặc log
+        debug!("Lưu kết quả kiểm tra NFT: {} users không có NFT, {} lỗi, {} tổng số kiểm tra", 
+              users_without_nft.len(), error_count, total_checked);
+        
+        // TODO: Lưu vào database thực tế
     }
 
     /// Cập nhật trạng thái cho VIP user không có NFT
@@ -292,69 +416,161 @@ impl VipUserManager {
         nft_token_id: U256,
         payment_token: PaymentToken,
     ) -> Result<UserSubscription, WalletError> {
+        // Kiểm tra đầu vào kỹ lưỡng
+        if subscription.user_id.is_empty() {
+            error!("Không thể nâng cấp: ID người dùng trống");
+            return Err(WalletError::Other("ID người dùng không hợp lệ".to_string()));
+        }
+        
+        if subscription.payment_address.is_zero() {
+            error!("Không thể nâng cấp: Địa chỉ ví thanh toán là zero address");
+            return Err(WalletError::InvalidAddress("Địa chỉ ví thanh toán không hợp lệ".to_string()));
+        }
+        
+        if nft_contract_address.is_zero() {
+            error!("Không thể nâng cấp: Địa chỉ hợp đồng NFT là zero address");
+            return Err(WalletError::InvalidAddress("Địa chỉ hợp đồng NFT không hợp lệ".to_string()));
+        }
+        
         // Kiểm tra xem đăng ký hiện tại có phải Premium không
         if subscription.subscription_type != SubscriptionType::Premium {
+            error!("Chỉ có thể nâng cấp từ Premium lên VIP, loại hiện tại: {:?}", 
+                  subscription.subscription_type);
             return Err(WalletError::Other("Chỉ có thể nâng cấp từ Premium lên VIP".to_string()));
         }
         
-        // Kiểm tra NFT
-        let has_nft = self.check_nft_ownership(
-            subscription.payment_address,
-            nft_contract_address,
-            nft_token_id,
-            1, // Chain ID mặc định
-        ).await?;
+        // Kiểm tra trạng thái subscription
+        if subscription.status != SubscriptionStatus::Active {
+            error!("Không thể nâng cấp: Subscription không active, trạng thái hiện tại: {:?}", 
+                  subscription.status);
+            return Err(WalletError::Other("Subscription phải ở trạng thái Active".to_string()));
+        }
+        
+        // Ghi log thông tin quan trọng
+        info!("Bắt đầu nâng cấp từ Premium lên VIP: user_id={}, payment_address={}, nft_contract={}, token_id={}",
+             subscription.user_id, subscription.payment_address, nft_contract_address, nft_token_id);
+        
+        // Kiểm tra NFT với cơ chế retry và timeout
+        let max_retries = 3;
+        let mut current_retry = 0;
+        let mut has_nft = false;
+        let mut last_error: Option<WalletError> = None;
+        
+        while current_retry < max_retries {
+            match self.check_nft_ownership(
+                subscription.payment_address,
+                nft_contract_address,
+                nft_token_id,
+                1, // Chain ID mặc định
+            ).await {
+                Ok(result) => {
+                    has_nft = result;
+                    last_error = None;
+                    break;
+                },
+                Err(e) => {
+                    current_retry += 1;
+                    last_error = Some(e.clone());
+                    error!("Lỗi khi kiểm tra NFT, lần thử {}/{}: {}", current_retry, max_retries, e);
+                    
+                    if current_retry < max_retries {
+                        // Chờ trước khi thử lại
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+        
+        // Xử lý kết quả kiểm tra NFT
+        if let Some(e) = last_error {
+            error!("Không thể kiểm tra NFT sau {} lần thử: {}", max_retries, e);
+            return Err(WalletError::Other(format!("Không thể xác minh NFT: {}", e)));
+        }
         
         if !has_nft {
+            error!("Không tìm thấy NFT trong ví {}", subscription.payment_address);
             return Err(WalletError::Other("Không tìm thấy NFT trong ví".to_string()));
         }
         
-        // Tạo thông tin NFT mới
-        let nft_info = NftInfo::new(
-            nft_contract_address,
-            nft_token_id,
-            Utc::now(),
-            Some(1), // Chain ID
-        );
+        debug!("Đã xác minh NFT tồn tại trong ví");
         
-        // TODO: Triển khai nâng cấp từ Premium lên VIP thực tế
+        // Tạo thông tin NFT mới với đầy đủ thông tin
+        let now = Utc::now();
+        let nft_info = NftInfo {
+            contract_address: nft_contract_address,
+            token_id: nft_token_id,
+            last_verified: now,
+            is_valid: true,
+            chain_id: Some(1), // Chain ID
+            first_verified: now,
+            verification_count: 1,
+        };
+        
+        // Tính toán thời hạn mới
+        // Giữ nguyên thời gian bắt đầu, kéo dài thời hạn nếu cần
+        let current_end_date = subscription.end_date;
+        let min_vip_duration = Duration::days(30 * 3); // Tối thiểu 3 tháng
+        let new_end_date = if current_end_date < now + min_vip_duration {
+            now + min_vip_duration
+        } else {
+            current_end_date
+        };
         
         // Tạo subscription VIP mới với thông tin từ Premium
         let mut vip_subscription = subscription.clone();
         vip_subscription.subscription_type = SubscriptionType::VIP;
         vip_subscription.nft_info = Some(nft_info);
         vip_subscription.non_nft_status = NonNftVipStatus::Valid;
+        vip_subscription.end_date = new_end_date;
+        vip_subscription.payment_token = Some(payment_token);
+        vip_subscription.updated_at = now;
         
-        // Thêm logic cập nhật cache ở đây nếu cần
-        if let Some(vip_user_data) = get_vip_user(&subscription.user_id, |id| async move {
-            self.load_vip_user_from_db(&id).await.unwrap_or(None)
-        }).await {
-            // Đã có dữ liệu user VIP, cập nhật
-            let mut updated_data = vip_user_data.clone();
-            updated_data.nft_info = Some(NftInfo::new(nft_contract_address, nft_token_id));
-            update_vip_user_cache(&subscription.user_id, updated_data).await;
-        } else {
-            // Tạo dữ liệu mới
-            let vip_data = VipUserData {
-                user_id: subscription.user_id.clone(),
-                created_at: Utc::now(),
-                last_active: Utc::now(),
-                wallet_addresses: vec![subscription.payment_address],
-                subscription_end_date: vip_subscription.end_date,
-                vip_support_code: generate_vip_support_code(),
-                special_privileges: Vec::new(),
-                nft_info: Some(NftInfo::new(nft_contract_address, nft_token_id)),
-            };
-            // Thêm vào cache VIP users
-            update_vip_user_cache(&subscription.user_id, vip_data).await;
-        }
+        // Cập nhật dữ liệu VIP trong cache
+        self.update_vip_user_cache(&subscription.user_id, &vip_subscription).await?;
         
-        // Cập nhật thông tin khác
-        // TODO: Thêm logic tính thời hạn mới và các thông tin liên quan
+        info!("Nâng cấp thành công từ Premium lên VIP: user_id={}, hết hạn={}", 
+             subscription.user_id, new_end_date.format("%Y-%m-%d"));
         
         Ok(vip_subscription)
     }
     
+    /// Cập nhật cache cho người dùng VIP
+    async fn update_vip_user_cache(&self, user_id: &str, subscription: &UserSubscription) -> Result<(), WalletError> {
+        if let Some(vip_user_data) = get_vip_user(user_id, |id| async move {
+            self.load_vip_user_from_db(&id).await.unwrap_or(None)
+        }).await {
+            // Đã có dữ liệu user VIP, cập nhật
+            let mut updated_data = vip_user_data.clone();
+            updated_data.nft_info = subscription.nft_info.clone();
+            updated_data.subscription_end_date = subscription.end_date;
+            updated_data.last_active = Utc::now();
+            
+            // Thêm địa chỉ ví nếu chưa có
+            if !updated_data.wallet_addresses.contains(&subscription.payment_address) {
+                updated_data.wallet_addresses.push(subscription.payment_address);
+            }
+            
+            update_vip_user_cache(user_id, updated_data).await;
+        } else {
+            // Tạo dữ liệu mới
+            let vip_data = VipUserData {
+                user_id: user_id.to_string(),
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+                wallet_addresses: vec![subscription.payment_address],
+                subscription_end_date: subscription.end_date,
+                vip_support_code: generate_vip_support_code(),
+                special_privileges: Vec::new(),
+                nft_info: subscription.nft_info.clone(),
+            };
+            
+            // Thêm vào cache VIP users
+            update_vip_user_cache(user_id, vip_data).await;
+        }
+        
+        Ok(())
+    }
+
     /// Nâng cấp tài khoản lên VIP sử dụng stake DMD token thay vì NFT
     /// 
     /// # Arguments

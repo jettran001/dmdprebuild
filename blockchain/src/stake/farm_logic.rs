@@ -197,7 +197,7 @@ impl FarmManager for FarmManagerImpl {
         if farm_info.pending_rewards == U256::zero() {
             return Ok(U256::zero());
         }
-        
+
         // TODO: Implement logic claim rewards
         // 1. Gọi smart contract
         // 2. Xác thực giao dịch

@@ -369,6 +369,40 @@ impl BlockchainProviderFactory {
             _ => false
         }
     }
+
+    pub fn clear_provider_cache(&self, chain_id: ChainId) -> Result<(), Box<dyn std::error::Error>> {
+        // Clear provider cache for specific chain ID
+        match chain_id.chain_type() {
+            ChainType::Diamond => {
+                // Use Diamond provider's cache clearing method
+                diamond::DiamondProvider::clear_cache_by_chain_id(chain_id)?;
+                Ok(())
+            },
+            ChainType::Tron => {
+                // Use Tron provider's cache clearing method
+                tron::TronProvider::clear_cache_item(&format!("provider:{}", chain_id))?;
+                Ok(())
+            },
+            // Add other chain types as needed
+            _ => Ok(()),
+        }
+    }
+
+    pub fn clear_all_provider_caches(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Clear all provider caches
+        diamond::DiamondProvider::clear_all_cache()?;
+        tron::TronProvider::clear_all_cache()?;
+        // Add other chain types as needed
+        Ok(())
+    }
+
+    pub fn cleanup_expired_caches(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Cleanup expired caches for all providers
+        diamond::DiamondProvider::cleanup_expired_cache()?;
+        tron::TronProvider::cleanup_expired_cache()?;
+        // Add other chain types as needed
+        Ok(())
+    }
 }
 
 #[cfg(test)]

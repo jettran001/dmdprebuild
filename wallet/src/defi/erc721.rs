@@ -345,20 +345,118 @@ impl Erc721Contract {
     
     /// Chuyển token
     pub async fn transfer_from(&self, from: Address, to: Address, token_id: U256) -> Result<TransactionReceipt, ContractError> {
-        self.send_transaction(
-            "transferFrom",
-            vec![Token::Address(from), Token::Address(to), Token::Uint(token_id)],
-            None,
-        ).await
+        // Kiểm tra địa chỉ hợp lệ (không thể là địa chỉ zero)
+        if to == Address::zero() {
+            return Err(ContractError::CallError("Cannot transfer to zero address".into()));
+        }
+        
+        // Kiểm tra ownership (chỉ owner hoặc approved address mới có thể transfer)
+        let owner = self.owner_of(token_id).await?;
+        let sender = match &self.wallet {
+            Some(wallet) => wallet.address(),
+            None => return Err(ContractError::SignatureError("No wallet provided for transaction".into())),
+        };
+        
+        // Kiểm tra quyền
+        if owner != sender {
+            // Nếu không phải owner, kiểm tra xem có được approve không
+            let approved = self.get_approved(token_id).await?;
+            let is_approved_for_all = self.is_approved_for_all(owner, sender).await?;
+            
+            if approved != sender && !is_approved_for_all {
+                return Err(ContractError::CallError(
+                    "Not authorized to transfer this token".into()
+                ));
+            }
+        }
+        
+        // Log cho mục đích audit
+        info!("Transferring NFT token_id={} from={:?} to={:?}", token_id, from, to);
+        
+        // Thực hiện giao dịch với retry mechanism
+        let max_retries = 3;
+        let mut attempt = 0;
+        
+        loop {
+            attempt += 1;
+            match self.send_transaction(
+                "transferFrom",
+                vec![Token::Address(from), Token::Address(to), Token::Uint(token_id)],
+                None,
+            ).await {
+                Ok(receipt) => {
+                    info!("NFT transfer successful: tx_hash={}", receipt.transaction_hash);
+                    return Ok(receipt);
+                },
+                Err(e) => {
+                    if attempt >= max_retries {
+                        error!("Failed to transfer NFT after {} attempts: {}", max_retries, e);
+                        return Err(e);
+                    }
+                    
+                    warn!("Transfer attempt {} failed: {}. Retrying...", attempt, e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+        }
     }
     
     /// Chuyển token an toàn
     pub async fn safe_transfer_from(&self, from: Address, to: Address, token_id: U256) -> Result<TransactionReceipt, ContractError> {
-        self.send_transaction(
-            "safeTransferFrom",
-            vec![Token::Address(from), Token::Address(to), Token::Uint(token_id)],
-            None,
-        ).await
+        // Kiểm tra địa chỉ hợp lệ (không thể là địa chỉ zero)
+        if to == Address::zero() {
+            return Err(ContractError::CallError("Cannot transfer to zero address".into()));
+        }
+        
+        // Kiểm tra ownership (chỉ owner hoặc approved address mới có thể transfer)
+        let owner = self.owner_of(token_id).await?;
+        let sender = match &self.wallet {
+            Some(wallet) => wallet.address(),
+            None => return Err(ContractError::SignatureError("No wallet provided for transaction".into())),
+        };
+        
+        // Kiểm tra quyền
+        if owner != sender {
+            // Nếu không phải owner, kiểm tra xem có được approve không
+            let approved = self.get_approved(token_id).await?;
+            let is_approved_for_all = self.is_approved_for_all(owner, sender).await?;
+            
+            if approved != sender && !is_approved_for_all {
+                return Err(ContractError::CallError(
+                    "Not authorized to transfer this token".into()
+                ));
+            }
+        }
+        
+        // Log cho mục đích audit
+        info!("Safely transferring NFT token_id={} from={:?} to={:?}", token_id, from, to);
+        
+        // Thực hiện giao dịch với retry mechanism
+        let max_retries = 3;
+        let mut attempt = 0;
+        
+        loop {
+            attempt += 1;
+            match self.send_transaction(
+                "safeTransferFrom",
+                vec![Token::Address(from), Token::Address(to), Token::Uint(token_id)],
+                None,
+            ).await {
+                Ok(receipt) => {
+                    info!("Safe NFT transfer successful: tx_hash={}", receipt.transaction_hash);
+                    return Ok(receipt);
+                },
+                Err(e) => {
+                    if attempt >= max_retries {
+                        error!("Failed to safely transfer NFT after {} attempts: {}", max_retries, e);
+                        return Err(e);
+                    }
+                    
+                    warn!("Safe transfer attempt {} failed: {}. Retrying...", attempt, e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempt as u64)).await;
+                }
+            }
+        }
     }
     
     /// Giải mã event Transfer
@@ -487,19 +585,24 @@ impl ContractInterface for Erc721Contract {
                 })
                 .collect();
             
-            // Convert Vec<TransferEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast TransferEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast TransferEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ApprovalEvent>() {
             let events: Vec<ApprovalEvent> = logs.iter()
                 .filter_map(|log| {
@@ -513,19 +616,24 @@ impl ContractInterface for Erc721Contract {
                 })
                 .collect();
             
-            // Convert Vec<ApprovalEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast ApprovalEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast ApprovalEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ApprovalForAllEvent>() {
             let events: Vec<ApprovalForAllEvent> = logs.iter()
                 .filter_map(|log| {
@@ -539,19 +647,24 @@ impl ContractInterface for Erc721Contract {
                 })
                 .collect();
             
-            // Convert Vec<ApprovalForAllEvent> to Vec<T> using safe conversion
-            let events_as_t: Vec<T> = events.into_iter()
-                .map(|event| {
-                    // Safe conversion since we've verified the type
-                    let boxed = Box::new(event) as Box<dyn std::any::Any>;
-                    match boxed.downcast::<T>() {
-                        Ok(t) => *t,
-                        Err(_) => panic!("Failed to downcast ApprovalForAllEvent to T")
+            // Chuyển đổi an toàn sử dụng trait Any
+            let mut result = Vec::with_capacity(events.len());
+            for event in events {
+                // Chuyển đổi an toàn, sử dụng Result thay vì panic
+                let boxed = Box::new(event);
+                let any = boxed as Box<dyn std::any::Any>;
+                
+                match any.downcast::<T>() {
+                    Ok(t) => result.push(*t),
+                    Err(_) => {
+                        // Log lỗi thay vì panic
+                        error!("Failed to downcast ApprovalForAllEvent to requested type, skipping event");
+                        // Không thêm event này vào kết quả
                     }
-                })
-                .collect();
+                }
+            }
             
-            Ok(events_as_t)
+            Ok(result)
         } else {
             Err(ContractError::CallError(format!(
                 "Unsupported event type for decode_logs"

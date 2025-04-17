@@ -28,7 +28,7 @@
         "description": "BẮT BUỘC ưu tiên quét manifest.rs của module khi quét cấu trúc dữ liệu",
         "rules": [
           "Mỗi khi yêu cầu quét cấu trúc dữ liệu, LUÔN đọc manifest.rs đầu tiên",
-          "Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs để xác định vị trí chính xác",
+          "Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs sau đó quét .map để xác định vị trí chính xác",
           "Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm",
           "Khi được yêu cầu quét cấu trúc và tìm lỗi, các lỗi tìm thấy sẽ được cập nhật nội dung có kèm path file và dòng lỗi vào file .bugs "
         ]

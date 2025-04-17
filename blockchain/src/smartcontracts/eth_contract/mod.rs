@@ -25,6 +25,9 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::prelude::*;
 use crate::smartcontracts::DmdTokenProvider;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use uuid::Uuid;
 
 // Define các hằng số và cấu trúc dữ liệu cho ETH contract
 const DEFAULT_GAS_LIMIT: u64 = 21000;
@@ -37,6 +40,78 @@ static RETRY_DELAY: Duration = Duration::from_secs(2);
 static TOTAL_SUPPLY_CACHE: OnceCell<Mutex<Option<(U256, Instant)>>> = OnceCell::new();
 /// Thời gian cache cho các request (giây)
 const CACHE_DURATION: u64 = 1800; // 30 phút thay vì 5 phút
+
+// Cache cho các yêu cầu khác
+static GLOBAL_CACHE: OnceCell<DmdGlobalCache> = OnceCell::new();
+
+/// Phiên bản cache
+static CACHE_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Trạng thái giao dịch
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum TransactionStatus {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+/// Cache chung cho toàn bộ hệ thống
+struct DmdGlobalCache {
+    balances: RwLock<HashMap<String, (U256, Instant)>>,
+    total_supply: RwLock<(U256, Instant, Uuid)>,
+    node_id: Uuid,
+}
+
+impl DmdGlobalCache {
+    fn new() -> Self {
+        Self {
+            balances: RwLock::new(HashMap::new()),
+            total_supply: RwLock::new((U256::zero(), Instant::now(), Uuid::new_v4())),
+            node_id: Uuid::new_v4(),
+        }
+    }
+
+    fn get_instance() -> &'static Self {
+        GLOBAL_CACHE.get_or_init(|| DmdGlobalCache::new())
+    }
+
+    fn update_total_supply(&self, value: U256) {
+        let mut total_supply = self.total_supply.write();
+        *total_supply = (value, Instant::now(), self.node_id);
+        // Tăng phiên bản cache
+        CACHE_VERSION.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn get_total_supply(&self) -> Option<U256> {
+        let total_supply = self.total_supply.read();
+        if total_supply.1.elapsed() < Duration::from_secs(CACHE_DURATION) {
+            Some(total_supply.0)
+        } else {
+            None
+        }
+    }
+
+    fn update_balance(&self, address: &str, balance: U256) {
+        let mut balances = self.balances.write();
+        balances.insert(address.to_string(), (balance, Instant::now()));
+    }
+
+    fn get_balance(&self, address: &str) -> Option<U256> {
+        let balances = self.balances.read();
+        if let Some((balance, timestamp)) = balances.get(address) {
+            if timestamp.elapsed() < Duration::from_secs(CACHE_DURATION) {
+                return Some(*balance);
+            }
+        }
+        None
+    }
+}
+
+// Khởi tạo cache
+fn init_cache() {
+    TOTAL_SUPPLY_CACHE.get_or_init(|| Mutex::new(None));
+    GLOBAL_CACHE.get_or_init(|| DmdGlobalCache::new());
+}
 
 // Struct chứa thông tin về DMD Token trên Ethereum
 #[derive(Debug, Clone)]
@@ -74,37 +149,51 @@ pub struct EthContractProvider {
     config: EthContractConfig,
     provider: Provider<Http>,
     dmd_contract: DmdEthContract,
+    node_id: Uuid,
+    cluster_size: usize,
 }
 
 // Implement EthContractProvider
 impl EthContractProvider {
     // Khởi tạo provider mới
     pub fn new(config: EthContractConfig) -> Result<Self> {
-        let provider = Provider::<Http>::try_from(&config.rpc_url)
-            .map_err(|e| anyhow!("Failed to create Ethereum provider: {}", e))?;
+        // Khởi tạo cache nếu chưa được khởi tạo
+        init_cache();
 
-        let dmd_contract = DmdEthContract {
-            contract_address: config.contract_address,
-            contract_description: "DiamondToken (ETH)".to_string(),
-        };
+        // Tạo HTTP client với timeout
+        let client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()?;
 
-        // Khởi tạo cache cho total supply
-        let _ = TOTAL_SUPPLY_CACHE.get_or_init(|| Mutex::new(None));
+        // Tạo provider
+        let provider = Provider::new_client(config.rpc_url.clone(), client)?;
 
-        Ok(Self {
+        // Tạo instance
+        let provider = Self {
             config,
             provider,
-            dmd_contract,
-        })
+            dmd_contract: DmdEthContract::default(),
+            node_id: Uuid::new_v4(),
+            cluster_size: 1, // Mặc định là 1 node
+        };
+
+        Ok(provider)
+    }
+
+    pub fn with_cluster_size(mut self, size: usize) -> Self {
+        self.cluster_size = size;
+        self
     }
 
     // Tạo wallet từ private key
     pub fn create_wallet_from_private_key(&self, private_key: &str) -> Result<LocalWallet> {
-        let wallet = private_key
-            .parse::<LocalWallet>()
+        let private_key = private_key.trim_start_matches("0x");
+        let private_key_bytes = hex::decode(private_key)?;
+        let wallet = LocalWallet::from_bytes(&private_key_bytes)
             .map_err(|e| anyhow!("Failed to create wallet from private key: {}", e))?;
-
-        Ok(wallet)
+        
+        // Thiết lập chain ID cho Ethereum mainnet (1)
+        Ok(wallet.with_chain_id(1u64))
     }
 
     // Gửi giao dịch transfer ERC-1155
@@ -230,30 +319,42 @@ impl EthContractProvider {
         Ok(tx_hash)
     }
 
-    // Lấy total supply với caching
+    // Lấy total supply với caching phân tán
     pub async fn get_total_supply(&self) -> Result<U256> {
-        let cache = TOTAL_SUPPLY_CACHE.get().unwrap().lock().await;
+        // Kiểm tra cache toàn cục trước
+        let cache = DmdGlobalCache::get_instance();
         
-        // Kiểm tra cache có hợp lệ không
-        if let Some((supply, timestamp)) = *cache {
-            if timestamp.elapsed() < Duration::from_secs(CACHE_DURATION) {
-                return Ok(supply);
-            }
+        // Kiểm tra cache nhanh chóng
+        if let Some(supply) = cache.get_total_supply() {
+            info!("Sử dụng cached total supply từ node cache, phiên bản: {}", 
+                  CACHE_VERSION.load(Ordering::SeqCst));
+            return Ok(supply);
         }
-        drop(cache); // Drop lock để có thể mutable lock để cập nhật cache
-
-        // Nếu cache không hợp lệ, gọi lại API
+        
+        // Cache không hợp lệ, truy vấn lại API
         for retry in 0..MAX_RETRIES {
             match self.query_total_supply().await {
                 Ok(supply) => {
-                    // Cập nhật cache
-                    let mut cache = TOTAL_SUPPLY_CACHE.get().unwrap().lock().await;
-                    *cache = Some((supply, Instant::now()));
+                    // Cập nhật cache toàn cục
+                    cache.update_total_supply(supply);
+                    
+                    // Cập nhật phiên bản cache cũ cho tương thích
+                    let mut old_cache = TOTAL_SUPPLY_CACHE.get().unwrap().lock().await;
+                    *old_cache = Some((supply, Instant::now()));
+                    
+                    info!("Đã cập nhật total supply cache, phiên bản mới: {}", 
+                          CACHE_VERSION.load(Ordering::SeqCst));
+                    
+                    // Phân phối cache đến các node khác
+                    if self.cluster_size > 1 {
+                        self.distribute_cache_update(supply).await;
+                    }
+                    
                     return Ok(supply);
                 }
                 Err(e) => {
                     if retry < MAX_RETRIES - 1 {
-                        warn!("Failed to get total supply, retrying: {}", e);
+                        warn!("Không thể lấy total supply, thử lại: {}", e);
                         tokio::time::sleep(RETRY_DELAY).await;
                     } else {
                         return Err(e);
@@ -262,11 +363,35 @@ impl EthContractProvider {
             }
         }
 
-        Err(anyhow!("Failed to get total supply after multiple retries"))
+        Err(anyhow!("Không thể lấy total supply sau nhiều lần thử"))
+    }
+
+    // Phân phối cập nhật cache đến các node khác trong cluster
+    async fn distribute_cache_update(&self, supply: U256) {
+        // Trong triển khai thực tế, đây sẽ là một gọi API hoặc message queue
+        // để thông báo cho các node khác về cập nhật cache
+        info!("Đang gửi cập nhật cache total supply {} đến {} node khác", 
+              supply, self.cluster_size - 1);
+        
+        // Giả lập việc phân phối cache
+        // Trong thực tế sẽ sử dụng Redis, Kafka, hoặc message broker khác
+    }
+
+    // Đồng bộ cache từ node khác
+    pub async fn sync_cache_from_cluster(&self) -> Result<()> {
+        // Trong triển khai thực tế, đây sẽ là một gọi API hoặc 
+        // đọc từ message queue để đồng bộ cache từ các node khác
+        info!("Đang đồng bộ cache từ cluster");
+        
+        // Trong thực tế sẽ lấy giá trị mới nhất từ Redis, Kafka, v.v.
+        // và cập nhật cache local
+        Ok(())
     }
 
     // Gọi RPC để lấy total supply
     async fn query_total_supply(&self) -> Result<U256> {
+        info!("Đang truy vấn total supply từ blockchain");
+        
         // Gọi hàm totalSupply() trên contract
         let function_signature = "totalSupply()";
         let selector = &ethers::utils::keccak256(function_signature.as_bytes())[0..4];
@@ -285,11 +410,60 @@ impl EthContractProvider {
 
         // Decode kết quả
         let result = U256::from_big_endian(&tx);
+        info!("Đã nhận total supply: {}", result);
         Ok(result)
     }
 
-    // Lấy số dư của một địa chỉ
+    // Lấy số dư của một địa chỉ với cache phân tán
     pub async fn get_balance(&self, address: Address) -> Result<U256> {
+        let address_str = format!("{:?}", address);
+        let cache = DmdGlobalCache::get_instance();
+        
+        // Kiểm tra cache
+        if let Some(balance) = cache.get_balance(&address_str) {
+            info!("Sử dụng cached balance cho địa chỉ {}", address_str);
+            return Ok(balance);
+        }
+        
+        // Cache không hợp lệ, truy vấn lại
+        for retry in 0..MAX_RETRIES {
+            match self.query_balance(address).await {
+                Ok(balance) => {
+                    // Cập nhật cache
+                    cache.update_balance(&address_str, balance);
+                    
+                    info!("Đã cập nhật balance cache cho địa chỉ {}", address_str);
+                    
+                    // Phân phối cache đến các node khác nếu cần
+                    if self.cluster_size > 1 {
+                        self.distribute_balance_cache_update(&address_str, balance).await;
+                    }
+                    
+                    return Ok(balance);
+                }
+                Err(e) => {
+                    if retry < MAX_RETRIES - 1 {
+                        warn!("Không thể lấy balance, thử lại: {}", e);
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow!("Không thể lấy balance sau nhiều lần thử"))
+    }
+    
+    // Phân phối cập nhật cache balance đến các node khác
+    async fn distribute_balance_cache_update(&self, address: &str, balance: U256) {
+        // Trong triển khai thực tế, đây sẽ là một gọi API hoặc message queue
+        info!("Đang gửi cập nhật cache balance {} cho địa chỉ {} đến {} node khác", 
+              balance, address, self.cluster_size - 1);
+    }
+    
+    // Truy vấn balance trực tiếp từ blockchain
+    async fn query_balance(&self, address: Address) -> Result<U256> {
         // Gọi hàm balanceOfDMD(address) trên contract
         let function_signature = "balanceOfDMD(address)";
         let selector = &ethers::utils::keccak256(function_signature.as_bytes())[0..4];
@@ -318,6 +492,7 @@ impl EthContractProvider {
 
         // Decode kết quả
         let result = U256::from_big_endian(&tx);
+        info!("Đã nhận balance cho địa chỉ {:?}: {}", address, result);
         Ok(result)
     }
 

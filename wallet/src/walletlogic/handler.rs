@@ -546,7 +546,7 @@ impl WalletManagerHandler for WalletManager {
         };
         
         let provider = chain_manager.get_provider(chain_id)
-            .await
+                    .await
             .context(format!("Không thể lấy provider cho chain ID {}", chain_id))
             .map_err(|e| {
                 tracing::error!("Provider error: {}", e);
@@ -562,9 +562,9 @@ impl WalletManagerHandler for WalletManager {
                 return Err(WalletError::ProviderError(error_msg));
             }
         }
-        
-        // Kiểm tra số dư trước khi gửi giao dịch
-        if let Some(value) = tx.value {
+                
+                // Kiểm tra số dư trước khi gửi giao dịch
+                if let Some(value) = tx.value {
             let balance = match provider.get_balance(address, None).await {
                 Ok(balance) => balance,
                 Err(e) => {
@@ -572,23 +572,23 @@ impl WalletManagerHandler for WalletManager {
                     return Err(WalletError::ProviderError(format!("Không thể lấy số dư: {}", e)));
                 }
             };
-            
-            // Ước tính gas cost
-            let gas_price = match tx.gas_price {
-                Some(price) => price,
-                None => match provider.get_gas_price().await {
-                    Ok(price) => price,
-                    Err(e) => {
-                        tracing::error!("Không thể lấy giá gas: {}", e);
-                        return Err(WalletError::ProviderError(format!("Không thể lấy giá gas: {}", e)));
-                    }
-                }
-            };
-            
+                    
+                    // Ước tính gas cost
+                    let gas_price = match tx.gas_price {
+                        Some(price) => price,
+                        None => match provider.get_gas_price().await {
+                            Ok(price) => price,
+                            Err(e) => {
+                                tracing::error!("Không thể lấy giá gas: {}", e);
+                                return Err(WalletError::ProviderError(format!("Không thể lấy giá gas: {}", e)));
+                            }
+                        }
+                    };
+                    
             // Ước tính gas limit nếu chưa được chỉ định
-            let gas_limit = match tx.gas {
-                Some(limit) => limit,
-                None => {
+                    let gas_limit = match tx.gas {
+                        Some(limit) => limit,
+                        None => {
                     // Cố gắng ước tính gas limit
                     match provider.estimate_gas(&tx, None).await {
                         Ok(estimate) => {
@@ -599,22 +599,22 @@ impl WalletManagerHandler for WalletManager {
                             // Fallback đến giá trị mặc định dựa trên loại giao dịch
                             if tx.to.is_some() && tx.data.is_none() {
                                 // Transfer đơn giản
-                                U256::from(21000)
+                            U256::from(21000) 
                             } else {
                                 // Contract interaction
                                 U256::from(150000)
                             }
                         }
                     }
-                }
-            };
-            
-            let estimated_cost = value + (gas_price * gas_limit);
-            
-            if balance < estimated_cost {
+                        }
+                    };
+                    
+                    let estimated_cost = value + (gas_price * gas_limit);
+                    
+                    if balance < estimated_cost {
                 let error_msg = format!(
-                    "Số dư không đủ: có {} < cần {} (giá trị {} + gas {})", 
-                    balance, estimated_cost, value, gas_price * gas_limit
+                            "Số dư không đủ: có {} < cần {} (giá trị {} + gas {})", 
+                            balance, estimated_cost, value, gas_price * gas_limit
                 );
                 tracing::warn!("{}", error_msg);
                 return Err(WalletError::InsufficientFunds(error_msg));
@@ -696,7 +696,7 @@ impl WalletManagerHandler for WalletManager {
         tracing::error!("{}", error_msg);
         Err(WalletError::TransactionFailed(error_msg))
     }
-    
+
     /// Hàm hỗ trợ để gửi giao dịch Solana
     async fn send_transaction_solana(&self, address: Address, tx: TransactionRequest, chain_id: u64, chain_manager: &(dyn ChainManager + Send + Sync + 'static)) -> Result<String, WalletError> {
         #[cfg(feature = "solana")]
@@ -761,7 +761,7 @@ impl WalletManagerHandler for WalletManager {
                 return Err(e);
             }
         };
-        
+            
         let provider = chain_manager.get_provider(chain_id)
             .await
             .context(format!("Không thể lấy provider cho Diamond chain ID {}", chain_id))

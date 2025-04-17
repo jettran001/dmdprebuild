@@ -1521,12 +1521,12 @@ mod tests {
             },
             Err(e) => {
                 // Kiểm tra xem có đúng loại lỗi mong đợi không
-                match e {
-                    WalletError::MaxWalletLimitReached(_) => {
-                        // Đây là lỗi mong đợi
+            match e {
+                WalletError::MaxWalletLimitReached(_) => {
+                    // Đây là lỗi mong đợi
                         tracing::debug!("Nhận lỗi giới hạn ví như mong đợi: {}", e);
-                    },
-                    _ => {
+                },
+                _ => {
                         // Lỗi khác, không đúng như mong đợi
                         return Err(WalletError::OperationFailed(
                             format!("Lỗi không phải là MaxWalletLimitReached như mong đợi: {}", e)
@@ -1753,7 +1753,7 @@ mod tests {
         // Test 4: Kiểm tra get_chain_config với chain_id không hợp lệ
         let invalid_chain_config = wallet_api.chain_manager.get_chain_config(999).await;
         assert!(invalid_chain_config.is_err(), "Không nên lấy được config cho chain 999");
-        
+
         Ok(())
     }
 }

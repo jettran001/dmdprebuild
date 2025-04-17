@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::blockchain::DmdChain;
 use crate::smartcontracts::TokenInterface;
@@ -245,8 +246,43 @@ impl ArbContractProvider {
         }
     }
     
+    /// Chuyển sang provider tiếp theo
+    pub async fn switch_to_next_provider(&self) -> Result<()> {
+        // Sử dụng tokio::sync::Semaphore để đảm bảo chỉ một luồng có thể thay đổi provider
+        // Semaphore được khởi tạo với số permits là 1
+        static SWITCH_SEMAPHORE: tokio::sync::OnceCell<tokio::sync::Semaphore> = tokio::sync::OnceCell::const_new();
+        let semaphore = SWITCH_SEMAPHORE.get_or_init(|| async {
+            tokio::sync::Semaphore::new(1)
+        }).await;
+        
+        // Lấy permit từ semaphore, sẽ đợi nếu đã có luồng khác đang giữ permit
+        let permit = semaphore.acquire().await.expect("Semaphore đã bị đóng");
+        
+        // Bọc permit trong SemaphorePermit để đảm bảo permit được trả lại khi hàm kết thúc
+        let _permit_guard = tokio::sync::SemaphorePermit::new(permit);
+
+        // Giờ mới thực hiện thay đổi provider dưới sự bảo vệ của semaphore
+        let mut rpc_lock = self.current_rpc_index.write().await;
+        let total_providers = 1 + self.config.fallback_rpc_urls.len();
+        
+        // Lưu lại index hiện tại để log
+        let current_idx = *rpc_lock;
+        *rpc_lock = (*rpc_lock + 1) % total_providers;
+        
+        // Log kết quả tùy theo index mới
+        if *rpc_lock == 0 {
+            info!("Đã thử tất cả các provider Arbitrum (0-{}), quay lại provider chính", total_providers - 1);
+        } else {
+            info!("Đã chuyển từ Arbitrum provider {} sang provider {}", current_idx, *rpc_lock);
+        }
+        
+        // Khi SemaphorePermit được drop, permit sẽ tự động được trả lại
+        Ok(())
+    }
+    
     /// Lấy provider hiện tại hoặc chuyển sang provider dự phòng nếu cần
     pub async fn get_provider(&self) -> Result<Arc<Provider<Http>>> {
+        // Đọc index provider hiện tại một cách atomic
         let rpc_lock = self.current_rpc_index.read().await;
         let current_index = *rpc_lock;
         drop(rpc_lock); // Giải phóng lock trước khi sử dụng
@@ -257,40 +293,78 @@ impl ArbContractProvider {
             &self.config.fallback_rpc_urls[current_index - 1]
         };
         
+        // Các provider tạo tạm thời sẽ được cache lại để tránh tạo quá nhiều kết nối
+        use std::collections::HashMap;
+        static PROVIDER_CACHE: tokio::sync::OnceCell<tokio::sync::Mutex<HashMap<String, (Arc<Provider<Http>>, Instant)>>> = 
+            tokio::sync::OnceCell::const_new();
+        
+        let provider_cache = PROVIDER_CACHE.get_or_init(|| async {
+            tokio::sync::Mutex::new(HashMap::new())
+        }).await;
+        
+        // Kiểm tra cache để tái sử dụng provider
+        let mut cache = provider_cache.lock().await;
+        if let Some((provider, timestamp)) = cache.get(rpc_url) {
+            // Chỉ sử dụng provider từ cache nếu chưa quá 5 phút
+            if timestamp.elapsed() < Duration::from_secs(300) {
+                return Ok(provider.clone());
+            }
+            // Nếu provider đã quá cũ, xóa khỏi cache
+            cache.remove(rpc_url);
+        }
+        
+        // Tạo HTTP client với timeout
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(self.config.timeout_ms))
             .build()?;
             
+        // Tạo provider mới từ client
         let provider = Provider::new_client(rpc_url, client)?;
         
-        // Kiểm tra xem provider có hoạt động không
-        match timeout(Duration::from_secs(5), provider.get_block_number()).await {
+        // Kiểm tra xem provider có hoạt động không bằng timeout
+        let provider_check = match tokio::time::timeout(
+            Duration::from_secs(5), 
+            provider.get_block_number()
+        ).await {
             Ok(Ok(_)) => {
                 // Provider đang hoạt động tốt
-                Ok(Arc::new(provider))
+                let provider_arc = Arc::new(provider);
+                
+                // Cập nhật cache
+                cache.insert(rpc_url.clone(), (provider_arc.clone(), Instant::now()));
+                
+                info!("Provider {} hoạt động tốt", rpc_url);
+                Ok(provider_arc)
             },
             _ => {
-                // Provider không hoạt động, chuyển sang provider tiếp theo
-                info!("Arbitrum RPC không phản hồi, chuyển sang URL dự phòng");
+                // Provider không phản hồi, thử chuyển sang provider khác
+                drop(cache); // Giải phóng lock trước khi chuyển provider
+                
+                info!("Provider {} không phản hồi, chuyển sang URL dự phòng", rpc_url);
                 self.switch_to_next_provider().await?;
-                self.get_provider().await
+                
+                // Gọi đệ quy để thử với provider mới
+                // Sử dụng atomic counter để ngăn đệ quy vô hạn
+                static RECURSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                
+                let counter = RECURSION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                if counter > self.config.fallback_rpc_urls.len() + 1 {
+                    // Đã thử tất cả các provider mà không thành công
+                    RECURSION_COUNTER.store(0, Ordering::SeqCst);
+                    return Err(anyhow!("Tất cả các provider Arbitrum đều không phản hồi"));
+                }
+                
+                let result = self.get_provider().await;
+                // Reset counter nếu tìm được provider hoạt động
+                if result.is_ok() {
+                    RECURSION_COUNTER.store(0, Ordering::SeqCst);
+                }
+                
+                result
             }
-        }
-    }
-    
-    /// Chuyển sang provider tiếp theo
-    pub async fn switch_to_next_provider(&self) -> Result<()> {
-        let mut rpc_lock = self.current_rpc_index.write().await;
-        let total_providers = 1 + self.config.fallback_rpc_urls.len();
-        *rpc_lock = (*rpc_lock + 1) % total_providers;
+        };
         
-        if *rpc_lock == 0 {
-            info!("Đã thử tất cả các provider Arbitrum, quay lại provider chính");
-        } else {
-            info!("Đã chuyển sang provider Arbitrum thứ {}", *rpc_lock);
-        }
-        
-        Ok(())
+        provider_check
     }
     
     // Tạo wallet từ private key

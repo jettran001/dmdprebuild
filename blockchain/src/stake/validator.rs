@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use anyhow::Result;
 use async_trait::async_trait;
 use ethers::types::{Address, U256};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 use crate::stake::{StakePoolConfig, UserStakeInfo};
 use super::constants::*;
@@ -72,6 +72,87 @@ impl ValidatorImpl {
 #[async_trait]
 impl Validator for ValidatorImpl {
     async fn register_validator(&self, pool_address: Address, validator_address: Address) -> Result<()> {
+        // Kiểm tra địa chỉ hợp lệ
+        if validator_address == Address::zero() {
+            return Err(anyhow::anyhow!("Invalid validator address: zero address"));
+        }
+        
+        if pool_address == Address::zero() {
+            return Err(anyhow::anyhow!("Invalid pool address: zero address"));
+        }
+        
+        // Kiểm tra quyền hạn dựa trên stake amount
+        let min_stake_required = match self.stake_manager.get_min_stake_for_validator(pool_address).await {
+            Ok(amount) => amount,
+            Err(e) => {
+                error!("Failed to get minimum stake requirement: {:?}", e);
+                return Err(anyhow::anyhow!("Could not verify stake requirements: {}", e));
+            }
+        };
+        
+        let validator_stake = match self.stake_manager.get_user_stake_amount(pool_address, validator_address).await {
+            Ok(amount) => amount,
+            Err(e) => {
+                error!("Failed to get validator stake amount: {:?}", e);
+                return Err(anyhow::anyhow!("Could not verify validator stake: {}", e));
+            }
+        };
+        
+        if validator_stake < min_stake_required {
+            return Err(anyhow::anyhow!(
+                "Insufficient stake amount. Required: {}, Current: {}", 
+                min_stake_required, validator_stake
+            ));
+        }
+        
+        // Kiểm tra thời gian lock của stake
+        let min_lock_time = match self.stake_manager.get_min_lock_time_for_validator(pool_address).await {
+            Ok(time) => time,
+            Err(e) => {
+                error!("Failed to get minimum lock time requirement: {:?}", e);
+                return Err(anyhow::anyhow!("Could not verify lock time requirements: {}", e));
+            }
+        };
+        
+        let validator_lock_time = match self.stake_manager.get_user_lock_time(pool_address, validator_address).await {
+            Ok(time) => time,
+            Err(e) => {
+                error!("Failed to get validator lock time: {:?}", e);
+                return Err(anyhow::anyhow!("Could not verify validator lock time: {}", e));
+            }
+        };
+        
+        if validator_lock_time < min_lock_time {
+            return Err(anyhow::anyhow!(
+                "Insufficient lock time. Required: {} seconds, Current: {} seconds", 
+                min_lock_time, validator_lock_time
+            ));
+        }
+        
+        // Kiểm tra lịch sử hoạt động của validator (nếu đã từng là validator trước đó)
+        let validator_history = match self.get_validator_history(validator_address).await {
+            Ok(history) => history,
+            Err(_) => {
+                debug!("No previous validator history found for: {:?}", validator_address);
+                None
+            }
+        };
+        
+        if let Some(history) = validator_history {
+            // Kiểm tra nếu validator đã từng bị phạt hoặc bị cấm
+            if history.is_banned {
+                return Err(anyhow::anyhow!("Validator is banned from the network"));
+            }
+            
+            if history.penalty_count > MAX_ALLOWED_PENALTIES {
+                return Err(anyhow::anyhow!(
+                    "Validator has too many penalties: {}. Maximum allowed: {}", 
+                    history.penalty_count, MAX_ALLOWED_PENALTIES
+                ));
+            }
+        }
+        
+        // Kiểm tra số lượng validator hiện tại
         let mut validators = self.validators.write().await;
         
         // Kiểm tra số lượng validator tối đa
@@ -84,11 +165,22 @@ impl Validator for ValidatorImpl {
             return Err(anyhow::anyhow!("Validator already registered"));
         }
         
-        // Thêm validator mới
+        // Thực hiện giao dịch để đăng ký validator trên blockchain
+        match self.router.register_validator(pool_address, validator_address).await {
+            Ok(tx_hash) => {
+                info!("Validator registration transaction sent: {:?}", tx_hash);
+            },
+            Err(e) => {
+                error!("Failed to send validator registration transaction: {:?}", e);
+                return Err(anyhow::anyhow!("Failed to register validator on blockchain: {}", e));
+            }
+        }
+        
+        // Thêm validator mới vào danh sách
         validators.push(ValidatorInfo {
             address: validator_address,
-            staked_amount: U256::zero(),
-            start_time: 0,
+            staked_amount: validator_stake,
+            start_time: Self::get_current_time(),
             blocks_validated: 0,
             rewards_earned: U256::zero(),
             is_active: true,

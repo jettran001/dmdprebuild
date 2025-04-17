@@ -86,9 +86,168 @@ pub mod farm;            // Yield farming
 pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
 
 /**
- * Hướng dẫn import:
+ * ===========================================================================================
+ * TẤT CẢ TRAITS VÀ EXPORTS CHÍNH TRONG DOMAIN BLOCKCHAIN
+ * ===========================================================================================
  * 
- * 1. Import từ internal crates:
+ * 1. TRAIT CHÍNH
+ * --------------
+ * 
+ * TokenInterface (smartcontracts/mod.rs):
+ * - Mô tả: Trait cho tương tác với token trên các blockchain khác nhau
+ * - Được implement bởi: BscContractProvider, NearContractProvider, SolanaContractProvider, 
+ *   EthContractProvider, ArbContractProvider, PolygonContractProvider
+ * - Phương thức chính:
+ *   - async fn get_balance(&self, address: &str) -> Result<U256>
+ *   - async fn transfer(&self, private_key: &str, to: &str, amount: U256) -> Result<String>
+ *   - async fn total_supply(&self) -> Result<U256>
+ *   - fn decimals(&self) -> u8
+ *   - fn token_name(&self) -> String
+ *   - fn token_symbol(&self) -> String
+ *   - async fn get_total_supply(&self) -> Result<f64>
+ *   - async fn bridge_to(&self, to_chain: &str, from_account: &str, to_account: &str, amount: f64) -> Result<String>
+ * 
+ * BridgeInterface (smartcontracts/mod.rs):
+ * - Mô tả: Trait cho chức năng bridge token giữa các blockchain
+ * - Được implement bởi: DmdBscBridge
+ * - Phương thức chính:
+ *   - async fn bridge_tokens(&self, private_key: &str, to_address: &str, amount: U256) -> Result<String>
+ *   - async fn check_bridge_status(&self, tx_hash: &str) -> Result<String>
+ *   - async fn estimate_bridge_fee(&self, to_address: &str, amount: U256) -> Result<(U256, U256)>
+ * 
+ * StakePoolManager (stake/mod.rs):
+ * - Mô tả: Trait cho quản lý stake pool
+ * - Phương thức chính:
+ *   - async fn create_pool(&self, config: StakePoolConfig) -> Result<Address>
+ *   - async fn add_token(&self, pool_address: Address, token_address: Address, token_parameters: TokenParameters) -> Result<()>
+ *   - async fn get_pool_info(&self, pool_address: Address) -> Result<StakePoolConfig>
+ *   - async fn stake(&self, pool_address: Address, user_address: Address, amount: U256, lock_time: u64) -> Result<()>
+ *   - async fn unstake(&self, pool_address: Address, user_address: Address) -> Result<()>
+ *   - async fn claim_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>
+ *   - async fn get_user_stake_info(&self, pool_address: Address, user_address: Address) -> Result<UserStakeInfo>
+ * 
+ * StakeManagerFactory (stake/mod.rs):
+ * - Mô tả: Factory để tạo ra các stake manager, cung cấp dependency injection
+ * - Phương thức chính:
+ *   - fn create_stake_manager(&self) -> Arc<dyn StakePoolManager>
+ *   - fn create_farm_manager(&self) -> Arc<dyn StakePoolManager>
+ *   - fn create_validator(&self) -> Arc<dyn Validator>
+ *   - fn create_reward_calculator(&self) -> Arc<dyn RewardCalculator>
+ *   - fn create_staking_router(&self) -> Arc<dyn StakingRouter>
+ * 
+ * StakeConfig (stake/mod.rs):
+ * - Mô tả: Trait cho cấu hình stake, cung cấp các thông số cấu hình cho StakeManager
+ * - Phương thức chính:
+ *   - fn get_cache_ttl(&self) -> u64
+ *   - fn get_chain_id(&self) -> u64
+ *   - fn get_rpc_url(&self) -> String
+ *   - fn get_default_wallet(&self) -> String
+ *   - fn get_keystore_path(&self) -> String
+ *   - async fn get_gas_price(&self) -> Result<U256>
+ *   - fn get_gas_limit(&self) -> U256
+ * 
+ * Validator (stake/validator.rs):
+ * - Mô tả: Trait cho validator trong proof-of-stake
+ * - Phương thức chính:
+ *   - async fn register_validator(&self, pool_address: Address, validator_address: Address) -> Result<()>
+ *   - async fn unregister_validator(&self, pool_address: Address, validator_address: Address) -> Result<()>
+ *   - async fn validate_transaction(&self, pool_address: Address, transaction_hash: &str) -> Result<bool>
+ *   - async fn get_validators(&self, pool_address: Address) -> Result<Vec<ValidatorInfo>>
+ *   - async fn get_validator_info(&self, pool_address: Address, validator_address: Address) -> Result<ValidatorInfo>
+ *   - async fn distribute_validator_rewards(&self, pool_address: Address) -> Result<()>
+ * 
+ * RewardCalculator (stake/rewards.rs):
+ * - Mô tả: Trait cho tính toán phần thưởng trong staking
+ * - Phương thức chính:
+ *   - async fn calculate_pending_rewards(&self, pool: &StakePoolConfig, stake_info: &UserStakeInfo) -> Result<U256>
+ *   - async fn distribute_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>
+ * 
+ * StakingRouter (stake/routers.rs):
+ * - Mô tả: Trait cho router trong staking, xử lý giao tiếp với smart contract
+ * - Phương thức chính:
+ *   - async fn create_pool(&self, config: StakePoolConfig) -> Result<String>
+ *   - async fn add_token_to_pool(&self, pool_address: Address, token_address: Address, token_parameters: TokenParameters) -> Result<String>
+ *   - async fn get_pool_config(&self, pool_address: Address) -> Result<StakePoolConfig>
+ *   - async fn stake_tokens(&self, pool_address: Address, user_address: Address, amount: U256, lock_time: u64) -> Result<String>
+ *   - async fn unstake_tokens(&self, pool_address: Address, user_address: Address) -> Result<String>
+ *   - async fn claim_rewards(&self, pool_address: Address, user_address: Address) -> Result<String>
+ * 
+ * 2. STRUCT CHÍNH VÀ EXPORT
+ * --------------------------
+ * 
+ * smartcontracts/dmd_token.rs:
+ * - DMDToken: Struct chính để tương tác với DMD Token (ERC-1155)
+ * - DmdConfig: Cấu hình cho DMD Token
+ * 
+ * smartcontracts/bsc_contract/mod.rs:
+ * - BscContractProvider: Provider cho BSC blockchain
+ * - BscContractConfig: Cấu hình cho BscContractProvider
+ * - DmdBscContract: Thông tin về DMD token trên BSC
+ * 
+ * stake/mod.rs:
+ * - StakeManager: Quản lý stake pool và rewards
+ * - FarmManager: Quản lý farm liên quan đến staking
+ * - StakePoolConfig: Cấu hình cho stake pool
+ * - UserStakeInfo: Thông tin stake của người dùng
+ * - StakePoolCache: Cache cho stake pools
+ * - TokenParameters: Cấu hình tokenomics cho token trong pool
+ * - DefaultStakeManagerFactory: Triển khai mặc định của StakeManagerFactory
+ * - DefaultStakeConfig: Triển khai mặc định của StakeConfig
+ * 
+ * stake/stake_logic.rs:
+ * - StakeManager: Triển khai của StakePoolManager
+ * - StakeError: Custom error types cho module stake
+ * 
+ * farm/farm_logic.rs:
+ * - FarmManager: Quản lý hệ thống farming
+ * - FarmPoolConfig: Cấu hình của farming pool
+ * - UserFarmInfo: Thông tin farm của người dùng
+ * - FarmError: Enum chứa các lỗi có thể xảy ra trong quá trình farming
+ * 
+ * 3. API VÀ ENTRY POINTS CHÍNH
+ * ----------------------------
+ * 
+ * DMDToken (smartcontracts/dmd_token.rs):
+ * - new(): Tạo mới DMDToken instance 
+ * - get_token_tier(address: &str): Lấy tier của token
+ * - is_token_allowed(address: &str, required_tier: u8): Kiểm tra token có được phép sử dụng dựa trên tier
+ * 
+ * DmdBscBridge (smartcontracts/dmd_bsc_bridge.rs):
+ * - new(): Tạo mới DmdBscBridge instance
+ * - bridge_tokens(): Bridge token từ BSC sang chain khác
+ * 
+ * StakeManager (stake/stake_logic.rs):
+ * - new(): Tạo mới StakeManager
+ * - with_cache_ttl(): Tạo StakeManager với TTL tùy chỉnh
+ * - create_pool(): Tạo pool staking mới
+ * - add_token(): Thêm token vào pool với các tham số
+ * - stake(): Stake token vào pool
+ * - unstake(): Unstake token từ pool
+ * - claim_rewards(): Nhận rewards từ staking
+ * - refresh_cache_if_needed(): Cập nhật cache nếu cần
+ * - invalidate_cache(): Xóa cache cho pool cụ thể
+ * - clear_all_cache(): Xóa toàn bộ cache
+ * 
+ * DefaultStakeManagerFactory (stake/mod.rs):
+ * - new(): Tạo factory mới với config mặc định
+ * - with_config(): Tạo factory với config tùy chỉnh
+ * - create_stake_manager(): Tạo StakeManager mới
+ * - create_farm_manager(): Tạo FarmManager mới
+ * - create_validator(): Tạo Validator mới
+ * - create_reward_calculator(): Tạo RewardCalculator mới
+ * - create_staking_router(): Tạo StakingRouter mới
+ * 
+ * FarmManager (farm/farm_logic.rs):
+ * - new(): Tạo mới FarmManager
+ * - add_pool(): Thêm farming pool mới
+ * - add_liquidity(): Thêm liquidity vào pool
+ * - remove_liquidity(): Rút liquidity từ pool
+ * - harvest(): Thu rewards từ farming
+ * 
+ * 4. HƯỚNG DẪN IMPORT
+ * -------------------
+ * 
+ * Import từ internal crates:
  * - use crate::smartcontracts::dmd_token::DMDToken;
  * - use crate::smartcontracts::dmd_bsc_bridge::DmdBscBridge;
  * - use crate::smartcontracts::bsc_contract::BscContractProvider;
@@ -97,17 +256,18 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * - use crate::smartcontracts::eth_contract::EthContractProvider;
  * - use crate::smartcontracts::arb_contract::ArbContractProvider;
  * - use crate::smartcontracts::polygon_contract::PolygonContractProvider;
- * - use crate::stake::stake_logic::StakeManager;
- * - use crate::stake::farm_logic::FarmManager;
+ * - use crate::stake::StakeManager;
+ * - use crate::stake::FarmManager;
+ * - use crate::stake::{StakePoolManager, StakeManagerFactory, DefaultStakeManagerFactory};
  * - use crate::farm::farm_logic::FarmLogic;
  * 
- * 2. Import từ external crates:
+ * Import từ external crates:
  * - use wallet::walletmanager::api::WalletManagerApi;
  * - use wallet::users::subscription::staking::StakingManager;
  * - use wallet::users::subscription::nft::NftValidator;
  * - use snipebot::chain_adapters::evm_adapter::EvmAdapter;
  * 
- * 3. Import từ third-party libraries:
+ * Import từ third-party libraries:
  * - use ethers::providers::{Provider, Http};
  * - use ethers::contract::Contract;
  * - use ethers::types::{Address, U256, Transaction};
@@ -115,19 +275,8 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * - use tokio::time::{sleep, Duration};
  * - use async_trait::async_trait;
  * - use anyhow::{Result, Context};
- */
-
-// Các trait chính trong blockchain domain:
-/**
- * TokenInterface (smartcontracts/mod.rs):
- * - Trait cho tương tác với token trên các blockchain khác nhau
- * - Được implement bởi: BscContractProvider, NearContractProvider, SolanaContractProvider, EthContractProvider, ArbContractProvider, PolygonContractProvider
- * - Phương thức chính: get_balance, transfer, total_supply, decimals, token_name, token_symbol, get_total_supply, bridge_to
- * 
- * BridgeInterface (smartcontracts/mod.rs):
- * - Trait cho chức năng bridge token giữa các blockchain
- * - Được implement bởi: DmdBscBridge
- * - Phương thức chính: bridge_tokens, check_bridge_status, estimate_bridge_fee
+ * - use thiserror::Error;
+ * - use lazy_static::lazy_static;
  */
 
 // Các cập nhật quan trọng:
@@ -160,4 +309,222 @@ pub mod brigde;          // Bridge giữa các blockchain (đang phát triển)
  * 03-07-2023: Cập nhật smartcontract.rs trong solana_contract để hỗ trợ tương tác với Solana
  * 04-07-2023: Bổ sung các trait bounds Send + Sync + 'static cho TokenInterface và BridgeInterface
  * 05-07-2023: Thêm phương thức bridge_to trong TokenInterface để hỗ trợ bridge tokens giữa các blockchain
+ * 20-07-2023: Cập nhật manifest.rs với thông tin chi tiết về traits, exports và APIs cho sử dụng từ các domain khác
+ * 10-08-2023: Cải thiện module stake/constants.rs để tải cấu hình từ biến môi trường thay vì giá trị cứng trong mã nguồn
+ * 11-08-2023: Thêm custom error types trong stake/stake_logic.rs để cải thiện xử lý lỗi
+ * 12-08-2023: Cải thiện validator.rs để kiểm tra đầy đủ quyền hạn trước khi đăng ký validator
+ * 13-08-2023: Bổ sung validate address trước khi tạo pool trong stake_logic.rs
+ * 14-08-2023: Triển khai dependency injection cho các thành phần trong stake/mod.rs với StakeManagerFactory và StakeConfig
+ * 15-08-2023: Thêm TokenParameters trong stake/mod.rs để cấu hình tokenomics cho token trong pool
+ */
+
+/**
+ * ===========================================================================================
+ * TẤT CẢ TRAITS VÀ EXPORTS CHÍNH TRONG DOMAIN BLOCKCHAIN
+ * ===========================================================================================
+ * 
+ * 1. TRAIT CHÍNH
+ * --------------
+ * 
+ * TokenInterface (smartcontracts/mod.rs):
+ * - Mô tả: Trait cho tương tác với token trên các blockchain khác nhau
+ * - Được implement bởi: BscContractProvider, NearContractProvider, SolanaContractProvider, 
+ *   EthContractProvider, ArbContractProvider, PolygonContractProvider
+ * - Phương thức chính:
+ *   - async fn get_balance(&self, address: &str) -> Result<U256>
+ *   - async fn transfer(&self, private_key: &str, to: &str, amount: U256) -> Result<String>
+ *   - async fn total_supply(&self) -> Result<U256>
+ *   - fn decimals(&self) -> u8
+ *   - fn token_name(&self) -> String
+ *   - fn token_symbol(&self) -> String
+ *   - async fn get_total_supply(&self) -> Result<f64>
+ *   - async fn bridge_to(&self, to_chain: &str, from_account: &str, to_account: &str, amount: f64) -> Result<String>
+ * 
+ * BridgeInterface (smartcontracts/mod.rs):
+ * - Mô tả: Trait cho chức năng bridge token giữa các blockchain
+ * - Được implement bởi: DmdBscBridge
+ * - Phương thức chính:
+ *   - async fn bridge_tokens(&self, private_key: &str, to_address: &str, amount: U256) -> Result<String>
+ *   - async fn check_bridge_status(&self, tx_hash: &str) -> Result<String>
+ *   - async fn estimate_bridge_fee(&self, to_address: &str, amount: U256) -> Result<(U256, U256)>
+ * 
+ * StakePoolManager (stake/mod.rs):
+ * - Mô tả: Trait cho quản lý stake pool
+ * - Phương thức chính:
+ *   - async fn create_pool(&self, config: StakePoolConfig) -> Result<Address>
+ *   - async fn add_token(&self, pool_address: Address, token_address: Address, token_parameters: TokenParameters) -> Result<()>
+ *   - async fn get_pool_info(&self, pool_address: Address) -> Result<StakePoolConfig>
+ *   - async fn stake(&self, pool_address: Address, user_address: Address, amount: U256, lock_time: u64) -> Result<()>
+ *   - async fn unstake(&self, pool_address: Address, user_address: Address) -> Result<()>
+ *   - async fn claim_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>
+ *   - async fn get_user_stake_info(&self, pool_address: Address, user_address: Address) -> Result<UserStakeInfo>
+ * 
+ * StakeManagerFactory (stake/mod.rs):
+ * - Mô tả: Factory để tạo ra các stake manager, cung cấp dependency injection
+ * - Phương thức chính:
+ *   - fn create_stake_manager(&self) -> Arc<dyn StakePoolManager>
+ *   - fn create_farm_manager(&self) -> Arc<dyn StakePoolManager>
+ *   - fn create_validator(&self) -> Arc<dyn Validator>
+ *   - fn create_reward_calculator(&self) -> Arc<dyn RewardCalculator>
+ *   - fn create_staking_router(&self) -> Arc<dyn StakingRouter>
+ * 
+ * StakeConfig (stake/mod.rs):
+ * - Mô tả: Trait cho cấu hình stake, cung cấp các thông số cấu hình cho StakeManager
+ * - Phương thức chính:
+ *   - fn get_cache_ttl(&self) -> u64
+ *   - fn get_chain_id(&self) -> u64
+ *   - fn get_rpc_url(&self) -> String
+ *   - fn get_default_wallet(&self) -> String
+ *   - fn get_keystore_path(&self) -> String
+ *   - async fn get_gas_price(&self) -> Result<U256>
+ *   - fn get_gas_limit(&self) -> U256
+ * 
+ * Validator (stake/validator.rs):
+ * - Mô tả: Trait cho validator trong proof-of-stake
+ * - Phương thức chính:
+ *   - async fn register_validator(&self, pool_address: Address, validator_address: Address) -> Result<()>
+ *   - async fn unregister_validator(&self, pool_address: Address, validator_address: Address) -> Result<()>
+ *   - async fn validate_transaction(&self, pool_address: Address, transaction_hash: &str) -> Result<bool>
+ *   - async fn get_validators(&self, pool_address: Address) -> Result<Vec<ValidatorInfo>>
+ *   - async fn get_validator_info(&self, pool_address: Address, validator_address: Address) -> Result<ValidatorInfo>
+ *   - async fn distribute_validator_rewards(&self, pool_address: Address) -> Result<()>
+ * 
+ * RewardCalculator (stake/rewards.rs):
+ * - Mô tả: Trait cho tính toán phần thưởng trong staking
+ * - Phương thức chính:
+ *   - async fn calculate_pending_rewards(&self, pool: &StakePoolConfig, stake_info: &UserStakeInfo) -> Result<U256>
+ *   - async fn distribute_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>
+ * 
+ * StakingRouter (stake/routers.rs):
+ * - Mô tả: Trait cho router trong staking, xử lý giao tiếp với smart contract
+ * - Phương thức chính:
+ *   - async fn create_pool(&self, config: StakePoolConfig) -> Result<String>
+ *   - async fn add_token_to_pool(&self, pool_address: Address, token_address: Address, token_parameters: TokenParameters) -> Result<String>
+ *   - async fn get_pool_config(&self, pool_address: Address) -> Result<StakePoolConfig>
+ *   - async fn stake_tokens(&self, pool_address: Address, user_address: Address, amount: U256, lock_time: u64) -> Result<String>
+ *   - async fn unstake_tokens(&self, pool_address: Address, user_address: Address) -> Result<String>
+ *   - async fn claim_rewards(&self, pool_address: Address, user_address: Address) -> Result<String>
+ * 
+ * 2. STRUCT CHÍNH VÀ EXPORT
+ * --------------------------
+ * 
+ * smartcontracts/dmd_token.rs:
+ * - DMDToken: Struct chính để tương tác với DMD Token (ERC-1155)
+ * - DmdConfig: Cấu hình cho DMD Token
+ * 
+ * smartcontracts/bsc_contract/mod.rs:
+ * - BscContractProvider: Provider cho BSC blockchain
+ * - BscContractConfig: Cấu hình cho BscContractProvider
+ * - DmdBscContract: Thông tin về DMD token trên BSC
+ * 
+ * stake/mod.rs:
+ * - StakeManager: Quản lý stake pool và rewards
+ * - FarmManager: Quản lý farm liên quan đến staking
+ * - StakePoolConfig: Cấu hình cho stake pool
+ * - UserStakeInfo: Thông tin stake của người dùng
+ * - StakePoolCache: Cache cho stake pools
+ * - TokenParameters: Cấu hình tokenomics cho token trong pool
+ * - DefaultStakeManagerFactory: Triển khai mặc định của StakeManagerFactory
+ * - DefaultStakeConfig: Triển khai mặc định của StakeConfig
+ * 
+ * stake/stake_logic.rs:
+ * - StakeManager: Triển khai của StakePoolManager
+ * - StakeError: Custom error types cho module stake
+ * 
+ * farm/farm_logic.rs:
+ * - FarmManager: Quản lý hệ thống farming
+ * - FarmPoolConfig: Cấu hình của farming pool
+ * - UserFarmInfo: Thông tin farm của người dùng
+ * - FarmError: Enum chứa các lỗi có thể xảy ra trong quá trình farming
+ * 
+ * 3. API VÀ ENTRY POINTS CHÍNH
+ * ----------------------------
+ * 
+ * DMDToken (smartcontracts/dmd_token.rs):
+ * - new(): Tạo mới DMDToken instance 
+ * - get_token_tier(address: &str): Lấy tier của token
+ * - is_token_allowed(address: &str, required_tier: u8): Kiểm tra token có được phép sử dụng dựa trên tier
+ * 
+ * DmdBscBridge (smartcontracts/dmd_bsc_bridge.rs):
+ * - new(): Tạo mới DmdBscBridge instance
+ * - bridge_tokens(): Bridge token từ BSC sang chain khác
+ * 
+ * StakeManager (stake/stake_logic.rs):
+ * - new(): Tạo mới StakeManager
+ * - with_cache_ttl(): Tạo StakeManager với TTL tùy chỉnh
+ * - create_pool(): Tạo pool staking mới
+ * - add_token(): Thêm token vào pool với các tham số
+ * - stake(): Stake token vào pool
+ * - unstake(): Unstake token từ pool
+ * - claim_rewards(): Nhận rewards từ staking
+ * - refresh_cache_if_needed(): Cập nhật cache nếu cần
+ * - invalidate_cache(): Xóa cache cho pool cụ thể
+ * - clear_all_cache(): Xóa toàn bộ cache
+ * 
+ * DefaultStakeManagerFactory (stake/mod.rs):
+ * - new(): Tạo factory mới với config mặc định
+ * - with_config(): Tạo factory với config tùy chỉnh
+ * - create_stake_manager(): Tạo StakeManager mới
+ * - create_farm_manager(): Tạo FarmManager mới
+ * - create_validator(): Tạo Validator mới
+ * - create_reward_calculator(): Tạo RewardCalculator mới
+ * - create_staking_router(): Tạo StakingRouter mới
+ * 
+ * FarmManager (farm/farm_logic.rs):
+ * - new(): Tạo mới FarmManager
+ * - add_pool(): Thêm farming pool mới
+ * - add_liquidity(): Thêm liquidity vào pool
+ * - remove_liquidity(): Rút liquidity từ pool
+ * - harvest(): Thu rewards từ farming
+ * 
+ * 4. HƯỚNG DẪN IMPORT
+ * -------------------
+ * 
+ * Import từ internal crates:
+ * - use crate::smartcontracts::dmd_token::DMDToken;
+ * - use crate::smartcontracts::dmd_bsc_bridge::DmdBscBridge;
+ * - use crate::smartcontracts::bsc_contract::BscContractProvider;
+ * - use crate::smartcontracts::near_contract::NearContractProvider;
+ * - use crate::smartcontracts::solana_contract::SolanaContractProvider; 
+ * - use crate::smartcontracts::eth_contract::EthContractProvider;
+ * - use crate::smartcontracts::arb_contract::ArbContractProvider;
+ * - use crate::smartcontracts::polygon_contract::PolygonContractProvider;
+ * - use crate::stake::StakeManager;
+ * - use crate::stake::FarmManager;
+ * - use crate::stake::{StakePoolManager, StakeManagerFactory, DefaultStakeManagerFactory};
+ * - use crate::farm::farm_logic::FarmLogic;
+ * 
+ * Import từ external crates:
+ * - use wallet::walletmanager::api::WalletManagerApi;
+ * - use wallet::users::subscription::staking::StakingManager;
+ * - use wallet::users::subscription::nft::NftValidator;
+ * - use snipebot::chain_adapters::evm_adapter::EvmAdapter;
+ * 
+ * Import từ third-party libraries:
+ * - use ethers::providers::{Provider, Http};
+ * - use ethers::contract::Contract;
+ * - use ethers::types::{Address, U256, Transaction};
+ * - use ethers::abi::{Abi, Function, Token};
+ * - use tokio::time::{sleep, Duration};
+ * - use async_trait::async_trait;
+ * - use anyhow::{Result, Context};
+ * - use thiserror::Error;
+ * - use lazy_static::lazy_static;
+ */
+
+/**
+ * FLOW GỌI TỪ DOMAIN KHÁC VÀO BLOCKCHAIN:
+ * ---------------------------------------
+ * 
+ * 1. Từ wallet -> blockchain:
+ *    - Wallet gọi các phương thức trong TokenInterface để tương tác với DMD token
+ *    - Wallet sử dụng BridgeInterface để chuyển token giữa các blockchain
+ * 
+ * 2. Từ snipebot -> blockchain:
+ *    - Snipebot sử dụng TokenInterface để kiểm tra balance, thông tin token
+ *    - Snipebot gọi các phương thức trong BscContractProvider, EthContractProvider để tương tác với blockchain cụ thể
+ * 
+ * 3. Từ diamond_manager -> blockchain:
+ *    - Diamond manager sử dụng StakeManager để quản lý staking
+ *    - Diamond manager sử dụng FarmManager để quản lý farming
  */

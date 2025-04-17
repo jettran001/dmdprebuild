@@ -3,7 +3,7 @@
 // Module này chứa các hàm và cấu trúc dữ liệu để tương tác với smart contract DMD Token trên NEAR
 // Sử dụng chuẩn token NEP-141 (Fungible Token) và hỗ trợ bridge qua LayerZero
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, Context};
 use near_sdk::json_types::U128;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
@@ -18,12 +18,67 @@ use base64;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+// Sử dụng trait thay vì implement trực tiếp
 use crate::smartcontracts::TokenInterface;
-// Sử dụng DmdChain từ module smartcontract thay vì từ dmd_token
-use self::smartcontract::DmdChain;
 
 // Đưa code từ smartcontract.rs vào không gian tên của module
 pub mod smartcontract;
+
+// Re-export enum quan trọng từ module smartcontract
+pub use self::smartcontract::DmdChain;
+
+// Định nghĩa các lỗi đặc trưng cho NEAR provider
+#[derive(Debug, thiserror::Error)]
+pub enum NearProviderError {
+    #[error("RPC error: {0}")]
+    RpcError(String),
+    
+    #[error("Invalid account ID: {0}")]
+    InvalidAccountId(String),
+    
+    #[error("Contract execution failed: {0}")]
+    ContractExecutionFailed(String),
+    
+    #[error("Timeout error: request took too long")]
+    Timeout,
+    
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    
+    #[error("Bridge error: {0}")]
+    BridgeError(String),
+    
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+    
+    #[error("Not found: {0}")]
+    NotFound(String),
+}
+
+// Helper trait để chuyển đổi các lỗi thông thường thành NearProviderError
+pub trait IntoNearError<T> {
+    fn into_near_error(self, context: &str) -> Result<T, NearProviderError>;
+}
+
+// Implement cho Result<T, E> để chuyển đổi lỗi
+impl<T, E: std::error::Error> IntoNearError<T> for Result<T, E> {
+    fn into_near_error(self, context: &str) -> Result<T, NearProviderError> {
+        self.map_err(|e| {
+            if e.to_string().contains("timeout") {
+                NearProviderError::Timeout
+            } else if e.to_string().contains("network") {
+                NearProviderError::NetworkError(format!("{}: {}", context, e))
+            } else if e.to_string().contains("parse") || e.to_string().contains("invalid") {
+                NearProviderError::ParseError(format!("{}: {}", context, e))
+            } else {
+                NearProviderError::RpcError(format!("{}: {}", context, e))
+            }
+        })
+    }
+}
 
 /// Cấu hình cho NEAR contract
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +138,15 @@ pub struct NearContractProvider {
     config: NearContractConfig,
 }
 
+// Định nghĩa trait riêng cho NEAR operations
+pub trait NearOperations: Send + Sync {
+    fn get_config(&self) -> &NearContractConfig;
+    fn validate_near_account(&self, account_id: &str) -> Result<()>;
+    async fn query_contract(&self, method_name: &str, args: &serde_json::Value) -> Result<serde_json::Value>;
+    async fn execute_near_transaction(&self, private_key: &str, receiver_id: &str, method_name: &str, amount: u128) -> Result<String>;
+    async fn verify_transaction_status(&self, tx_hash: String) -> Result<bool>;
+}
+
 impl NearContractProvider {
     /// Tạo một instance mới của NEAR contract provider
     pub async fn new(config: Option<NearContractConfig>) -> Result<Self> {
@@ -129,6 +193,211 @@ impl NearContractProvider {
         Ok(provider)
     }
     
+    /// Gửi HTTP request đến NEAR RPC với retry logic nhất quán
+    async fn send_rpc_request(&self, request: serde_json::Value, max_retry: usize) -> Result<serde_json::Value> {
+        use tokio::time::timeout;
+        
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(self.config.timeout_ms))
+            .build()
+            .context("Failed to create HTTP client")?;
+            
+        let mut last_error = None;
+        
+        for attempt in 0..max_retry {
+            // Log thông tin thử lại
+            if attempt > 0 {
+                info!("Thử lại RPC request lần {}/{}", attempt + 1, max_retry);
+            }
+            
+            // Tạo timeout cho request
+            let request_future = client.post(&self.config.rpc_url)
+                .json(&request)
+                .send();
+                
+            let timeout_duration = Duration::from_millis(self.config.timeout_ms);
+            let response = match timeout(timeout_duration, request_future).await {
+                Ok(result) => match result {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let error_msg = format!("Lỗi kết nối: {}", e);
+                        error!("{} (lần {}/{})", error_msg, attempt + 1, max_retry);
+                        last_error = Some(NearProviderError::NetworkError(error_msg));
+                        
+                        if attempt < max_retry - 1 {
+                            let delay = Duration::from_millis(500 * (attempt as u64 + 1));
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        } else {
+                            return Err(last_error.unwrap().into());
+                        }
+                    }
+                },
+                Err(_) => {
+                    let error_msg = "Request timeout".to_string();
+                    error!("{} (lần {}/{})", error_msg, attempt + 1, max_retry);
+                    last_error = Some(NearProviderError::Timeout);
+                    
+                    if attempt < max_retry - 1 {
+                        let delay = Duration::from_millis(500 * (attempt as u64 + 1));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap().into());
+                    }
+                }
+            };
+            
+            // Kiểm tra HTTP status
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await
+                    .unwrap_or_else(|_| format!("HTTP Status {}", status));
+                
+                let error_msg = format!("NEAR RPC trả về lỗi HTTP: {}", error_text);
+                error!("{} (lần {}/{})", error_msg, attempt + 1, max_retry);
+                last_error = Some(NearProviderError::RpcError(error_msg));
+                
+                if attempt < max_retry - 1 {
+                    let delay = Duration::from_millis(500 * (attempt as u64 + 1));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                } else {
+                    return Err(last_error.unwrap().into());
+                }
+            }
+            
+            // Parse JSON response
+            let response_json: serde_json::Value = match response.json().await {
+                Ok(json) => json,
+                Err(e) => {
+                    let error_msg = format!("Lỗi khi phân tích JSON: {}", e);
+                    error!("{} (lần {}/{})", error_msg, attempt + 1, max_retry);
+                    last_error = Some(NearProviderError::ParseError(error_msg));
+                    
+                    if attempt < max_retry - 1 {
+                        let delay = Duration::from_millis(500 * (attempt as u64 + 1));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    } else {
+                        return Err(last_error.unwrap().into());
+                    }
+                }
+            };
+            
+            // Kiểm tra lỗi từ RPC
+            if let Some(error) = response_json.get("error") {
+                let error_msg = format!("NEAR RPC error: {:?}", error);
+                error!("{} (lần {}/{})", error_msg, attempt + 1, max_retry);
+                last_error = Some(NearProviderError::RpcError(error_msg));
+                
+                if attempt < max_retry - 1 {
+                    let delay = Duration::from_millis(500 * (attempt as u64 + 1));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                } else {
+                    return Err(last_error.unwrap().into());
+                }
+            }
+            
+            // Trả về kết quả thành công
+            return Ok(response_json);
+        }
+        
+        // Nếu đến đây có nghĩa là tất cả các lần thử đều thất bại
+        Err(last_error.unwrap_or(NearProviderError::RpcError("Unknown RPC error".into())).into())
+    }
+}
+
+// Implement NearOperations cho NearContractProvider
+impl NearOperations for NearContractProvider {
+    fn get_config(&self) -> &NearContractConfig {
+        &self.config
+    }
+    
+    fn validate_near_account(&self, account_id: &str) -> Result<()> {
+        if account_id.is_empty() {
+            return Err(NearProviderError::InvalidAccountId("Account ID không được để trống".into()).into());
+        }
+        
+        // Kiểm tra định dạng account Near
+        if !account_id.ends_with(".near") && !account_id.ends_with(".testnet") && !account_id.contains(".") {
+            warn!("Địa chỉ NEAR không theo định dạng chuẩn: {}", account_id);
+        }
+        
+        Ok(())
+    }
+    
+    async fn query_contract(&self, method_name: &str, args: &serde_json::Value) -> Result<serde_json::Value> {
+        info!("Gọi method {} trên contract {}", method_name, self.config.contract_id);
+        
+        let args_base64 = base64::encode(args.to_string());
+        
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": method_name,
+            "method": "query",
+            "params": {
+                "request_type": "call_function",
+                "finality": "final",
+                "account_id": self.config.contract_id,
+                "method_name": method_name,
+                "args_base64": args_base64
+            }
+        });
+        
+        let response = self.send_rpc_request(request, 3).await?;
+        
+        if let Some(result) = response.get("result") {
+            Ok(result.clone())
+        } else {
+            Err(NearProviderError::RpcError("Missing 'result' field in response".into()).into())
+        }
+    }
+    
+    async fn execute_near_transaction(&self, private_key: &str, receiver_id: &str, method_name: &str, amount: u128) -> Result<String> {
+        if private_key.is_empty() {
+            return Err(NearProviderError::AuthError("Private key không được để trống".into()).into());
+        }
+        
+        self.validate_near_account(receiver_id)?;
+        
+        // TODO: Implement transaction execution
+        // Vì việc triển khai thực tế yêu cầu nhiều chi tiết về cách NEAR ký và gửi giao dịch,
+        // chúng ta sẽ trả về dummy result
+        
+        let tx_hash = format!("near-tx-{}-{}-{}", receiver_id, method_name, SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis());
+            
+        Ok(tx_hash)
+    }
+    
+    async fn verify_transaction_status(&self, tx_hash: String) -> Result<bool> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "dontcare",
+            "method": "tx",
+            "params": [tx_hash, self.config.contract_id]
+        });
+        
+        let response = self.send_rpc_request(request, 3).await?;
+        
+        // Check if the transaction was successful
+        if let Some(status) = response.get("result").and_then(|r| r.get("status")) {
+            if let Some(success) = status.get("SuccessValue") {
+                return Ok(true);
+            } else if status.get("Failure").is_some() {
+                return Ok(false);
+            }
+        }
+        
+        Err(NearProviderError::NotFound("Transaction information not found".into()).into())
+    }
+}
+
+impl NearContractProvider {
     /// Lấy tổng cung của token với cơ chế cache và retry
     async fn get_total_supply(&self) -> Result<ethers::types::U256> {
         // Định nghĩa giá trị mặc định và thời gian cache
@@ -223,7 +492,7 @@ impl NearContractProvider {
         }
         
         // Lấy cấu hình RPC
-        let config = self.get_rpc_config()?;
+        let config = self.get_config();
         
         // Khởi tạo HTTP client với timeout
         let client = reqwest::Client::builder()
@@ -549,7 +818,7 @@ impl NearContractProvider {
         }
         
         // Get RPC configuration
-        let config = self.get_rpc_config()?;
+        let config = self.get_config();
         
         // Initialize HTTP client
         let client = reqwest::Client::builder()
@@ -916,32 +1185,6 @@ impl NearContractProvider {
         Ok(tx_hash)
     }
     
-    /// Kiểm tra trạng thái transaction
-    async fn verify_transaction_status(&self, tx_hash: String) -> Result<bool> {
-        if tx_hash.starts_with("BridgeTxNear") {
-            // Mô phỏng kiểm tra transaction
-            // 80% cơ hội transaction thành công
-            if rand::random::<u8>() < 204 { // ~80% of 255
-                return Ok(true);
-            } else {
-                return Ok(false);
-            }
-        }
-        
-        // Trong triển khai thực tế, gửi request đến NEAR RPC để kiểm tra trạng thái
-        #[cfg(feature = "near_sdk")]
-        {
-            // Code này sẽ chỉ được biên dịch khi feature "near_sdk" được bật
-            /*
-            let client = JsonRpcClient::connect(&self.config.rpc_url);
-            let result = client.tx_status(tx_hash, AccountId::from_str(&self.config.contract_id)?).await?;
-            return Ok(result.status.is_success());
-            */
-        }
-        
-        Ok(false)
-    }
-    
     /// Ước tính phí bridge
     pub async fn estimate_bridge_fee(&self, to_chain: DmdChain) -> Result<u128> {
         match to_chain {
@@ -973,7 +1216,7 @@ impl NearContractProvider {
         info!("Khởi tạo kết nối LayerZero cho NEAR bridge");
         
         // Lấy cấu hình RPC
-        let config = self.get_rpc_config()?;
+        let config = self.get_config();
         
         // Khởi tạo HTTP client
         let client = reqwest::Client::new();
@@ -1037,7 +1280,7 @@ impl NearContractProvider {
         info!("Đăng ký contract với LayerZero endpoint");
         
         // Lấy cấu hình RPC
-        let config = self.get_rpc_config()?;
+        let config = self.get_config();
         
         // Khởi tạo HTTP client
         let client = reqwest::Client::new();
@@ -1102,7 +1345,7 @@ impl NearContractProvider {
         ];
         
         // Lấy cấu hình RPC
-        let config = self.get_rpc_config()?;
+        let config = self.get_config();
         
         // Khởi tạo HTTP client
         let client = reqwest::Client::new();
