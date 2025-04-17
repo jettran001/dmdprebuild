@@ -107,13 +107,13 @@ impl TronConfig {
         self.rpc_url = url.to_string();
         self
     }
-    
+
     /// Cập nhật timeout
     pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = timeout_ms;
         self
     }
-    
+
     /// Cập nhật số lần retry tối đa
     pub fn with_max_retries(mut self, max_retries: u8) -> Self {
         self.max_retries = max_retries;
@@ -173,7 +173,7 @@ impl TronProvider {
             ChainId::TronMainnet | ChainId::TronNile | ChainId::TronShasta => {},
             _ => return Err(DefiError::ChainNotSupported(format!("Expected Tron chains, got {:?}", chain_id))),
         }
-        
+
         // Thử lấy từ cache trước
         {
             let cache = TRON_PROVIDER_CACHE.read().await;
@@ -181,21 +181,21 @@ impl TronProvider {
                 return Ok(provider.clone());
             }
         }
-        
+
         // Nếu không có trong cache, tạo mới
         let config = TronConfig::new(chain_id);
         let provider = Self::new(config)?;
         let provider = Arc::new(provider);
-        
+
         // Lưu vào cache
         {
             let mut cache = TRON_PROVIDER_CACHE.write().await;
             cache.insert(chain_id, provider.clone());
         }
-        
+
         Ok(provider)
     }
-    
+
     /// Thiết lập TTL mặc định cho cache
     pub fn set_default_cache_ttl(&mut self, ttl_seconds: u64) {
         self.default_cache_ttl = ttl_seconds;

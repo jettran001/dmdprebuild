@@ -58,6 +58,10 @@ pub trait Validator: Send + Sync {
 pub struct ValidatorImpl {
     /// Cache cho validators
     validators: Arc<RwLock<Vec<ValidatorInfo>>>,
+    /// Stake manager để tương tác với các stake pools
+    stake_manager: Arc<dyn super::StakePoolManager>,
+    /// Router để tương tác với các smart contracts
+    router: Arc<dyn super::StakingRouter>,
 }
 
 impl ValidatorImpl {
@@ -65,7 +69,84 @@ impl ValidatorImpl {
     pub fn new() -> Self {
         Self {
             validators: Arc::new(RwLock::new(Vec::new())),
+            stake_manager: Arc::new(super::StakeManager::new(
+                Arc::new(Self::default_validator()),
+                Arc::new(super::rewards::StandardRewardCalculator::new(Arc::new(Self::default_validator()))),
+                Arc::new(super::routers::StakingRouterImpl::new()),
+            )),
+            router: Arc::new(super::routers::StakingRouterImpl::new()),
         }
+    }
+    
+    /// Tạo validator mới với stake manager và router
+    pub fn with_dependencies(
+        stake_manager: Arc<dyn super::StakePoolManager>,
+        router: Arc<dyn super::StakingRouter>,
+    ) -> Self {
+        Self {
+            validators: Arc::new(RwLock::new(Vec::new())),
+            stake_manager,
+            router,
+        }
+    }
+    
+    /// Tạo validator mặc định cho khởi tạo đệ quy
+    fn default_validator() -> Self {
+        Self {
+            validators: Arc::new(RwLock::new(Vec::new())),
+            stake_manager: Arc::new(super::StakeManager::default()),
+            router: Arc::new(super::routers::StakingRouterImpl::new()),
+        }
+    }
+}
+
+/// Cấu trúc cho lịch sử validator
+#[derive(Debug, Clone)]
+pub struct ValidatorHistory {
+    /// Có bị cấm không
+    pub is_banned: bool,
+    /// Số lần bị phạt
+    pub penalty_count: u32,
+    /// Lý do bị phạt
+    pub penalty_reasons: Vec<String>,
+    /// Thời gian bị phạt cuối
+    pub last_penalty_time: u64,
+}
+
+impl ValidatorImpl {
+    /// Lấy lịch sử của validator
+    pub async fn get_validator_history(&self, validator_address: Address) -> Result<Option<ValidatorHistory>> {
+        // Kiểm tra trong cache local
+        let validators = self.validators.read().await;
+        if let Some(validator) = validators.iter().find(|v| v.address == validator_address) {
+            // Nếu validator đã có trong hệ thống, kiểm tra lịch sử
+            // TODO: Trong thực tế, cần truy vấn blockchain hoặc database
+            
+            // Mẫu dữ liệu testing
+            if validator_address == Address::zero() {
+                return Ok(Some(ValidatorHistory {
+                    is_banned: true,
+                    penalty_count: *MAX_ALLOWED_PENALTIES + 1,
+                    penalty_reasons: vec!["Test banned validator".to_string()],
+                    last_penalty_time: Self::get_current_time(),
+                }));
+            }
+            
+            // Trả về None nếu không tìm thấy lịch sử penalty
+            return Ok(None);
+        }
+        
+        // Nếu không có trong cache, truy vấn từ blockchain
+        // TODO: Implement truy vấn từ blockchain
+        Ok(None)
+    }
+    
+    /// Lấy thời gian hiện tại (timestamp)
+    fn get_current_time() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 }
 

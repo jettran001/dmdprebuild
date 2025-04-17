@@ -163,48 +163,161 @@ impl FarmManager for FarmManagerImpl {
 
     async fn remove_liquidity(&self, pool_address: Address, user_address: Address) -> Result<()> {
         // Lấy thông tin farm
-        let farm_info = if let Some(info) = self.user_farms.read().await
-            .iter()
+        let user_farms = self.user_farms.read().await;
+        let farm_info = user_farms.iter()
             .find(|f| f.user_address == user_address)
-            .cloned()
-        {
+            .cloned();
+            
+        drop(user_farms); // Giải phóng lock read trước khi dùng write lock
+        
+        let farm_info = if let Some(info) = farm_info {
             info
         } else {
-            return Err(anyhow::anyhow!("No farm found"));
+            return Err(anyhow::anyhow!("No farm found for user"));
         };
         
-        // TODO: Implement logic remove liquidity
-        // 1. Gọi smart contract
-        // 2. Xác thực giao dịch
-        // 3. Cập nhật cache
+        // Lấy thông tin pool
+        let pool = self.get_farm_pool_info(pool_address).await?;
         
-        info!("User removed liquidity: {:?}", user_address);
-        Ok(())
+        // Tương tác với smart contract để remove liquidity
+        // Trong triển khai thực tế, cần gọi smart contract để thực hiện unstake
+        info!("Executing remove_liquidity transaction for user: {:?}", user_address);
+        
+        let transaction_result = self.execute_remove_liquidity_transaction(
+            pool_address, 
+            user_address, 
+            farm_info.farmed_amount
+        ).await;
+        
+        match transaction_result {
+            Ok(tx_hash) => {
+        info!(
+                    "Remove liquidity transaction successful: txHash={:?}, user={:?}, amount={:?}", 
+                    tx_hash, user_address, farm_info.farmed_amount
+                );
+                
+                // Cập nhật state sau khi transaction thành công
+                let mut user_farms = self.user_farms.write().await;
+                
+                // Tìm và xóa farm info
+                if let Some(index) = user_farms.iter().position(|f| f.user_address == user_address) {
+                    user_farms.remove(index);
+                    
+                    // Cập nhật tổng liquidity của pool
+                    let mut pools = self.farm_pools.write().await;
+                    if let Some(pool_index) = pools.iter().position(|p| p.address == pool_address) {
+                        if let Some(new_total) = pools[pool_index].total_farmed.checked_sub(farm_info.farmed_amount) {
+                            pools[pool_index].total_farmed = new_total;
+                        }
+                    }
+                }
+                
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to execute remove_liquidity transaction: {:?}", e);
+                Err(anyhow::anyhow!("Transaction failed: {:?}", e))
+            }
+        }
+    }
+
+    /// Execute transaction for removing liquidity
+    async fn execute_remove_liquidity_transaction(
+        &self, 
+        pool_address: Address, 
+        user_address: Address, 
+        amount: U256
+    ) -> Result<String> {
+        // Triển khai thực tế - gọi contract để thực hiện unstake
+        // Đây là giả lập để development
+        
+        // Giả lập delay của blockchain
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        
+        // Trả về tx_hash giả
+        Ok(format!("0x{:x}{:x}{:x}", pool_address, user_address, amount))
     }
 
     async fn claim_farming_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256> {
         // Lấy thông tin farm
-        let farm_info = if let Some(info) = self.user_farms.read().await
-            .iter()
+        let user_farms = self.user_farms.read().await;
+        let farm_info = user_farms.iter()
             .find(|f| f.user_address == user_address)
-            .cloned()
-        {
+            .cloned();
+            
+        drop(user_farms); // Giải phóng lock read
+        
+        let farm_info = if let Some(info) = farm_info {
             info
         } else {
-            return Err(anyhow::anyhow!("No farm found"));
+            return Err(anyhow::anyhow!("No farm found for user"));
         };
         
         if farm_info.pending_rewards == U256::zero() {
             return Ok(U256::zero());
         }
 
-        // TODO: Implement logic claim rewards
-        // 1. Gọi smart contract
-        // 2. Xác thực giao dịch
-        // 3. Cập nhật cache
+        // Thực hiện giao dịch claim rewards
+        info!("Executing claim_rewards transaction for user: {:?}", user_address);
         
-        info!("User claimed farming rewards: {:?}, amount: {:?}", user_address, farm_info.pending_rewards);
-        Ok(farm_info.pending_rewards)
+        let rewards_amount = farm_info.pending_rewards;
+        let transaction_result = self.execute_claim_rewards_transaction(
+            pool_address, 
+            user_address, 
+            rewards_amount
+        ).await;
+        
+        match transaction_result {
+            Ok(tx_hash) => {
+                info!(
+                    "Claim rewards transaction successful: txHash={:?}, user={:?}, amount={:?}", 
+                    tx_hash, user_address, rewards_amount
+                );
+                
+                // Cập nhật state sau khi transaction thành công
+                let mut user_farms = self.user_farms.write().await;
+                
+                // Tìm và cập nhật farm info
+                if let Some(index) = user_farms.iter().position(|f| f.user_address == user_address) {
+                    // Cập nhật rewards đã claim và đang pending
+                    user_farms[index].claimed_rewards = user_farms[index].claimed_rewards
+                        .checked_add(rewards_amount)
+                        .unwrap_or(user_farms[index].claimed_rewards);
+                    user_farms[index].pending_rewards = U256::zero();
+                }
+                
+                // Cập nhật thông tin pool
+                let mut pools = self.farm_pools.write().await;
+                if let Some(pool_index) = pools.iter().position(|p| p.address == pool_address) {
+                    pools[pool_index].total_rewards_distributed = pools[pool_index].total_rewards_distributed
+                        .checked_add(rewards_amount)
+                        .unwrap_or(pools[pool_index].total_rewards_distributed);
+                }
+                
+                Ok(rewards_amount)
+            },
+            Err(e) => {
+                error!("Failed to execute claim_rewards transaction: {:?}", e);
+                Err(anyhow::anyhow!("Transaction failed: {:?}", e))
+            }
+        }
+    }
+
+    /// Execute transaction for claiming rewards
+    async fn execute_claim_rewards_transaction(
+        &self, 
+        pool_address: Address, 
+        user_address: Address, 
+        amount: U256
+    ) -> Result<String> {
+        // Triển khai thực tế - gọi contract để thực hiện claim rewards
+        // Đây là giả lập để development
+        
+        // Giả lập delay của blockchain
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        
+        // Trả về tx_hash giả
+        Ok(format!("0x{:x}{:x}{:x}", pool_address, user_address, amount))
     }
 
     async fn get_farm_pool_info(&self, pool_address: Address) -> Result<FarmPoolConfig> {

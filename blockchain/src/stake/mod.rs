@@ -13,6 +13,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use ethers::types::{Address, U256};
 use tracing::{info, warn, error};
+use reqwest;
+use serde_json;
 
 mod stake_logic;
 mod farm_logic;
@@ -248,7 +250,60 @@ impl StakeConfig for DefaultStakeConfig {
     
     async fn get_gas_price(&self) -> Result<U256> {
         // TODO: Implement gas price fetching
-        Ok(U256::from(5_000_000_000u64)) // 5 Gwei
+        match self.chain_id {
+            1 => {
+                // Ethereum mainnet
+                // Sử dụng ethers-rs hoặc web3 để truy vấn gas price
+                // Đây là ví dụ sử dụng reqwest để gọi API
+                
+                let client = reqwest::Client::new();
+                let res = client.post(&self.rpc_url)
+                    .json(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "eth_gasPrice",
+                        "params": [],
+                        "id": 1
+                    }))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to fetch gas price: {}", e))?;
+                
+                let response: serde_json::Value = res.json()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                
+                if let Some(result) = response.get("result").and_then(|v| v.as_str()) {
+                    // Chuyển đổi từ hex string sang U256
+                    let gas_price = U256::from_str_radix(result.trim_start_matches("0x"), 16)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse gas price: {}", e))?;
+                    
+                    info!("Fetched gas price: {:?} wei", gas_price);
+                    return Ok(gas_price);
+                } else if let Some(error) = response.get("error") {
+                    return Err(anyhow::anyhow!("RPC error: {:?}", error));
+                }
+                
+                // Fallback to default if API fails
+                warn!("Using default gas price due to API response issues");
+                Ok(U256::from(20_000_000_000u64)) // 20 Gwei
+            },
+            56 => {
+                // Binance Smart Chain
+                // BSC thường có gas price cố định thấp hơn
+                Ok(U256::from(5_000_000_000u64)) // 5 Gwei
+            },
+            137 => {
+                // Polygon
+                // Polygon thường có gas price thấp hơn nhiều
+                Ok(U256::from(30_000_000_000u64)) // 30 Gwei
+            },
+            _ => {
+                // Chain ID không được hỗ trợ, sử dụng giá trị mặc định
+                warn!("Unsupported chain ID for gas price: {}, using default", self.chain_id);
+                Ok(U256::from(20_000_000_000u64)) // 20 Gwei
+            }
+        }
     }
     
     fn get_gas_limit(&self) -> U256 {

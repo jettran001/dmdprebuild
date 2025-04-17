@@ -133,7 +133,112 @@ impl StakingRouter for StakingRouterImpl {
         // 1. Lấy thông tin pool mới nhất
         // 2. Tính toán APY và thời gian lock tối ưu
         // 3. Cập nhật cache
+
+        // Triển khai thực tế
+        let mut routing_cache = self.routing_cache.write().await;
+        
+        // Tìm xem pool đã tồn tại trong cache chưa
+        let pool_index = routing_cache.iter().position(|r| r.pool_address == pool_address);
+        
+        // Lấy thông tin pool từ blockchain hoặc database
+        // Trong triển khai thực tế, cần gọi contract để lấy thông tin mới nhất
+        let pool_info = self.fetch_pool_info_from_blockchain(pool_address).await?;
+        
+        let optimal_lock_time = self.calculate_optimal_lock_time(&pool_info);
+        let expected_apy = self.calculate_expected_apy(&pool_info);
+        let optimal_amount = self.calculate_optimal_stake_amount(&pool_info);
+        
+        let route_info = RouteInfo {
+            pool_address,
+            expected_apy,
+            suggested_lock_time: optimal_lock_time,
+            optimal_amount,
+        };
+        
+        // Cập nhật cache
+        if let Some(index) = pool_index {
+            routing_cache[index] = route_info;
+            info!("Updated routing info for pool: {:?}", pool_address);
+        } else {
+            routing_cache.push(route_info);
+            info!("Added new routing info for pool: {:?}", pool_address);
+        }
+        
         Ok(())
+    }
+
+    /// Lấy thông tin pool từ blockchain
+    async fn fetch_pool_info_from_blockchain(&self, pool_address: Address) -> Result<super::StakePoolConfig> {
+        // TODO: Triển khai thực tế - gọi contract để lấy thông tin
+        
+        // Mock data cho development và testing
+        let pool_info = super::StakePoolConfig {
+            address: pool_address,
+            token_address: Address::zero(), // Cần thay thế với địa chỉ thực tế
+            min_lock_time: *super::constants::MIN_LOCK_TIME,
+            current_apy: 10.0, // APY mặc định: 10%
+            total_staked: U256::from(1_000_000_000_000_000_000u128), // 1 ETH
+            max_validators: *super::constants::MAX_VALIDATORS,
+        };
+        
+        Ok(pool_info)
+    }
+    
+    /// Tính toán thời gian lock tối ưu
+    fn calculate_optimal_lock_time(&self, pool: &super::StakePoolConfig) -> u64 {
+        // Thuật toán đơn giản: chọn thời gian lock giữa min và max
+        let min_lock_time = *super::constants::MIN_LOCK_TIME;
+        let max_lock_time = *super::constants::MAX_LOCK_TIME;
+        
+        // Nếu APY cao, khuyến khích lock thời gian ngắn hơn
+        // Nếu APY thấp, khuyến khích lock thời gian dài hơn
+        let optimal_ratio = if pool.current_apy > 15.0 {
+            0.3 // Chỉ 30% khoảng thời gian
+        } else if pool.current_apy > 10.0 {
+            0.5 // 50% khoảng thời gian
+        } else {
+            0.7 // 70% khoảng thời gian
+        };
+        
+        let lock_range = max_lock_time - min_lock_time;
+        min_lock_time + (lock_range as f64 * optimal_ratio) as u64
+    }
+    
+    /// Tính toán APY dự kiến
+    fn calculate_expected_apy(&self, pool: &super::StakePoolConfig) -> f64 {
+        // Trong triển khai thực tế, cần tính toán APY dựa trên nhiều yếu tố:
+        // - Lịch sử APY
+        // - Độ biến động thị trường
+        // - Trạng thái pool hiện tại
+        
+        // Đơn giản chỉ dùng current APY
+        pool.current_apy
+    }
+    
+    /// Tính toán số lượng token stake tối ưu
+    fn calculate_optimal_stake_amount(&self, pool: &super::StakePoolConfig) -> U256 {
+        // Trong triển khai thực tế, tính toán số lượng stake tối ưu dựa trên:
+        // - Tổng số token đã stake
+        // - Ảnh hưởng của việc thêm liquidity mới
+        // - Phân phối rewards
+        
+        // Mặc định: đề xuất 1% tổng số token đã stake
+        let default_optimal = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
+        
+        if pool.total_staked == U256::zero() {
+            return default_optimal;
+        }
+        
+        let one_percent = pool.total_staked
+            .checked_div(U256::from(100))
+            .unwrap_or(default_optimal);
+            
+        // Không đề xuất quá 10% tổng stake
+        let ten_percent = pool.total_staked
+            .checked_div(U256::from(10))
+            .unwrap_or(default_optimal);
+            
+        std::cmp::min(one_percent, ten_percent)
     }
 
     async fn get_recommended_pools(

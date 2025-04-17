@@ -507,7 +507,7 @@ impl SubscriptionManager {
             }
             TransactionCheckResult::NotFound => {
                 return Err(WalletError::Other("Không tìm thấy giao dịch".to_string()));
-            }
+        }
         }
         
         Ok(())
@@ -721,7 +721,7 @@ impl SubscriptionManager {
         if let Some(emitter) = &self.event_emitter {
             let event = SubscriptionEvent {
                 event_type: EventType::Upgraded,
-                user_id: user_id.to_string(),
+                    user_id: user_id.to_string(),
                 subscription_type,
                 timestamp: Utc::now(),
             };

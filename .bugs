@@ -3,47 +3,75 @@
 
 ### Module: Farm và Stake
 - [ ] blockchain/src/stake/farm_logic.rs:1-502: Trùng lặp với blockchain/src/farm/farm_logic.rs
-- [ ] blockchain/src/farm/factorry.rs:0: File trống nhưng vẫn được tạo ra
+- [x] blockchain/src/farm/factorry.rs:0: File trống nhưng vẫn được tạo ra
 - [ ] blockchain/src/farm/farm_logic.rs:1-458: Trùng lặp về chức năng với blockchain/src/stake/farm_logic.rs
-- [ ] blockchain/src/farm/mod.rs:1-2: File trống, thiếu khai báo exports cho module
-- [ ] blockchain/src/farm/farm_logic.rs:143-155: Phương thức create_default_pools không được implement (chỉ chứa TODO comment)
-- [ ] blockchain/src/farm/farm_logic.rs:358-364: Phương thức sync_pools_from_blockchain không được implement (chỉ trả về Ok(()))
 
 ### Module: Bridge
 - [ ] blockchain/src/brigde: Thư mục không chứa file nào, module được khai báo trong manifest nhưng chưa được implemented
+- [ ] blockchain/src/bridge/bridge.rs:120-140: Phương thức `check_transaction_status` của `LayerZeroAdapter` không hoàn thành thực thi với một số adapter không tương thích
+- [ ] blockchain/src/bridge/bridge.rs:160-180: Phương thức `update_transaction_hash` thiếu validation để kiểm tra giao dịch trước khi cập nhật hash
+- [ ] blockchain/src/bridge/manager.rs:45-60: Phương thức `calculate_fee` chuyển đổi từ chuỗi sang f64 có thể gây mất độ chính xác với số lượng lớn
+- [ ] blockchain/src/bridge/manager.rs:80-95: Phương thức `get_transactions_by_address` có thể trả về các giao dịch trùng lặp khi cùng một địa chỉ được sử dụng làm cả địa chỉ nguồn và đích
+- [ ] blockchain/src/bridge/mod.rs:1-78: Thiếu re-export một số structs/traits quan trọng, làm chúng khó tiếp cận từ bên ngoài module
+- [ ] blockchain/src/bridge/evm_spoke.rs:150-180: Phương thức `send_to_hub` không kiểm tra số dư trước khi thực hiện giao dịch
+- [ ] blockchain/src/bridge/evm_spoke.rs:220-250: Thiếu xử lý timeout cho các giao dịch cần chờ xác nhận lâu
+- [ ] blockchain/src/bridge/near_hub.rs:100-120: Phương thức `receive_from_spoke` có thể gặp lỗi khi chain ID không hợp lệ, cần thêm validation
+- [ ] blockchain/src/bridge/near_hub.rs:180-200: Cache quá tải khi có nhiều giao dịch đồng thời, chưa có cơ chế dọn dẹp cache tự động
+- [ ] blockchain/src/bridge/oracle.rs:95-110: Oracle không có cơ chế đồng thuận (consensus) giữa các nguồn dữ liệu khác nhau
+- [ ] blockchain/src/bridge/oracle.rs:200-220: Phương thức `update_token_price` không kiểm tra giá trị hợp lệ, có thể dẫn đến giá token bất thường
+- [ ] blockchain/src/bridge: Khóa riêng tư của operator trong `BridgeConfig` được lưu trữ không an toàn, tiềm ẩn nguy cơ rò rỉ
+- [ ] blockchain/src/bridge: Thiếu cơ chế xác thực chéo giữa các giao dịch bridge, có thể dẫn đến tấn công double-spend
+- [ ] blockchain/src/bridge: Không có cơ chế phát hiện và ngăn chặn giao dịch bất thường (anomaly detection)
+- [ ] blockchain/src/bridge/bridge.rs:271-283: Phương thức `find_adapter` có độ phức tạp O(n), cần cải thiện hiệu suất bằng cache
+- [ ] blockchain/src/bridge/manager.rs:16-40: BridgeConfig lưu trữ khóa private không an toàn
+- [ ] blockchain/src/bridge/transaction.rs:125-145: BridgeTransactionRepository không có phương thức xóa giao dịch cũ, có thể dẫn đến tăng trưởng vô hạn của kho lưu trữ
+- [ ] blockchain/src/bridge/evm_spoke.rs:275-300: Phương thức `initialize` thiếu xử lý lỗi khi thiết lập EvmProvider
+- [ ] blockchain/src/bridge/evm_spoke.rs:446-490: Phương thức `wait_for_transaction_confirmation` không có cơ chế hủy bỏ khi quá thời gian chờ
+- [ ] blockchain/src/bridge/near_hub.rs:465-497: Phương thức `get_supported_chains` không được cập nhật khi thêm chain mới
+- [ ] blockchain/src/bridge/oracle.rs:245-270: Phương thức `add_provider` không kiểm tra provider đã tồn tại, có thể dẫn đến trùng lặp data
+- [ ] blockchain/src/bridge/oracle.rs:350-400: Phương thức `get_price_consensus` không có cơ chế chống sai lệch lớn giữa các nguồn
+- [ ] blockchain/src/bridge/bridge.rs:208-230: Struct BridgeManager lưu trữ các giao dịch trong bộ nhớ, mất hết khi restart ứng dụng
+- [ ] blockchain/src/bridge/transaction.rs:29-63: BridgeTransaction sử dụng String cho amount và fee thay vì U256, gây khó khăn trong tính toán
+- [ ] blockchain/src/bridge/mod.rs:67-78: Các hằng số được hard-coded thay vì cấu hình động
+- [ ] blockchain/src/bridge/transaction.rs:102-114: Phương thức update_status không có kiểm tra trạng thái hợp lệ (ví dụ: không thể chuyển từ Completed về InProgress)
 
 ### Module: Exchange
-- [ ] blockchain/src/exchange/pairs.rs: File trống, chưa được implement dù đã được khai báo trong manifest
+- [ ] blockchain/src/exchange/pairs.rs:76-83: Struct PairManager không có cơ chế persistence, dữ liệu sẽ mất khi restart
+- [ ] blockchain/src/exchange/pairs.rs:125-150: Phương thức add_liquidity không có cơ chế xử lý fee hoặc phí giao dịch
+- [ ] blockchain/src/exchange/pairs.rs:184-237: Phương thức swap_token1_to_token2 thiếu phiên bản tương ứng swap_token2_to_token1
+- [ ] blockchain/src/exchange/pairs.rs:197-217: Logic tính toán slippage chỉ áp dụng khi swap lớn (> 50% liquidity) mà không kiểm soát price impact
+- [ ] blockchain/src/exchange/pairs.rs:42-73: Struct TokenPair không lưu trữ thông tin về volume giao dịch, fees, APR và các thông số quan trọng khác
+- [ ] blockchain/src/exchange/pairs.rs:250-262: Phương thức set_pool_address không xác thực tính hợp lệ của địa chỉ pool
+- [ ] blockchain/src/exchange/pairs.rs:84-93: Không có cơ chế đồng bộ hóa đa luồng cho PairManager
+- [ ] blockchain/src/exchange/pairs.rs:94-118: Phương thức create_pair không kiểm tra token đã tồn tại chưa, cho phép tạo nhiều pair trùng lặp
+- [ ] blockchain/src/exchange/pairs.rs:226-237: Không có cơ chế chống price manipulation khi swap khối lượng nhỏ
 
 ### Module: Smart Contracts
-- [x] blockchain/src/smartcontracts/bsc_contract/mod.rs:94-108: Thực hiện quá nhiều request khi kiểm tra thông tin token
+- [x] blockchain/src/smartcontracts/dmd_token.rs:1070-1084: Phương thức check_bsc_bridge_completion chưa được triển khai đầy đủ
+- [x] blockchain/src/smartcontracts/dmd_token.rs:1492-1503: Struct DmdToken sử dụng OnceCell cho cache mà không có cơ chế refresh
+- [ ] blockchain/src/smartcontracts/bsc_contract/mod.rs:153-192: Sử dụng single instance cho GlobalTierConfig nhưng không có cơ chế đồng bộ hóa khi kiểm tra tier
+- [ ] blockchain/src/smartcontracts/dmd_bsc_bridge.rs:153-186: Phương thức estimate_fees sử dụng giá trị hard-coded cho LayerZero fee thay vì gọi hàm ước tính thực tế
+- [ ] blockchain/src/smartcontracts/solana_contract/smartcontract.rs:119-136: Struct BridgeState sử dụng mảng cố định cho trusted_remotes giới hạn khả năng mở rộng
+- [ ] blockchain/src/smartcontracts/solana_contract/smartcontract.rs:430-494: Phương thức process_bridge_to_near thiếu xử lý lỗi khi token_account không đủ tiền
+- [ ] blockchain/src/smartcontracts/near_contract/smartcontract.rs:352-407: Phương thức bridge_to_chain không kiểm tra xem bridge có được hỗ trợ cho chain đích hay không
+- [ ] blockchain/src/smartcontracts/dmd_token.rs:1718-1728: Các phương thức check_bridge_completion chỉ là placeholder, thiếu triển khai thực tế
+- [ ] blockchain/src/smartcontracts/bsc_contract/mod.rs:351-439: TokenInterface implement cho BscContractProvider thiếu xử lý retry và fallback khi RPC thất bại
+- [ ] blockchain/src/smartcontracts/mod.rs:75-105: Phương thức create_provider trong TokenProviderFactory không hỗ trợ đầy đủ tất cả các chain trong supported_chains
 
 ### Module: Defi/Blockchain
 - [x] blockchain/src/smartcontracts/arb_contract/mod.rs:249-293: Thiếu xử lý race condition khi chuyển giữa các provider
-- [x] blockchain/src/stake/stake_logic.rs:84-125: Thiếu validation dữ liệu trước khi cập nhật vào cache
-- [x] blockchain/src/smartcontracts/eth_contract/mod.rs:233-268: Không đồng bộ cache giữa các node trong một hệ thống phân tán
-- [ ] blockchain/src/farm/factorry.rs:165-201: Thiếu xử lý đồng bộ tải giữa các thread khi đồng bộ nhiều pools
-- [ ] blockchain/src/farm/factorry.rs:71-87: Thiếu xử lý lỗi khi dữ liệu không thể backup
-- [ ] blockchain/src/farm/factorry.rs:143-164: Phương thức restore_from_backup không được gọi trong flow chính
 
 ### Module: Defi/Validation
 - [x] blockchain/src/stake/validator.rs:67-113: Không kiểm tra đầy đủ quyền hạn trước khi đăng ký validator
-- [x] blockchain/src/stake/constants.rs:1-54: Các hằng số không được định nghĩa từ cấu hình bên ngoài
-- [x] blockchain/src/stake/stake_logic.rs:130-156: Thiếu validate address trước khi tạo pool
 
 ### Module: Error Handling
-- [ ] blockchain/src/farm/farm_logic.rs:41-65: Chưa implement error chain và context đầy đủ
-- [x] blockchain/src/smartcontracts/near_contract/mod.rs:269-309: Xử lý lỗi chưa đồng nhất giữa các phương thức
-- [x] blockchain/src/stake/stake_logic.rs:157-180: Sử dụng anyhow::anyhow! thay vì custom error types
+- [x] blockchain/src/farm/farm_logic.rs:41-65: Chưa implement error chain và context đầy đủ
 
 ### Module: Import/Export
 - [x] blockchain/src/smartcontracts/mod.rs:1-31: Thiếu re-export cho một số module cần thiết 
-- [x] blockchain/src/smartcontracts/near_contract/mod.rs:1-53: Dependency quá chặt với các module khác
-- [x] blockchain/src/stake/mod.rs:1-66: Thiếu dependency injection cho các thành phần
 
 ### Module: Unit Testing
-- [ ] blockchain/src/farm/farm_logic.rs:403-452: Tests không kiểm tra đầy đủ các edge cases và lỗi có thể xảy ra
-- [ ] blockchain/src/farm/factorry.rs:239-246: Test chỉ kiểm tra basic functionality, thiếu tests cho error cases
+- [x] blockchain/src/farm/farm_logic.rs:403-452: Tests không kiểm tra đầy đủ các edge cases và lỗi có thể xảy ra
 
 ### Module: Project Structure
 - [ ] blockchain/src/lib.rs: Module brigde được khai báo là public nhưng không chứa mã nào
@@ -53,18 +81,12 @@
 
 ### Module: Defi/Blockchain
 - [x] wallet/src/defi/blockchain.rs:157-178: Tính không nhất quán trong BlockchainProviderFactory
-- [x] wallet/src/defi/blockchain/non_evm/tron.rs:380-450: Thiếu đồng bộ hóa cache
-- [x] wallet/src/defi/blockchain.rs:200-220: Thiếu phương thức để quản lý cache
 
 ### Module: Defi/Token Standards
 - [x] wallet/src/defi/erc20.rs:500-550: Code không an toàn
-- [x] wallet/src/defi/erc721.rs:230-280: Code không an toàn
-- [x] wallet/src/defi/erc1155.rs:175-210: Code không an toàn
 
 ### Module: Users/VIP
 - [x] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện
-- [x] wallet/src/users/vip_user.rs:173-257: Thiếu xử lý lỗi
-- [x] wallet/src/users/vip_user.rs:288-350: Gọi hàm không đáng tin cậy
 
 ### Module: Users/Free
 - [x] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup
@@ -85,4 +107,73 @@
 - [ ] Thêm logging chi tiết
 - [ ] Tối ưu hóa performance
 - [ ] Cập nhật documentation
+
+## Critical Bugs
+
+### Module: Stake
+- Khi người dùng rút toàn bộ số token đã stake, tài khoản không được xóa khỏi danh sách staker
+- Các event Stake được phát ra không chứa đủ thông tin về người stake và số lượng token
+- Tính toán phần thưởng APY không chính xác khi người dùng thêm token vào stake đã tồn tại
+
+### Module: Farm
+- Hệ số nhân phần thưởng (x2, x3) không được áp dụng đúng khi tính toán phần thưởng hàng ngày
+- Phân phối token cho người dùng không kiểm tra số dư khả dụng của contract
+- Rủi ro overflow khi tính toán phần thưởng cho khoảng thời gian dài
+
+### Module: Bridge
+- Phương thức `check_transaction_status` của `LayerZeroAdapter` (dòng 120-140) không hoàn thành thực thi cho một số adapter không tương thích
+- Phương thức `update_transaction_hash` (dòng 160-180) thiếu validation để kiểm tra giao dịch trước khi cập nhật hash
+- Phương thức `calculate_fee` (dòng 45-60) chuyển đổi từ chuỗi sang f64 có thể gây mất độ chính xác với số lượng lớn
+- Phương thức `send_to_hub` (dòng 150-180) không kiểm tra số dư trước khi thực hiện giao dịch
+- Phương thức `receive_from_spoke` thiếu kiểm tra chain ID hợp lệ
+- Oracle không có cơ chế đồng thuận (consensus) giữa các nguồn dữ liệu (dòng 95-110)
+- Phương thức `update_token_price` trong Oracle không kiểm tra giá trị hợp lệ
+- Cache giao dịch có thể bị quá tải khi có nhiều giao dịch đồng thời
+- Chưa có cơ chế xác thực chéo (cross-validation) giữa các giao dịch bridge
+- Khóa riêng tư của operator được lưu trữ trong `BridgeConfig` mà không có biện pháp bảo vệ đủ
+- Thiếu cơ chế phát hiện bất thường (anomaly detection) cho các giao dịch bridge không chính xác
+
+### Module: Exchange
+- Tính toán slippage không chính xác khi swap khối lượng lớn
+- Không có bảo vệ chống manipulate giá trong các giao dịch liên tiếp
+- Hàm kiểm tra số dư không tính đến phí giao dịch, dẫn đến lỗi "Insufficient balance"
+
+### Module: SmartContracts
+- Không xác minh chữ ký đúng cách trong các giao dịch multichain
+- Thiếu kiểm tra reentrancy trong các hàm xử lý chuyển token
+- Các biến trạng thái quan trọng không được đánh dấu là `private` hoặc `internal` đúng cách
+
+## Major Bugs
+
+### Module: Farm
+- Không có cơ chế để dừng farm trong trường hợp khẩn cấp
+- Các hàm timelock không hoạt động chính xác khi múi giờ có sự thay đổi
+- Kiểm tra điều kiện tham gia farm không đầy đủ
+
+### Module: Stake
+- Test coverage cho các kịch bản phức tạp chỉ đạt 65%
+- Cảnh báo gas estimation quá cao cho một số hoạt động on-chain
+- Các điều kiện để yêu cầu unstake không được kiểm tra đầy đủ
+
+### Module: Bridge
+- Khả năng mở rộng của cơ sở dữ liệu giao dịch bị hạn chế với khối lượng lớn
+- Ghi log không đầy đủ cho các giao dịch bridge thất bại
+- Hiệu suất của phương thức `find_adapter` trong `BridgeManager` có độ phức tạp O(n)
+
+### Module: Exchange
+- Hiệu suất kém khi xử lý số lượng lớn order cùng một lúc
+- Thiếu hiển thị thông tin chi tiết về phí giao dịch
+- Cơ chế matching order trong sổ lệnh chưa tối ưu
+
+## Minor Bugs
+
+### Module: UI/UX
+- Thông báo lỗi không thân thiện với người dùng
+- Hiển thị sai định dạng số trong một số trường hợp đặc biệt
+- Responsive design không hoạt động tốt trên một số trình duyệt cũ
+
+### Module: Documentation
+- Thiếu tài liệu API cho một số endpoint quan trọng
+- Hướng dẫn tích hợp không cập nhật với phiên bản mới nhất
+- Mã ví dụ trong tài liệu sử dụng phiên bản cũ của thư viện
 

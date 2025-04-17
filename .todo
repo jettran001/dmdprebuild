@@ -42,6 +42,21 @@
 - [ ] Documentation 
 - [ ] Error handling 
 
+### Module Bridge
+- [ ] Cải thiện bảo mật: Thay đổi cách lưu trữ khóa riêng tư trong BridgeConfig
+- [ ] Triển khai persistent storage cho BridgeManager thay vì lưu trữ trong bộ nhớ
+- [ ] Thêm cơ chế đồng thuận (consensus) giữa các nguồn dữ liệu cho Oracle
+- [ ] Tối ưu hóa cache và cơ chế dọn dẹp cache tự động
+- [ ] Cải thiện validation cho các phương thức: send_to_hub, update_transaction_hash, calculate_fee
+- [ ] Thêm xử lý timeout cho các giao dịch bridge chờ xác nhận lâu
+- [ ] Thêm cơ chế phát hiện và ngăn chặn giao dịch bất thường (anomaly detection)
+- [ ] Thêm cơ chế xác thực chéo giữa các giao dịch bridge
+- [ ] Cải thiện hiệu suất cho phương thức find_adapter bằng cơ chế cache
+- [ ] Thêm phương thức để xóa giao dịch cũ trong BridgeTransactionRepository
+- [ ] Chuyển đổi sử dụng U256 cho amount và fee trong BridgeTransaction
+- [ ] Chuẩn hóa các hằng số thành cấu hình động
+- [ ] Thêm kiểm tra trạng thái hợp lệ cho update_status
+- [ ] Hoàn thiện re-export của các structs và traits quan trọng trong mod.rs
 
 5.common
 - [ ] Integration tests

@@ -325,3 +325,154 @@ impl RewardCalculator for StandardRewardCalculator {
         Ok(U256::zero())
     }
 }
+
+/// Triển khai mặc định cho RewardCalculator
+pub struct DefaultRewardCalculator {
+    /// Validator instance
+    validator: Arc<dyn crate::stake::Validator>,
+    /// Cache cho rewards
+    rewards_cache: Arc<RwLock<std::collections::HashMap<Address, RewardsPool>>>,
+}
+
+impl DefaultRewardCalculator {
+    /// Tạo calculator mới
+    pub fn new() -> Self {
+        // Hack tạm thời: Tạo validator giả để tránh circular dependency
+        let validator = Arc::new(crate::stake::validator::ValidatorImpl::new());
+        
+        Self {
+            validator,
+            rewards_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+    
+    /// Tạo calculator với validator tùy chỉnh
+    pub fn with_validator(validator: Arc<dyn crate::stake::Validator>) -> Self {
+        Self {
+            validator,
+            rewards_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+    
+    /// Lấy thời gian hiện tại (timestamp)
+    fn get_current_time() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+}
+
+#[async_trait]
+impl RewardCalculator for DefaultRewardCalculator {
+    async fn calculate_pending_rewards(&self, pool: &StakePoolConfig, user_stake: &UserStakeInfo) -> Result<U256> {
+        // Kiểm tra nếu người dùng đã stake
+        if user_stake.staked_amount == U256::zero() {
+            return Ok(U256::zero());
+        }
+        
+        // Lấy thời gian hiện tại
+        let current_time = Self::get_current_time();
+        
+        // Chuyển APY từ f64 sang u64 với precision
+        let apy_with_precision = (pool.current_apy * APY_PRECISION as f64) as u64;
+        
+        // Sử dụng formula cơ bản: amount * apy * time / (APY_PRECISION * seconds_per_year)
+        let staked_amount = user_stake.staked_amount;
+        let start_time = user_stake.start_time;
+        
+        // Đảm bảo thời gian không âm
+        if current_time <= start_time {
+            return Ok(U256::zero());
+        }
+        
+        // Số giây trong một năm
+        let seconds_per_year: u64 = 365 * 24 * 60 * 60;
+        
+        // Tính rewards
+        let staking_duration = current_time - start_time;
+        
+        // Tránh tràn số và mất độ chính xác
+        // 1. Tính amount * apy
+        let amount_mul_apy = staked_amount
+            .checked_mul(U256::from(apy_with_precision))
+            .ok_or_else(|| anyhow::anyhow!("Overflow in reward calculation: amount * apy"))?;
+        
+        // 2. Tính kết quả * duration
+        let result_mul_duration = amount_mul_apy
+            .checked_mul(U256::from(staking_duration))
+            .ok_or_else(|| anyhow::anyhow!("Overflow in reward calculation: result * duration"))?;
+            
+        // 3. Chia cho APY_PRECISION * seconds_per_year
+        let precision_mul_seconds = U256::from(APY_PRECISION)
+            .checked_mul(U256::from(seconds_per_year))
+            .ok_or_else(|| anyhow::anyhow!("Overflow in reward calculation: precision * seconds"))?;
+            
+        let rewards = result_mul_duration
+            .checked_div(precision_mul_seconds)
+            .ok_or_else(|| anyhow::anyhow!("Division by zero in reward calculation"))?;
+        
+        debug!(
+            "DefaultRewardCalculator: calculated rewards: {:?} for user {:?}, staked amount: {:?}, time: {} days",
+            rewards, user_stake.user_address, user_stake.staked_amount, staking_duration / (24 * 60 * 60)
+        );
+        
+        Ok(rewards)
+    }
+    
+    async fn update_pool_apy(&self, pool_address: Address, new_apy: u64) -> Result<()> {
+        // Cache hoạt động như một store tạm thời
+        let mut cache = self.rewards_cache.write().await;
+        
+        if let Some(pool) = cache.get_mut(&pool_address) {
+            // Kiểm tra APY mới
+            let new_apy_f64 = new_apy as f64 / APY_PRECISION as f64;
+            if new_apy_f64 <= 0.0 || new_apy_f64 > 100.0 {
+                return Err(anyhow::anyhow!("Invalid APY value: must be between 0 and 100%"));
+            }
+            
+            // Cập nhật APY
+            pool.current_apy = new_apy_f64;
+            pool.last_update_time = Self::get_current_time();
+            
+            info!("Updated APY for pool {:?} to {}%", pool_address, new_apy_f64);
+            return Ok(());
+        }
+        
+        // Nếu pool chưa có trong cache, tạo mới
+        cache.insert(pool_address, RewardsPool {
+            pool_address,
+            total_distributed: U256::zero(),
+            remaining_rewards: U256::zero(),
+            last_update_time: Self::get_current_time(),
+            current_apy: new_apy as f64 / APY_PRECISION as f64,
+        });
+        
+        info!("Created new rewards pool for {:?} with APY {}%", pool_address, new_apy as f64 / APY_PRECISION as f64);
+        Ok(())
+    }
+    
+    async fn distribute_rewards(&self, pool_address: Address) -> Result<U256> {
+        // Phân phối phần thưởng cho tất cả người dùng trong pool
+        // Trong triển khai thực tế, cần lấy danh sách người dùng từ blockchain
+        // và phân phối phần thưởng dựa trên stake của họ
+        
+        // Đây chỉ là mẫu triển khai
+        let mut total_distributed = U256::zero();
+        
+        // Cập nhật cache
+        let mut cache = self.rewards_cache.write().await;
+        if let Some(pool) = cache.get_mut(&pool_address) {
+            // Đánh dấu rewards đã được phân phối
+            total_distributed = pool.remaining_rewards;
+            pool.total_distributed = pool.total_distributed
+                .checked_add(total_distributed)
+                .unwrap_or(pool.total_distributed);
+            pool.remaining_rewards = U256::zero();
+            pool.last_update_time = Self::get_current_time();
+        }
+        
+        info!("Distributed rewards for pool {:?}: {:?}", pool_address, total_distributed);
+        Ok(total_distributed)
+    }
+}
