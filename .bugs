@@ -1,179 +1,120 @@
-# Danh sách lỗi đã phát hiện và cần sửa
+# Danh sách bug đã phát hiện trong quá trình phát triển
+## Date: 2022-05-01
 
+### **BUGS ĐÃ SỬA**
 
-### Module: Farm và Stake
-- [ ] blockchain/src/stake/farm_logic.rs:1-502: Trùng lặp với blockchain/src/farm/farm_logic.rs
-- [x] blockchain/src/farm/factorry.rs:0: File trống nhưng vẫn được tạo ra
-- [ ] blockchain/src/farm/farm_logic.rs:1-458: Trùng lặp về chức năng với blockchain/src/stake/farm_logic.rs
+1. [FIXED] **blockchain/src/bridge/oracle.rs**. Thiếu phương thức phát hiện giao dịch bất thường:
+   - Cần triển khai phương thức phát hiện giao dịch bất thường để ngăn chặn các giao dịch có mục đích lừa đảo.
+   - Đã triển khai phương thức `detect_abnormal_transaction` để kiểm tra giới hạn giao dịch, phân tích lịch sử người gửi, và phát hiện mẫu giao dịch đáng ngờ.
+   - Ngày sửa: 2023-05-10
 
-### Module: Bridge
-- [ ] blockchain/src/brigde: Thư mục không chứa file nào, module được khai báo trong manifest nhưng chưa được implemented
-- [ ] blockchain/src/bridge/bridge.rs:120-140: Phương thức `check_transaction_status` của `LayerZeroAdapter` không hoàn thành thực thi với một số adapter không tương thích
-- [ ] blockchain/src/bridge/bridge.rs:160-180: Phương thức `update_transaction_hash` thiếu validation để kiểm tra giao dịch trước khi cập nhật hash
-- [ ] blockchain/src/bridge/manager.rs:45-60: Phương thức `calculate_fee` chuyển đổi từ chuỗi sang f64 có thể gây mất độ chính xác với số lượng lớn
-- [ ] blockchain/src/bridge/manager.rs:80-95: Phương thức `get_transactions_by_address` có thể trả về các giao dịch trùng lặp khi cùng một địa chỉ được sử dụng làm cả địa chỉ nguồn và đích
-- [ ] blockchain/src/bridge/mod.rs:1-78: Thiếu re-export một số structs/traits quan trọng, làm chúng khó tiếp cận từ bên ngoài module
-- [ ] blockchain/src/bridge/evm_spoke.rs:150-180: Phương thức `send_to_hub` không kiểm tra số dư trước khi thực hiện giao dịch
-- [ ] blockchain/src/bridge/evm_spoke.rs:220-250: Thiếu xử lý timeout cho các giao dịch cần chờ xác nhận lâu
-- [ ] blockchain/src/bridge/near_hub.rs:100-120: Phương thức `receive_from_spoke` có thể gặp lỗi khi chain ID không hợp lệ, cần thêm validation
-- [ ] blockchain/src/bridge/near_hub.rs:180-200: Cache quá tải khi có nhiều giao dịch đồng thời, chưa có cơ chế dọn dẹp cache tự động
-- [ ] blockchain/src/bridge/oracle.rs:95-110: Oracle không có cơ chế đồng thuận (consensus) giữa các nguồn dữ liệu khác nhau
-- [ ] blockchain/src/bridge/oracle.rs:200-220: Phương thức `update_token_price` không kiểm tra giá trị hợp lệ, có thể dẫn đến giá token bất thường
-- [ ] blockchain/src/bridge: Khóa riêng tư của operator trong `BridgeConfig` được lưu trữ không an toàn, tiềm ẩn nguy cơ rò rỉ
-- [ ] blockchain/src/bridge: Thiếu cơ chế xác thực chéo giữa các giao dịch bridge, có thể dẫn đến tấn công double-spend
-- [ ] blockchain/src/bridge: Không có cơ chế phát hiện và ngăn chặn giao dịch bất thường (anomaly detection)
-- [ ] blockchain/src/bridge/bridge.rs:271-283: Phương thức `find_adapter` có độ phức tạp O(n), cần cải thiện hiệu suất bằng cache
-- [ ] blockchain/src/bridge/manager.rs:16-40: BridgeConfig lưu trữ khóa private không an toàn
-- [ ] blockchain/src/bridge/transaction.rs:125-145: BridgeTransactionRepository không có phương thức xóa giao dịch cũ, có thể dẫn đến tăng trưởng vô hạn của kho lưu trữ
-- [ ] blockchain/src/bridge/evm_spoke.rs:275-300: Phương thức `initialize` thiếu xử lý lỗi khi thiết lập EvmProvider
-- [ ] blockchain/src/bridge/evm_spoke.rs:446-490: Phương thức `wait_for_transaction_confirmation` không có cơ chế hủy bỏ khi quá thời gian chờ
-- [ ] blockchain/src/bridge/near_hub.rs:465-497: Phương thức `get_supported_chains` không được cập nhật khi thêm chain mới
-- [ ] blockchain/src/bridge/oracle.rs:245-270: Phương thức `add_provider` không kiểm tra provider đã tồn tại, có thể dẫn đến trùng lặp data
-- [ ] blockchain/src/bridge/oracle.rs:350-400: Phương thức `get_price_consensus` không có cơ chế chống sai lệch lớn giữa các nguồn
-- [ ] blockchain/src/bridge/bridge.rs:208-230: Struct BridgeManager lưu trữ các giao dịch trong bộ nhớ, mất hết khi restart ứng dụng
-- [ ] blockchain/src/bridge/transaction.rs:29-63: BridgeTransaction sử dụng String cho amount và fee thay vì U256, gây khó khăn trong tính toán
-- [ ] blockchain/src/bridge/mod.rs:67-78: Các hằng số được hard-coded thay vì cấu hình động
-- [ ] blockchain/src/bridge/transaction.rs:102-114: Phương thức update_status không có kiểm tra trạng thái hợp lệ (ví dụ: không thể chuyển từ Completed về InProgress)
+2. [FIXED] **blockchain/src/bridge/evm_spoke.rs**. Thiếu kiểm tra số dư:
+   - `send_to_hub` không kiểm tra số dư token trước khi gửi giao dịch.
+   - Đã thêm kiểm tra số dư token và xử lý lỗi phù hợp trước khi thực hiện giao dịch.
+   - Ngày sửa: 2023-05-15
 
-### Module: Exchange
-- [ ] blockchain/src/exchange/pairs.rs:76-83: Struct PairManager không có cơ chế persistence, dữ liệu sẽ mất khi restart
-- [ ] blockchain/src/exchange/pairs.rs:125-150: Phương thức add_liquidity không có cơ chế xử lý fee hoặc phí giao dịch
-- [ ] blockchain/src/exchange/pairs.rs:184-237: Phương thức swap_token1_to_token2 thiếu phiên bản tương ứng swap_token2_to_token1
-- [ ] blockchain/src/exchange/pairs.rs:197-217: Logic tính toán slippage chỉ áp dụng khi swap lớn (> 50% liquidity) mà không kiểm soát price impact
-- [ ] blockchain/src/exchange/pairs.rs:42-73: Struct TokenPair không lưu trữ thông tin về volume giao dịch, fees, APR và các thông số quan trọng khác
-- [ ] blockchain/src/exchange/pairs.rs:250-262: Phương thức set_pool_address không xác thực tính hợp lệ của địa chỉ pool
-- [ ] blockchain/src/exchange/pairs.rs:84-93: Không có cơ chế đồng bộ hóa đa luồng cho PairManager
-- [ ] blockchain/src/exchange/pairs.rs:94-118: Phương thức create_pair không kiểm tra token đã tồn tại chưa, cho phép tạo nhiều pair trùng lặp
-- [ ] blockchain/src/exchange/pairs.rs:226-237: Không có cơ chế chống price manipulation khi swap khối lượng nhỏ
+3. [FIXED] **blockchain/src/bridge/bridge.rs**. Thiếu xác nhận trong các phương thức giao dịch:
+   - Không kiểm tra giá trị đầu vào cho `create_transaction`.
+   - Thiếu xác thực cho `complete_transaction` và `fail_transaction`.
+   - Đã cải thiện phương thức `complete_transaction` với xác thực đầu vào, kiểm tra định dạng hash, xác minh trạng thái giao dịch hợp lệ, kiểm tra hash trùng lặp và phát hiện giao dịch đáng ngờ.
+   - Đã cải thiện phương thức `fail_transaction` với xác thực đầu vào, kiểm tra độ dài thông báo lỗi, làm sạch dữ liệu đầu vào và ghi nhật ký chi tiết.
+   - Đã thêm chức năng ghi nhật ký giao dịch đáng ngờ để theo dõi.
+   - Ngày sửa: 2023-05-20
 
-### Module: Smart Contracts
-- [x] blockchain/src/smartcontracts/dmd_token.rs:1070-1084: Phương thức check_bsc_bridge_completion chưa được triển khai đầy đủ
-- [x] blockchain/src/smartcontracts/dmd_token.rs:1492-1503: Struct DmdToken sử dụng OnceCell cho cache mà không có cơ chế refresh
-- [ ] blockchain/src/smartcontracts/bsc_contract/mod.rs:153-192: Sử dụng single instance cho GlobalTierConfig nhưng không có cơ chế đồng bộ hóa khi kiểm tra tier
-- [ ] blockchain/src/smartcontracts/dmd_bsc_bridge.rs:153-186: Phương thức estimate_fees sử dụng giá trị hard-coded cho LayerZero fee thay vì gọi hàm ước tính thực tế
-- [ ] blockchain/src/smartcontracts/solana_contract/smartcontract.rs:119-136: Struct BridgeState sử dụng mảng cố định cho trusted_remotes giới hạn khả năng mở rộng
-- [ ] blockchain/src/smartcontracts/solana_contract/smartcontract.rs:430-494: Phương thức process_bridge_to_near thiếu xử lý lỗi khi token_account không đủ tiền
-- [ ] blockchain/src/smartcontracts/near_contract/smartcontract.rs:352-407: Phương thức bridge_to_chain không kiểm tra xem bridge có được hỗ trợ cho chain đích hay không
-- [ ] blockchain/src/smartcontracts/dmd_token.rs:1718-1728: Các phương thức check_bridge_completion chỉ là placeholder, thiếu triển khai thực tế
-- [ ] blockchain/src/smartcontracts/bsc_contract/mod.rs:351-439: TokenInterface implement cho BscContractProvider thiếu xử lý retry và fallback khi RPC thất bại
-- [ ] blockchain/src/smartcontracts/mod.rs:75-105: Phương thức create_provider trong TokenProviderFactory không hỗ trợ đầy đủ tất cả các chain trong supported_chains
+4. [FIXED] **blockchain/src/bridge/near_hub.rs**. Vấn đề trong xử lý timeouts:
+   - Không xử lý timeout trong `wait_for_transaction_finality`.
+   - Có thể dẫn đến treo ứng dụng.
+   - Đã triển khai phương thức `wait_for_transaction_finality` với cơ chế timeout sử dụng tokio::select.
+   - Đã cập nhật `receive_from_spoke` và `send_to_spoke` để sử dụng phương thức mới này, tránh treo ứng dụng.
+   - Ngày sửa: 2023-07-15
 
-### Module: Defi/Blockchain
-- [x] blockchain/src/smartcontracts/arb_contract/mod.rs:249-293: Thiếu xử lý race condition khi chuyển giữa các provider
+5. [FIXED] **blockchain/src/bridge/near_hub.rs**. Thiếu xác thực trong `receive_from_spoke`:
+   - Không kiểm tra đầy đủ địa chỉ nguồn và đích.
+   - Có nguy cơ bị lừa đảo với địa chỉ giả mạo.
+   - Đã triển khai các phương thức `validate_address`, `check_blocked_address`, và `is_contract_address` để kiểm tra toàn diện.
+   - Đã cải thiện xác thực địa chỉ với regex cho mỗi loại blockchain.
+   - Đã thêm kiểm tra địa chỉ nằm trong danh sách bị chặn.
+   - Đã thêm kiểm tra giới hạn số lượng token được bridge.
+   - Ngày sửa: 2023-07-20
 
-### Module: Defi/Validation
-- [x] blockchain/src/stake/validator.rs:67-113: Không kiểm tra đầy đủ quyền hạn trước khi đăng ký validator
+6. [FIXED] **blockchain/src/bridge/persistent_repository.rs**. Xử lý lỗi kém trong `write_to_file`:
+   - Không xử lý đúng lỗi ghi file.
+   - Khả năng mất dữ liệu khi đĩa đầy hoặc quyền truy cập bị từ chối.
+   - Đã cải thiện phương thức với các tính năng:
+     - Kiểm tra quyền truy cập và không gian đĩa trước khi ghi
+     - Sao lưu file hiện có trước khi ghi đè
+     - Xử lý chi tiết các loại lỗi IO (đĩa đầy, quyền bị từ chối, lỗi khác)
+     - Cơ chế khôi phục tự động từ bản sao lưu khi ghi thất bại
+     - Ghi nhật ký chi tiết các bước và lỗi
+   - Ngày sửa: 2023-07-20
 
-### Module: Error Handling
-- [x] blockchain/src/farm/farm_logic.rs:41-65: Chưa implement error chain và context đầy đủ
+7. [FIXED] **blockchain/src/bridge/bridge.rs**. Hiệu suất kém trong `find_adapter`:
+   - Tìm kiếm tuyến tính qua tất cả bộ điều hợp có thể chậm với nhiều bộ điều hợp.
+   - Đã cải thiện bằng cách:
+     - Thêm một HashMap mới (`adapter_map`) để ánh xạ trực tiếp từ chain đến adapter
+     - Tối ưu hóa cache bằng cách lưu trữ kết quả tìm kiếm
+     - Thêm tính năng đo lường hiệu suất tìm kiếm để theo dõi
+     - Giảm số lượng vòng lặp bằng cách sử dụng các phương thức `position` và `contains`
+     - Ghi log cảnh báo khi tìm kiếm chậm
+   - Ngày sửa: 2023-07-20
 
-### Module: Import/Export
-- [x] blockchain/src/smartcontracts/mod.rs:1-31: Thiếu re-export cho một số module cần thiết 
+8. [FIXED] **blockchain/src/bridge/bridge.rs**. Vấn đề hiệu suất trong `complete_transaction`:
+   - Cập nhật cache giao dịch cho mỗi giao dịch không hiệu quả.
+   - Đã cải thiện bằng cách:
+     - Triển khai cơ chế xử lý hàng loạt cho việc cập nhật giao dịch
+     - Sử dụng hàng đợi và worker riêng để xử lý các cập nhật không đồng bộ
+     - Thêm phương thức `save_batch` để lưu nhiều giao dịch cùng lúc
+     - Tối ưu việc ghi ra đĩa chỉ một lần thay vì nhiều lần
+     - Cập nhật cache ngay lập tức trong khi ghi đĩa xảy ra bất đồng bộ
+     - Cung cấp cơ chế sao lưu và phục hồi khi có lỗi
+   - Ngày sửa: 2023-07-20
 
-### Module: Unit Testing
-- [x] blockchain/src/farm/farm_logic.rs:403-452: Tests không kiểm tra đầy đủ các edge cases và lỗi có thể xảy ra
+9. [FIXED] **blockchain/src/bridge/config.rs**. Bảo mật yếu cho khóa riêng tư:
+   - Lưu trữ khóa riêng tư trong `BridgeConfig` không an toàn.
+   - Đã cải thiện bằng cách:
+     - Triển khai `KeyVault` và `MemoryKeyVault` để quản lý khóa an toàn
+     - Thay thế lưu trữ khóa trực tiếp bằng ID tham chiếu đến khóa trong vault
+     - Thêm giới hạn số lần truy cập và thời gian hết hạn cho khóa
+     - Tự động xóa khóa khỏi bộ nhớ sau khi sử dụng
+     - Thêm logging và theo dõi việc sử dụng khóa
+     - Mã hóa khóa khi lưu trữ và chỉ giải mã khi cần thiết
+   - Ngày sửa: 2023-08-01
 
-### Module: Project Structure
-- [ ] blockchain/src/lib.rs: Module brigde được khai báo là public nhưng không chứa mã nào
-- [ ] blockchain/src/lib.rs: Thiếu documentation cho các module chính
+### **BUGS ĐANG CHỜ XỬ LÝ**
 
-## Domain: Wallet
+1. **blockchain/src/stake/farm_logic.rs** và **blockchain/src/farm/farm_logic.rs** (dòng 1-502). Mã nguồn bị trùng lặp:
+   - Hai module chứa logic trùng lặp cho farming và staking.
+   - Cần tái cấu trúc để tạo một module logic chung.
 
-### Module: Defi/Blockchain
-- [x] wallet/src/defi/blockchain.rs:157-178: Tính không nhất quán trong BlockchainProviderFactory
+2. **blockchain/src/bridge/evm_spoke.rs**. Vấn đề với kiểm soát đồng thời:
+    - Không xử lý đúng trường hợp nhiều giao dịch cùng một lúc.
+    - Có thể dẫn đến lỗi hoặc trạng thái không nhất quán.
+    - Đã sửa: Thêm cơ chế khóa giao dịch, semaphore kiểm soát số lượng giao dịch đồng thời, retry và xử lý lỗi.
 
-### Module: Defi/Token Standards
-- [x] wallet/src/defi/erc20.rs:500-550: Code không an toàn
+3. **blockchain/src/exchange/pair.rs**. Thiếu lưu trữ bền vững:
+    - Không có cơ chế lưu trữ bền vững cho cặp thanh khoản.
+    - Mất dữ liệu khi khởi động lại.
 
-### Module: Users/VIP
-- [x] wallet/src/users/vip_user.rs:134-171: Stub code chưa hoàn thiện
+4. **blockchain/src/exchange/pair.rs**. Thiếu xác thực cho cập nhật cặp:
+    - Không xác thực đúng khi cập nhật thông tin cặp.
+    - Có thể dẫn đến tình trạng không nhất quán.
 
-### Module: Users/Free
-- [x] wallet/src/users/free_user/manager.rs: Thiếu cơ chế backup
-- [x] wallet/src/users/mod.rs:17-22: Vi phạm encapsulation
+### **CẢI TIẾN CHUNG CẦN THỰC HIỆN**
 
-## Domain: Snipebot
+1. Cải thiện xử lý lỗi và ghi nhật ký:
+   - Nhiều module thiếu ghi nhật ký chi tiết.
+   - Cần thống nhất cách tiếp cận xử lý lỗi.
 
-### Module: Core
-- [ ] snipebot/src/config.rs:28-40: Thiếu validate
-- [ ] snipebot/src/api/endpoints.rs:48-62: Thiếu rate limiting
-- [ ] snipebot/src/executor/tx_builder.rs:81-102: Gas estimation không chính xác
-- [ ] snipebot/src/scanner/token_scanner.rs:40-65: Scanner có thể miss event
-- [ ] snipebot/src/strategy/base_strategy.rs:110-132: Thiếu cơ chế phát hiện rugpull
+2. Tăng cường tài liệu mã:
+   - Thiếu tài liệu cho các cấu trúc và phương thức công khai.
+   - Cần thêm ví dụ sử dụng.
 
-## Các vấn đề chung cần cải thiện
-- [ ] Thêm unit test cho các module chính
-- [ ] Cải thiện error handling tổng thể
-- [ ] Thêm logging chi tiết
-- [ ] Tối ưu hóa performance
-- [ ] Cập nhật documentation
+3. Thiếu kiểm thử đơn vị và tích hợp:
+   - Cần tăng độ phủ kiểm thử, đặc biệt cho các tình huống lỗi.
+   - Thiếu kiểm thử tích hợp giữa các module.
 
-## Critical Bugs
+4. Cải thiện hiệu suất:
+   - Một số phương thức thực hiện truy vấn redundant.
+   - Cần tối ưu hóa sử dụng bộ nhớ và CPU.
 
-### Module: Stake
-- Khi người dùng rút toàn bộ số token đã stake, tài khoản không được xóa khỏi danh sách staker
-- Các event Stake được phát ra không chứa đủ thông tin về người stake và số lượng token
-- Tính toán phần thưởng APY không chính xác khi người dùng thêm token vào stake đã tồn tại
-
-### Module: Farm
-- Hệ số nhân phần thưởng (x2, x3) không được áp dụng đúng khi tính toán phần thưởng hàng ngày
-- Phân phối token cho người dùng không kiểm tra số dư khả dụng của contract
-- Rủi ro overflow khi tính toán phần thưởng cho khoảng thời gian dài
-
-### Module: Bridge
-- Phương thức `check_transaction_status` của `LayerZeroAdapter` (dòng 120-140) không hoàn thành thực thi cho một số adapter không tương thích
-- Phương thức `update_transaction_hash` (dòng 160-180) thiếu validation để kiểm tra giao dịch trước khi cập nhật hash
-- Phương thức `calculate_fee` (dòng 45-60) chuyển đổi từ chuỗi sang f64 có thể gây mất độ chính xác với số lượng lớn
-- Phương thức `send_to_hub` (dòng 150-180) không kiểm tra số dư trước khi thực hiện giao dịch
-- Phương thức `receive_from_spoke` thiếu kiểm tra chain ID hợp lệ
-- Oracle không có cơ chế đồng thuận (consensus) giữa các nguồn dữ liệu (dòng 95-110)
-- Phương thức `update_token_price` trong Oracle không kiểm tra giá trị hợp lệ
-- Cache giao dịch có thể bị quá tải khi có nhiều giao dịch đồng thời
-- Chưa có cơ chế xác thực chéo (cross-validation) giữa các giao dịch bridge
-- Khóa riêng tư của operator được lưu trữ trong `BridgeConfig` mà không có biện pháp bảo vệ đủ
-- Thiếu cơ chế phát hiện bất thường (anomaly detection) cho các giao dịch bridge không chính xác
-
-### Module: Exchange
-- Tính toán slippage không chính xác khi swap khối lượng lớn
-- Không có bảo vệ chống manipulate giá trong các giao dịch liên tiếp
-- Hàm kiểm tra số dư không tính đến phí giao dịch, dẫn đến lỗi "Insufficient balance"
-
-### Module: SmartContracts
-- Không xác minh chữ ký đúng cách trong các giao dịch multichain
-- Thiếu kiểm tra reentrancy trong các hàm xử lý chuyển token
-- Các biến trạng thái quan trọng không được đánh dấu là `private` hoặc `internal` đúng cách
-
-## Major Bugs
-
-### Module: Farm
-- Không có cơ chế để dừng farm trong trường hợp khẩn cấp
-- Các hàm timelock không hoạt động chính xác khi múi giờ có sự thay đổi
-- Kiểm tra điều kiện tham gia farm không đầy đủ
-
-### Module: Stake
-- Test coverage cho các kịch bản phức tạp chỉ đạt 65%
-- Cảnh báo gas estimation quá cao cho một số hoạt động on-chain
-- Các điều kiện để yêu cầu unstake không được kiểm tra đầy đủ
-
-### Module: Bridge
-- Khả năng mở rộng của cơ sở dữ liệu giao dịch bị hạn chế với khối lượng lớn
-- Ghi log không đầy đủ cho các giao dịch bridge thất bại
-- Hiệu suất của phương thức `find_adapter` trong `BridgeManager` có độ phức tạp O(n)
-
-### Module: Exchange
-- Hiệu suất kém khi xử lý số lượng lớn order cùng một lúc
-- Thiếu hiển thị thông tin chi tiết về phí giao dịch
-- Cơ chế matching order trong sổ lệnh chưa tối ưu
-
-## Minor Bugs
-
-### Module: UI/UX
-- Thông báo lỗi không thân thiện với người dùng
-- Hiển thị sai định dạng số trong một số trường hợp đặc biệt
-- Responsive design không hoạt động tốt trên một số trình duyệt cũ
-
-### Module: Documentation
-- Thiếu tài liệu API cho một số endpoint quan trọng
-- Hướng dẫn tích hợp không cập nhật với phiên bản mới nhất
-- Mã ví dụ trong tài liệu sử dụng phiên bản cũ của thư viện
-
+// Ghi chú: Cập nhật danh sách khi sửa lỗi

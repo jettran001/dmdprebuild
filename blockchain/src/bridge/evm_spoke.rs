@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Result, Context, anyhow};
 use async_trait::async_trait;
 use uuid::Uuid;
 use ethers::types::{Address, U256, H256};
 use ethers::utils::{parse_ether, parse_units};
 use chrono::Utc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex, Semaphore};
 use tracing::{info, debug, warn, error};
 
 use crate::smartcontracts::{
@@ -47,6 +49,12 @@ pub struct EvmBridgeSpoke {
     dmd_service: Option<Arc<DmdTokenService>>,
     /// Cache các giao dịch bridge đang xử lý
     transactions: Arc<RwLock<HashMap<String, BridgeTransaction>>>,
+    /// Khóa để đảm bảo không xảy ra trường hợp các giao dịch trùng lặp
+    transaction_locks: Arc<RwLock<HashSet<String>>>,
+    /// Semaphore giới hạn số lượng giao dịch đồng thời
+    concurrent_tx_limiter: Arc<Semaphore>,
+    /// Đếm số giao dịch đang xử lý
+    active_transactions: Arc<AtomicUsize>,
     /// Địa chỉ contract bridge LayerZero
     bridge_contract_address: Option<String>,
     /// Địa chỉ contract ERC20 wrapper
@@ -78,6 +86,9 @@ impl EvmBridgeSpoke {
             evm_provider: None,
             dmd_service: None,
             transactions: Arc::new(RwLock::new(HashMap::new())),
+            transaction_locks: Arc::new(RwLock::new(HashSet::new())),
+            concurrent_tx_limiter: Arc::new(Semaphore::new(100)), // Giới hạn 100 giao dịch đồng thời
+            active_transactions: Arc::new(AtomicUsize::new(0)),
             bridge_contract_address: None,
             erc20_wrapper_address: None,
             erc1155_token_address: None,
@@ -103,14 +114,36 @@ impl EvmBridgeSpoke {
             ))
     }
     
-    /// Tạo transaction bridge mới
-    fn create_transaction(
+    /// Tạo transaction bridge mới với khóa chống trùng lặp
+    async fn create_transaction_with_lock(
         &self,
         is_to_hub: bool,
         from_address: &str,
         to_address: &str,
         amount: U256,
-    ) -> BridgeTransaction {
+    ) -> BridgeResult<BridgeTransaction> {
+        // Tạo một khóa duy nhất dựa trên thông tin giao dịch
+        let lock_key = format!("{}:{}:{}:{}", 
+            from_address, 
+            to_address, 
+            amount.to_string(),
+            if is_to_hub { "to_hub" } else { "from_hub" }
+        );
+        
+        // Kiểm tra và lấy khóa cho giao dịch này
+        let mut locks = self.transaction_locks.write().await;
+        if locks.contains(&lock_key) {
+            return Err(BridgeError::DuplicateTransaction(
+                format!("Giao dịch đang được xử lý: {} -> {}, số lượng: {}", 
+                    from_address, to_address, amount)
+            ));
+        }
+        
+        // Thêm khóa vào tập hợp
+        locks.insert(lock_key.clone());
+        drop(locks); // Giải phóng khóa ghi sớm
+        
+        // Tạo ID giao dịch mới
         let tx_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         
@@ -133,7 +166,7 @@ impl EvmBridgeSpoke {
                 )
             };
         
-        BridgeTransaction {
+        let transaction = BridgeTransaction {
             id: tx_id,
             from_chain,
             to_chain,
@@ -150,18 +183,110 @@ impl EvmBridgeSpoke {
             updated_at: now,
             completed_at: None,
             error_message: None,
-        }
+        };
+        
+        // Tăng bộ đếm giao dịch hoạt động
+        self.active_transactions.fetch_add(1, Ordering::SeqCst);
+        
+        Ok(transaction)
     }
     
-    /// Lưu thông tin giao dịch mới
+    /// Loại bỏ khóa giao dịch khi hoàn thành
+    async fn release_transaction_lock(
+        &self,
+        from_address: &str,
+        to_address: &str,
+        amount: U256,
+        is_to_hub: bool,
+    ) {
+        let lock_key = format!("{}:{}:{}:{}", 
+            from_address, 
+            to_address, 
+            amount.to_string(),
+            if is_to_hub { "to_hub" } else { "from_hub" }
+        );
+        
+        let mut locks = self.transaction_locks.write().await;
+        locks.remove(&lock_key);
+        
+        // Giảm bộ đếm giao dịch hoạt động
+        self.active_transactions.fetch_sub(1, Ordering::SeqCst);
+    }
+    
+    /// Lưu thông tin giao dịch mới với retry
     async fn store_transaction(&self, tx: BridgeTransaction) -> BridgeResult<()> {
+        const MAX_RETRIES: usize = 3;
+        let mut attempt = 0;
+        let mut last_error = None;
+        
+        while attempt < MAX_RETRIES {
+            match self.try_store_transaction(tx.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    attempt += 1;
+                    last_error = Some(e);
+                    
+                    if attempt < MAX_RETRIES {
+                        debug!("Thử lại lưu giao dịch lần {}/{}: {}", attempt, MAX_RETRIES, tx.id);
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(last_error.unwrap_or_else(|| 
+            BridgeError::StorageError(format!("Không thể lưu giao dịch sau {} lần thử", MAX_RETRIES))
+        ))
+    }
+    
+    /// Thử lưu giao dịch - hàm nội bộ
+    async fn try_store_transaction(&self, tx: BridgeTransaction) -> BridgeResult<()> {
         let mut txs = self.transactions.write().await;
         txs.insert(tx.id.clone(), tx);
         Ok(())
     }
     
-    /// Cập nhật thông tin giao dịch
+    /// Cập nhật thông tin giao dịch với retry
     async fn update_transaction(
+        &self,
+        tx_id: &str,
+        status: BridgeStatus,
+        source_tx_hash: Option<String>,
+        target_tx_hash: Option<String>,
+        error_message: Option<String>,
+    ) -> BridgeResult<BridgeTransaction> {
+        const MAX_RETRIES: usize = 3;
+        let mut attempt = 0;
+        let mut last_error = None;
+        
+        while attempt < MAX_RETRIES {
+            match self.try_update_transaction(
+                tx_id, 
+                status.clone(), 
+                source_tx_hash.clone(), 
+                target_tx_hash.clone(), 
+                error_message.clone()
+            ).await {
+                Ok(tx) => return Ok(tx),
+                Err(e) => {
+                    attempt += 1;
+                    last_error = Some(e);
+                    
+                    if attempt < MAX_RETRIES {
+                        debug!("Thử lại cập nhật giao dịch lần {}/{}: {}", attempt, MAX_RETRIES, tx_id);
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(last_error.unwrap_or_else(|| 
+            BridgeError::StorageError(format!("Không thể cập nhật giao dịch sau {} lần thử", MAX_RETRIES))
+        ))
+    }
+    
+    /// Thử cập nhật giao dịch - hàm nội bộ
+    async fn try_update_transaction(
         &self,
         tx_id: &str,
         status: BridgeStatus,
@@ -280,27 +405,53 @@ impl BridgeSpoke for EvmBridgeSpoke {
             _ => return Err(BridgeError::UnsupportedChain(format!("{:?}", self.chain))),
         };
         
-        let evm_provider = EvmProvider::new(provider_config, None)
-            .await
-            .map_err(|e| BridgeError::ProviderError(format!("Không thể tạo EVM provider: {}", e)))?;
+        // Thử khởi tạo provider 3 lần trước khi báo lỗi
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut last_error = None;
         
-        self.evm_provider = Some(Arc::new(evm_provider.clone()));
+        while attempts < max_attempts {
+            match EvmProvider::new(provider_config, None).await {
+                Ok(evm_provider) => {
+                    self.evm_provider = Some(Arc::new(evm_provider.clone()));
+                    
+                    // Thiết lập DMD Token Service
+                    match DmdTokenService::new(&evm_provider).await {
+                        Ok(dmd_service) => {
+                            self.dmd_service = Some(Arc::new(dmd_service));
+                            
+                            info!(
+                                "{:?} bridge spoke đã khởi tạo với bridge contract: {}, ERC1155: {}",
+                                self.chain, 
+                                self.bridge_contract_address.clone().unwrap_or_default(),
+                                self.erc1155_token_address.clone().unwrap_or_default()
+                            );
+                            
+                            return Ok(());
+                        },
+                        Err(e) => {
+                            last_error = Some(format!("Không thể tạo DMD token service: {}", e));
+                            warn!("{} (lần thử {}/{})", last_error.as_ref().unwrap(), attempts + 1, max_attempts);
+                        }
+                    }
+                },
+                Err(e) => {
+                    last_error = Some(format!("Không thể tạo EVM provider: {}", e));
+                    warn!("{} (lần thử {}/{})", last_error.as_ref().unwrap(), attempts + 1, max_attempts);
+                }
+            }
+            
+            attempts += 1;
+            if attempts < max_attempts {
+                // Tăng thời gian chờ sau mỗi lần thử
+                tokio::time::sleep(std::time::Duration::from_secs(2 * attempts)).await;
+            }
+        }
         
-        // Khởi tạo DMD Token Service
-        let dmd_service = DmdTokenService::new(&evm_provider)
-            .await
-            .map_err(|e| BridgeError::ProviderError(format!("Không thể tạo DMD token service: {}", e)))?;
-        
-        self.dmd_service = Some(Arc::new(dmd_service));
-        
-        info!(
-            "{:?} bridge spoke đã khởi tạo với bridge contract: {}, ERC1155: {}",
-            self.chain, 
-            self.bridge_contract_address.clone().unwrap_or_default(),
-            self.erc1155_token_address.clone().unwrap_or_default()
-        );
-        
-        Ok(())
+        // Nếu đến đây, có nghĩa là đã thử hết số lần mà không thành công
+        Err(BridgeError::ProviderError(last_error.unwrap_or_else(|| 
+            format!("Không thể khởi tạo provider cho chain {:?} sau {} lần thử", self.chain, max_attempts)
+        )))
     }
     
     /// Gửi token từ spoke sang hub (wrap ERC-1155 -> ERC-20 -> NEP-141)
@@ -310,6 +461,10 @@ impl BridgeSpoke for EvmBridgeSpoke {
         near_account: &str,
         amount: U256
     ) -> BridgeResult<BridgeTransaction> {
+        // Áp dụng semaphore để kiểm soát số lượng giao dịch đồng thời
+        let permit = self.concurrent_tx_limiter.acquire().await
+            .map_err(|e| BridgeError::SystemError(format!("Không thể nhận semaphore permit: {}", e)))?;
+            
         // Kiểm tra provider đã được khởi tạo
         let evm_provider = self.ensure_provider_initialized()?;
         
@@ -333,116 +488,156 @@ impl BridgeSpoke for EvmBridgeSpoke {
             ));
         }
         
-        // Tạo giao dịch bridge
-        let tx = self.create_transaction(true, &from_address, near_account, amount);
-        self.store_transaction(tx.clone()).await?;
+        // Tạo giao dịch bridge với khóa chống trùng lặp
+        let tx = match self.create_transaction_with_lock(true, &from_address, near_account, amount).await {
+            Ok(tx) => tx,
+            Err(e) => {
+                // Nếu lỗi tạo giao dịch, đảm bảo giải phóng permit
+                drop(permit);
+                return Err(e);
+            }
+        };
         
-        // Cập nhật trạng thái
         let tx_id = tx.id.clone();
-        self.update_transaction(
-            &tx_id,
-            BridgeStatus::TokenProcessing,
-            None,
-            None,
-            None
-        ).await?;
         
-        // Wrap ERC-1155 thành ERC-20
-        debug!("Wrapping {} DMD từ ERC-1155 sang ERC-20", amount);
-        let wrap_tx_hash = self.wrap_erc1155_to_erc20(private_key, amount).await?;
-        
-        // Cập nhật hash giao dịch wrap
-        self.update_transaction(
-            &tx_id,
-            BridgeStatus::TokenProcessing,
-            Some(wrap_tx_hash.clone()),
-            None,
-            None
-        ).await?;
-        
-        // Chờ xác nhận giao dịch wrap với timeout
-        let wrap_success = self.wait_for_transaction_confirmation(&wrap_tx_hash, self.config.confirmation_timeout)
-            .await
-            .map_err(|e| BridgeError::TransactionFailed(format!("Wrap transaction failed: {}", e)))?;
+        // Sử dụng try-finally pattern thông qua closure và defer
+        let result = async {
+            self.store_transaction(tx.clone()).await?;
             
-        if !wrap_success {
-            return Err(BridgeError::TransactionFailed("Wrap transaction không thành công".to_string()));
+            // Cập nhật trạng thái
+            self.update_transaction(
+                &tx_id,
+                BridgeStatus::TokenProcessing,
+                None,
+                None,
+                None
+            ).await?;
+            
+            // Wrap ERC-1155 thành ERC-20
+            debug!("Wrapping {} DMD từ ERC-1155 sang ERC-20", amount);
+            let wrap_tx_hash = self.wrap_erc1155_to_erc20(private_key, amount).await?;
+            
+            // Cập nhật hash giao dịch wrap
+            self.update_transaction(
+                &tx_id,
+                BridgeStatus::TokenProcessing,
+                Some(wrap_tx_hash.clone()),
+                None,
+                None
+            ).await?;
+            
+            // Chờ xác nhận giao dịch wrap với timeout
+            let wrap_success = self.wait_for_transaction_confirmation(&wrap_tx_hash, self.config.confirmation_timeout)
+                .await
+                .map_err(|e| BridgeError::TransactionFailed(format!("Wrap transaction failed: {}", e)))?;
+                
+            if !wrap_success {
+                return Err(BridgeError::TransactionFailed("Wrap transaction không thành công".to_string()));
+            }
+            
+            // Lấy địa chỉ bridge contract và LayerZero endpoint
+            let bridge_contract = self.ensure_bridge_contract_address()?;
+            let lz_endpoint = self.ensure_lz_endpoint_address()?;
+            
+            // Cập nhật trạng thái
+            self.update_transaction(
+                &tx_id,
+                BridgeStatus::AwaitingRelayer,
+                Some(wrap_tx_hash.clone()),
+                None,
+                None
+            ).await?;
+            
+            // Ước tính phí bridge
+            let fee = self.estimate_fee(amount).await?;
+            
+            // Tạo contract interface cho bridge
+            let bridge_contract_instance = evm_provider
+                .create_contract_instance(&bridge_contract, ERC1155_WRAPPER_ABI)
+                .map_err(|e| BridgeError::ProviderError(format!("Không thể tạo contract instance: {}", e)))?;
+            
+            // Lấy LZ chain ID cho NEAR
+            let near_lz_id = self.get_lz_chain_id(DmdChain::Near)?;
+            
+            // Gửi token qua bridge
+            debug!("Sending {} DMD từ {} đến {}", amount, from_address, near_account);
+            let bridge_tx = bridge_contract_instance
+                .send_with_value(
+                    near_lz_id,
+                    near_account.to_string(),
+                    amount,
+                    from_address.clone(),
+                    fee,
+                )
+                .await
+                .map_err(|e| BridgeError::TransactionFailed(format!("Bridge transaction failed: {}", e)))?;
+            
+            // Lấy hash giao dịch bridge
+            let bridge_tx_hash = bridge_tx.transaction_hash.to_string();
+            
+            // Cập nhật hash giao dịch bridge
+            self.update_transaction(
+                &tx_id,
+                BridgeStatus::Sending,
+                Some(bridge_tx_hash.clone()),
+                None,
+                None
+            ).await?;
+            
+            // Chờ xác nhận giao dịch bridge với timeout
+            let bridge_success = self.wait_for_transaction_confirmation(&bridge_tx_hash, self.config.confirmation_timeout)
+                .await
+                .map_err(|e| BridgeError::TransactionFailed(format!("Bridge transaction failed: {}", e)))?;
+                
+            if !bridge_success {
+                return Err(BridgeError::TransactionFailed("Bridge transaction không thành công".to_string()));
+            }
+            
+            // Cập nhật trạng thái giao dịch
+            self.update_transaction(
+                &tx_id,
+                BridgeStatus::AwaitingConfirmation,
+                Some(bridge_tx_hash),
+                None,
+                None
+            ).await?;
+            
+            // Lấy thông tin giao dịch đã cập nhật
+            let updated_tx = self.get_transaction(&tx_id).await?;
+            
+            Ok(updated_tx)
+        }.await;
+        
+        // Clean up đảm bảo luôn được thực hiện
+        match &result {
+            Ok(tx) => {
+                if tx.status == BridgeStatus::Completed || tx.status == BridgeStatus::Failed {
+                    // Giải phóng khóa giao dịch chỉ khi hoàn thành hoặc thất bại
+                    self.release_transaction_lock(&from_address, near_account, amount, true).await;
+                }
+            },
+            Err(_) => {
+                // Nếu có lỗi, giải phóng khóa giao dịch để không bị block vĩnh viễn
+                self.release_transaction_lock(&from_address, near_account, amount, true).await;
+                
+                // Cập nhật trạng thái lỗi
+                let _ = self.update_transaction(
+                    &tx_id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some("Lỗi khi gửi token đến hub".to_string())
+                ).await;
+            }
         }
         
-        // Lấy địa chỉ bridge contract và LayerZero endpoint
-        let bridge_contract = self.ensure_bridge_contract_address()?;
-        let lz_endpoint = self.ensure_lz_endpoint_address()?;
+        // Đảm bảo luôn giải phóng permit dù thành công hay thất bại
+        drop(permit);
         
-        // Cập nhật trạng thái
-        self.update_transaction(
-            &tx_id,
-            BridgeStatus::AwaitingRelayer,
-            Some(wrap_tx_hash.clone()),
-            None,
-            None
-        ).await?;
-        
-        // Ước tính phí bridge
-        let fee = self.estimate_fee(amount).await?;
-        
-        // Tạo contract interface cho bridge
-        let bridge_contract_instance = evm_provider
-            .create_contract_instance(&bridge_contract, ERC1155_WRAPPER_ABI)
-            .map_err(|e| BridgeError::ProviderError(format!("Không thể tạo contract instance: {}", e)))?;
-        
-        // Lấy LZ chain ID cho NEAR
-        let near_lz_id = self.get_lz_chain_id(DmdChain::Near)?;
-        
-        // Gửi token qua bridge
-        debug!("Sending {} DMD từ {} đến {}", amount, from_address, near_account);
-        let bridge_tx = bridge_contract_instance
-            .send_with_value(
-                near_lz_id,
-                near_account.to_string(),
-                amount,
-                from_address.clone(),
-                fee,
-            )
-            .await
-            .map_err(|e| BridgeError::TransactionFailed(format!("Bridge transaction failed: {}", e)))?;
-        
-        // Lấy hash giao dịch bridge
-        let bridge_tx_hash = bridge_tx.transaction_hash.to_string();
-        
-        // Cập nhật hash giao dịch bridge
-        self.update_transaction(
-            &tx_id,
-            BridgeStatus::Sending,
-            Some(bridge_tx_hash.clone()),
-            None,
-            None
-        ).await?;
-        
-        // Chờ xác nhận giao dịch bridge với timeout
-        let bridge_success = self.wait_for_transaction_confirmation(&bridge_tx_hash, self.config.confirmation_timeout)
-            .await
-            .map_err(|e| BridgeError::TransactionFailed(format!("Bridge transaction failed: {}", e)))?;
-            
-        if !bridge_success {
-            return Err(BridgeError::TransactionFailed("Bridge transaction không thành công".to_string()));
-        }
-        
-        // Cập nhật trạng thái giao dịch
-        self.update_transaction(
-            &tx_id,
-            BridgeStatus::AwaitingConfirmation,
-            Some(bridge_tx_hash),
-            None,
-            None
-        ).await?;
-        
-        // Lấy thông tin giao dịch đã cập nhật
-        let updated_tx = self.get_transaction(&tx_id).await?;
-        
-        Ok(updated_tx)
+        result
     }
     
-    /// Chờ xác nhận giao dịch với timeout
+    /// Chờ xác nhận giao dịch với timeout và khả năng hủy bỏ
     async fn wait_for_transaction_confirmation(&self, tx_hash: &str, timeout_seconds: u64) -> BridgeResult<bool> {
         // Kiểm tra provider đã được khởi tạo
         let evm_provider = self.ensure_provider_initialized()?;
@@ -453,38 +648,76 @@ impl BridgeSpoke for EvmBridgeSpoke {
         // Poll cho đến khi nhận được kết quả hoặc timeout
         debug!("Waiting for transaction confirmation: {}", tx_hash);
         
-        // Cố gắng chờ trong khoảng thời gian timeout
-        while std::time::Instant::now() < deadline {
-            // Kiểm tra trạng thái giao dịch
-            match evm_provider.get_transaction_receipt(tx_hash).await {
-                Ok(Some(receipt)) => {
-                    // Kiểm tra xem giao dịch đã thành công chưa
-                    if receipt.status.unwrap_or_default().as_u64() == 1 {
-                        debug!("Transaction confirmed successfully: {}", tx_hash);
-                        return Ok(true);
-                    } else {
-                        // Giao dịch thất bại
-                        error!("Transaction failed: {}", tx_hash);
-                        return Err(BridgeError::TransactionFailed(format!("Transaction failed with status 0: {}", tx_hash)));
+        // Tạo channel cho việc hủy bỏ
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<bool>(1);
+        let tx_hash_clone = tx_hash.to_string();
+        let provider_clone = evm_provider.clone();
+        
+        // Tạo task riêng cho việc kiểm tra xác nhận giao dịch
+        let confirmation_task = tokio::spawn(async move {
+            let mut backoff_ms = 2000; // Bắt đầu với 2 giây
+            let max_backoff_ms = 15000; // Tối đa 15 giây
+            
+            loop {
+                // Kiểm tra trạng thái giao dịch
+                match provider_clone.get_transaction_receipt(&tx_hash_clone).await {
+                    Ok(Some(receipt)) => {
+                        // Kiểm tra xem giao dịch đã thành công chưa
+                        let success = receipt.status.unwrap_or_default().as_u64() == 1;
+                        if success {
+                            debug!("Transaction confirmed successfully: {}", tx_hash_clone);
+                            let _ = tx.send(true).await;
+                            return Ok(true);
+                        } else {
+                            // Giao dịch thất bại
+                            error!("Transaction failed: {}", tx_hash_clone);
+                            let _ = tx.send(false).await;
+                            return Err(BridgeError::TransactionFailed(
+                                format!("Transaction failed with status 0: {}", tx_hash_clone)
+                            ));
+                        }
+                    },
+                    Ok(None) => {
+                        // Giao dịch vẫn đang pending, đợi thêm
+                        debug!("Transaction still pending, waiting: {}", tx_hash_clone);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        
+                        // Tăng dần thời gian chờ (exponential backoff)
+                        backoff_ms = std::cmp::min(backoff_ms * 2, max_backoff_ms);
+                    },
+                    Err(e) => {
+                        // Lỗi khi kiểm tra giao dịch, thử lại
+                        warn!("Error checking transaction status, retrying: {}: {}", tx_hash_clone, e);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        
+                        // Tăng dần thời gian chờ (exponential backoff)
+                        backoff_ms = std::cmp::min(backoff_ms * 2, max_backoff_ms);
                     }
-                },
-                Ok(None) => {
-                    // Giao dịch vẫn đang pending, đợi thêm
-                    debug!("Transaction still pending, waiting: {}", tx_hash);
-                    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-                },
-                Err(e) => {
-                    // Lỗi khi kiểm tra giao dịch, thử lại
-                    warn!("Error checking transaction status, retrying: {}: {}", tx_hash, e);
-                    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 }
             }
-        }
+        });
         
-        // Nếu đã hết timeout mà vẫn chưa nhận được kết quả
-        error!("Transaction confirmation timed out after {} seconds: {}", timeout_seconds, tx_hash);
-        Err(BridgeError::TransactionFailed(format!("Timeout waiting for confirmation after {} seconds: {}", 
-            timeout_seconds, tx_hash)))
+        // Thiết lập timeout riêng
+        let timeout_future = tokio::time::sleep(std::time::Duration::from_secs(timeout_seconds));
+        
+        tokio::select! {
+            // Nếu nhận được kết quả từ task kiểm tra xác nhận
+            result = rx.recv() => {
+                match result {
+                    Some(true) => Ok(true),
+                    Some(false) => Err(BridgeError::TransactionFailed(format!("Transaction failed: {}", tx_hash))),
+                    None => Err(BridgeError::TransactionFailed(format!("Confirmation task terminated unexpectedly: {}", tx_hash)))
+                }
+            },
+            // Nếu timeout xảy ra trước
+            _ = timeout_future => {
+                // Hủy bỏ task đang chạy
+                confirmation_task.abort();
+                error!("Transaction confirmation timed out after {} seconds: {}", timeout_seconds, tx_hash);
+                Err(BridgeError::TimeoutError(format!("Timeout waiting for confirmation after {} seconds: {}", 
+                    timeout_seconds, tx_hash)))
+            }
+        }
     }
     
     /// Nhận token từ hub (unwrap NEP-141 -> ERC-20 -> ERC-1155)
@@ -494,57 +727,106 @@ impl BridgeSpoke for EvmBridgeSpoke {
         to_address: &str,
         amount: U256
     ) -> BridgeResult<BridgeTransaction> {
+        // Áp dụng semaphore để kiểm soát số lượng giao dịch đồng thời
+        let permit = self.concurrent_tx_limiter.acquire().await
+            .map_err(|e| BridgeError::SystemError(format!("Không thể nhận semaphore permit: {}", e)))?;
+    
         // Kiểm tra địa chỉ EVM hợp lệ
         if !self.is_address_valid(to_address) {
+            // Đảm bảo giải phóng permit
+            drop(permit);
             return Err(BridgeError::InvalidAddress(format!("Địa chỉ EVM không hợp lệ: {}", to_address)));
         }
         
         // Tạo thông tin giao dịch
         let from_near = "near.bridge.testnet";
-        let tx = self.create_transaction(false, from_near, to_address, amount);
-        self.store_transaction(tx.clone()).await?;
         
-        // Cập nhật trạng thái
-        let tx = self.update_transaction(
-            &tx.id,
-            BridgeStatus::Processing,
-            None,
-            None,
-            None,
-        ).await?;
+        // Tạo giao dịch với khóa chống trùng lặp
+        let tx = match self.create_transaction_with_lock(false, from_near, to_address, amount).await {
+            Ok(tx) => tx,
+            Err(e) => {
+                // Đảm bảo giải phóng permit
+                drop(permit);
+                return Err(e);
+            }
+        };
         
-        // Trong thực tế, chúng ta sẽ kiểm tra proof từ NEAR và xác thực
-        // Sau đó gọi hàm unwrap để chuyển đổi từ ERC20 thành ERC1155
-        // Giả lập tx hash cho việc nhận token từ NEAR (thông qua LayerZero)
-        let receive_tx_hash = format!("0x{}", Uuid::new_v4().to_string().replace("-", ""));
+        let tx_id = tx.id.clone();
         
-        // Cập nhật trạng thái
-        let tx = self.update_transaction(
-            &tx.id,
-            BridgeStatus::TokenProcessing,
-            None,
-            Some(receive_tx_hash),
-            None,
-        ).await?;
+        // Sử dụng try-finally pattern
+        let result = async {
+            self.store_transaction(tx.clone()).await?;
+            
+            // Cập nhật trạng thái
+            let tx = self.update_transaction(
+                &tx_id,
+                BridgeStatus::Processing,
+                None,
+                None,
+                None,
+            ).await?;
+            
+            // Trong thực tế, chúng ta sẽ kiểm tra proof từ NEAR và xác thực
+            // Sau đó gọi hàm unwrap để chuyển đổi từ ERC20 thành ERC1155
+            // Giả lập tx hash cho việc nhận token từ NEAR (thông qua LayerZero)
+            let receive_tx_hash = format!("0x{}", Uuid::new_v4().to_string().replace("-", ""));
+            
+            // Cập nhật trạng thái
+            let tx = self.update_transaction(
+                &tx_id,
+                BridgeStatus::TokenProcessing,
+                None,
+                Some(receive_tx_hash),
+                None,
+            ).await?;
+            
+            // Giả lập unwrap
+            let unwrap_tx_hash = format!("0x{}", Uuid::new_v4().to_string().replace("-", ""));
+            
+            // Cập nhật trạng thái hoàn thành
+            let updated_tx = self.update_transaction(
+                &tx_id,
+                BridgeStatus::Completed,
+                None,
+                Some(unwrap_tx_hash),
+                None,
+            ).await?;
+            
+            info!(
+                "Bridge transaction completed: NEAR -> {:?}, to: {}, amount: {}, id: {}",
+                self.chain, to_address, amount, tx.id
+            );
+            
+            Ok(updated_tx)
+        }.await;
         
-        // Giả lập unwrap
-        let unwrap_tx_hash = format!("0x{}", Uuid::new_v4().to_string().replace("-", ""));
+        // Clean up
+        match &result {
+            Ok(tx) => {
+                if tx.status == BridgeStatus::Completed || tx.status == BridgeStatus::Failed {
+                    // Giải phóng khóa giao dịch
+                    self.release_transaction_lock(from_near, to_address, amount, false).await;
+                }
+            },
+            Err(_) => {
+                // Nếu có lỗi, giải phóng khóa để tránh block vĩnh viễn
+                self.release_transaction_lock(from_near, to_address, amount, false).await;
+                
+                // Cập nhật trạng thái lỗi
+                let _ = self.update_transaction(
+                    &tx_id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some("Lỗi khi nhận token từ hub".to_string())
+                ).await;
+            }
+        }
         
-        // Cập nhật trạng thái hoàn thành
-        let updated_tx = self.update_transaction(
-            &tx.id,
-            BridgeStatus::Completed,
-            None,
-            Some(unwrap_tx_hash),
-            None,
-        ).await?;
+        // Đảm bảo giải phóng permit
+        drop(permit);
         
-        info!(
-            "Bridge transaction completed: NEAR -> {:?}, to: {}, amount: {}, id: {}",
-            self.chain, to_address, amount, tx.id
-        );
-        
-        Ok(updated_tx)
+        result
     }
     
     /// Wrap token từ ERC-1155 sang ERC-20
@@ -667,5 +949,34 @@ impl BridgeSpoke for EvmBridgeSpoke {
         // Xác thực địa chỉ EVM
         address.starts_with("0x") && address.len() == 42 && 
             address.chars().skip(2).all(|c| c.is_ascii_hexdigit())
+    }
+    
+    /// Lấy thông tin về các giao dịch đang xử lý
+    async fn get_processing_stats(&self) -> BridgeResult<(usize, usize)> {
+        let active_count = self.active_transactions.load(Ordering::SeqCst);
+        let locks = self.transaction_locks.read().await;
+        let locked_count = locks.len();
+        
+        Ok((active_count, locked_count))
+    }
+    
+    /// Kiểm tra xem có quá nhiều giao dịch đang xử lý không
+    async fn is_overloaded(&self) -> bool {
+        let (active_count, _) = self.get_processing_stats().await.unwrap_or((0, 0));
+        let max_concurrent = self.concurrent_tx_limiter.available_permits();
+        
+        // Nếu sử dụng hơn 80% capacity, coi là overloaded
+        active_count >= (max_concurrent * 8 / 10)
+    }
+}
+
+// Định nghĩa lỗi mới cho giao dịch trùng lặp
+impl BridgeError {
+    pub const fn DuplicateTransaction(message: String) -> Self {
+        BridgeError::Custom(message)
+    }
+    
+    pub const fn StorageError(message: String) -> Self {
+        BridgeError::Custom(message)
     }
 } 

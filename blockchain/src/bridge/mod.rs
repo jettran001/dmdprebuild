@@ -14,6 +14,7 @@
 //! * `types.rs`: Các kiểu dữ liệu chung cho module bridge
 //! * `traits.rs`: Các trait chính định nghĩa giao diện bridge
 //! * `oracle.rs`: Module oracle để theo dõi và đồng bộ dữ liệu giữa các blockchain
+//! * `persistent_repository.rs`: Lưu trữ bền vững cho các giao dịch bridge
 
 // External imports
 use ethers::types::{Address, U256, H256};
@@ -48,31 +49,143 @@ mod types;
 mod error;
 mod traits;
 mod oracle;
+mod persistent_repository;
 
 // Re-exports chính
 pub use bridge::{BridgeManager, BridgeAdapter, LayerZeroAdapter, BridgeTransaction, BridgeTransactionStatus};
-pub use manager::BridgeManager as BridgeTransactionManager;
-pub use near_hub::NearBridgeHub;
-pub use evm_spoke::EvmBridgeSpoke;
-pub use transaction::{BridgeTransaction as DetailedBridgeTransaction, BridgeTransactionRepository, BridgeTransactionStatus as DetailedBridgeTransactionStatus};
-pub use types::{BridgeDirection, BridgeTokenType, BridgeStatus, BridgeConfig};
-pub use error::{BridgeError, BridgeResult, is_bridge_supported, is_evm_chain};
-pub use traits::{BridgeHub, BridgeSpoke, BridgeProvider};
+pub use manager::{
+    BridgeManager as BridgeTransactionManager, 
+    BridgeConfig, 
+    BridgeResult as BridgeManagerResult,
+};
+pub use near_hub::{
+    NearBridgeHub, 
+    NearBridgeConfig, 
+    NearBridgeError, 
+    NearBridgeResult,
+    NearMessageFormat,
+};
+pub use evm_spoke::{
+    EvmBridgeSpoke, 
+    EvmBridgeConfig, 
+    EvmBridgeError, 
+    EvmBridgeResult,
+    EvmMessageRequest,
+    EvmMessageResponse,
+};
+pub use transaction::{
+    BridgeTransaction as DetailedBridgeTransaction, 
+    BridgeTransactionRepository, 
+    BridgeTransactionStatus as DetailedBridgeTransactionStatus,
+};
+pub use persistent_repository::{
+    JsonBridgeTransactionRepository,
+};
+pub use types::{
+    BridgeDirection, 
+    BridgeTokenType, 
+    BridgeStatus, 
+    BridgeConfig,
+    BridgeEvent,
+    BridgeEventType,
+    BridgeMetadata,
+    BridgeRequestType,
+    BridgeResponse,
+    TokenAmount,
+};
+pub use error::{
+    BridgeError, 
+    BridgeResult, 
+    is_bridge_supported, 
+    is_evm_chain,
+    BridgeTransactionNotFound,
+    UnsupportedChain,
+    UnsupportedRoute,
+    InvalidAmount,
+    InvalidAddress,
+    InvalidStatus,
+    TransactionFailed,
+    ProviderError,
+    SystemError,
+    ConnectionError,
+    TimeoutError,
+    MissingProvider,
+    ValidationError,
+    TransactionCreationError,
+    ConfigurationError,
+};
+pub use traits::{
+    BridgeHub, 
+    BridgeSpoke, 
+    BridgeProvider,
+    BridgeEventListener,
+    BridgeEventEmitter,
+    BridgeTransactionValidator,
+    BridgeMessageEncoder,
+    BridgeMessageDecoder,
+};
 pub use oracle::{
-    OracleManager, OracleProvider, OracleData, OracleDataType, OracleUpdateStatus,
-    ChainlinkOracle, ChainlinkConfig
+    OracleManager, 
+    OracleProvider, 
+    OracleData, 
+    OracleDataType, 
+    OracleUpdateStatus,
+    ChainlinkOracle, 
+    ChainlinkConfig,
+    OracleConnectionPool,
+    OraclePriceData,
+    OracleEventData,
 };
 
-// Các constants
-pub const BRIDGE_VERIFICATION_CONFIRMATIONS: u64 = 12;
-pub const NEAR_HUB_CONTRACT_ID: &str = "dmd_bridge.near";
-pub const DEFAULT_BRIDGE_TIMEOUT_MS: u64 = 300000; // 5 phút
-pub const MAX_PENDING_TRANSACTIONS: usize = 1000;
-pub const DEFAULT_CACHE_TTL_MS: u64 = 60000; // 1 phút
+/// Cấu hình Bridge mặc định
+#[derive(Debug, Clone)]
+pub struct BridgeDefaultConfig {
+    /// Số xác nhận cần thiết để xác minh giao dịch bridge
+    pub verification_confirmations: u64,
+    /// ID hợp đồng bridge trên NEAR
+    pub near_hub_contract_id: String,
+    /// Thời gian timeout mặc định cho giao dịch (ms)
+    pub default_timeout_ms: u64,
+    /// Số lượng giao dịch đang xử lý tối đa
+    pub max_pending_transactions: usize,
+    /// Thời gian tồn tại cache mặc định (ms)
+    pub default_cache_ttl_ms: u64,
+    /// Đường dẫn đến tệp lưu trữ giao dịch
+    pub transaction_storage_path: String,
+}
+
+impl Default for BridgeDefaultConfig {
+    fn default() -> Self {
+        Self {
+            verification_confirmations: 12,
+            near_hub_contract_id: "dmd_bridge.near".to_string(),
+            default_timeout_ms: 300_000, // 5 phút
+            max_pending_transactions: 1_000,
+            default_cache_ttl_ms: 60_000, // 1 phút
+            transaction_storage_path: "./data/bridge_transactions.json".to_string(),
+        }
+    }
+}
+
+/// Cấu hình mặc định cho Bridge
+pub static BRIDGE_CONFIG: once_cell::sync::Lazy<std::sync::RwLock<BridgeDefaultConfig>> = 
+    once_cell::sync::Lazy::new(|| std::sync::RwLock::new(BridgeDefaultConfig::default()));
 
 /// Oracle cache cho Bridge để theo dõi giao dịch cross-chain
 pub static BRIDGE_ORACLE: once_cell::sync::Lazy<tokio::sync::RwLock<Option<std::sync::Arc<crate::oracle::DmdOracle>>>> = 
     once_cell::sync::Lazy::new(|| tokio::sync::RwLock::new(None));
+
+/// Thiết lập cấu hình mặc định cho Bridge
+pub fn set_bridge_config(config: BridgeDefaultConfig) {
+    let mut bridge_config = BRIDGE_CONFIG.write().unwrap();
+    *bridge_config = config;
+}
+
+/// Lấy cấu hình mặc định cho Bridge
+pub fn get_bridge_config() -> BridgeDefaultConfig {
+    let bridge_config = BRIDGE_CONFIG.read().unwrap();
+    bridge_config.clone()
+}
 
 /// Thiết lập Oracle cho Bridge
 pub async fn set_bridge_oracle(oracle: std::sync::Arc<crate::oracle::DmdOracle>) {
@@ -84,6 +197,14 @@ pub async fn set_bridge_oracle(oracle: std::sync::Arc<crate::oracle::DmdOracle>)
 pub async fn get_bridge_oracle() -> Option<std::sync::Arc<crate::oracle::DmdOracle>> {
     let oracle_guard = BRIDGE_ORACLE.read().await;
     oracle_guard.clone()
+}
+
+/// Khởi tạo và trả về repository lưu trữ giao dịch bridge
+pub fn create_transaction_repository() -> anyhow::Result<Arc<dyn BridgeTransactionRepository + Send + Sync>> {
+    let config = get_bridge_config();
+    let repo = JsonBridgeTransactionRepository::new(&config.transaction_storage_path)?
+        .start_async_worker();
+    Ok(Arc::new(repo))
 }
 
 /// Xác thực dữ liệu bridge trước khi xử lý

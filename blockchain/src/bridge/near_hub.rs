@@ -10,6 +10,8 @@ use ethers::types::U256;
 use chrono::Utc;
 use tokio::sync::RwLock;
 use tracing::{info, debug, warn, error};
+use rand;
+use regex::Regex;
 
 use crate::smartcontracts::{
     dmd_token::DmdChain,
@@ -241,6 +243,195 @@ impl NearBridgeHub {
             .clone()
             .ok_or_else(|| BridgeError::ProviderError("NEAR provider chưa được khởi tạo".to_string()))
     }
+
+    /// Chờ giao dịch NEAR được xác nhận với cơ chế timeout
+    async fn wait_for_transaction_finality(&self, tx_hash: &str, timeout_seconds: u64) -> BridgeResult<bool> {
+        let provider = self.ensure_provider_initialized()?;
+
+        // Kiểm tra tính hợp lệ của hash giao dịch
+        if tx_hash.is_empty() {
+            return Err(BridgeError::InvalidTransactionHash(
+                "Hash giao dịch không được để trống".to_string()
+            ));
+        }
+
+        // Khởi tạo các tham số cho việc kiểm tra xác nhận
+        let max_attempts = 60; // Số lần kiểm tra tối đa
+        let initial_backoff_ms = 500; // Thời gian chờ ban đầu giữa các lần kiểm tra
+        let max_backoff_ms = 5000; // Thời gian chờ tối đa giữa các lần kiểm tra
+        let tx_hash_clone = tx_hash.to_string();
+        
+        // Sử dụng tokio channel để giao tiếp giữa các task
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        
+        // Tạo task riêng để kiểm tra giao dịch
+        let confirmation_task = tokio::spawn(async move {
+            let mut backoff_ms = initial_backoff_ms;
+            
+            for attempt in 1..=max_attempts {
+                debug!("Kiểm tra xác nhận giao dịch NEAR lần {}/{}: {}", attempt, max_attempts, tx_hash_clone);
+                
+                // Giả lập kiểm tra xác nhận giao dịch (thực tế sẽ gọi NEAR RPC)
+                // TODO: Thay thế bằng lệnh gọi thực tế đến NEAR RPC
+                let is_finalized = match attempt {
+                    // Giả lập: xác nhận giao dịch sau 3 lần thử
+                    n if n >= 3 => true,
+                    _ => false
+                };
+                
+                if is_finalized {
+                    // Gửi kết quả xác nhận
+                    if tx.send(true).await.is_err() {
+                        warn!("Không thể gửi kết quả xác nhận cho giao dịch {}", tx_hash_clone);
+                    }
+                    return;
+                }
+                
+                // Tăng thời gian chờ theo exponential backoff
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = std::cmp::min(backoff_ms * 2, max_backoff_ms);
+            }
+            
+            // Nếu đã hết số lần thử mà không thành công
+            if tx.send(false).await.is_err() {
+                warn!("Không thể gửi kết quả thất bại cho giao dịch {}", tx_hash_clone);
+            }
+        });
+        
+        // Thiết lập timeout
+        let timeout_duration = std::time::Duration::from_secs(timeout_seconds);
+        let timeout_future = tokio::time::sleep(timeout_duration);
+        
+        // Sử dụng tokio::select để xử lý kết quả hoặc timeout
+        tokio::select! {
+            // Nếu nhận được kết quả từ task kiểm tra
+            result = rx.recv() => {
+                match result {
+                    Some(true) => {
+                        info!("Giao dịch NEAR đã được xác nhận: {}", tx_hash);
+                        Ok(true)
+                    },
+                    Some(false) => {
+                        warn!("Giao dịch NEAR không được xác nhận sau {} lần thử: {}", max_attempts, tx_hash);
+                        Err(BridgeError::TransactionFailed(format!("Giao dịch không được xác nhận: {}", tx_hash)))
+                    },
+                    None => {
+                        warn!("Task kiểm tra xác nhận kết thúc không mong muốn: {}", tx_hash);
+                        Err(BridgeError::SystemError(format!("Task kiểm tra xác nhận kết thúc không mong muốn: {}", tx_hash)))
+                    }
+                }
+            },
+            // Nếu timeout xảy ra trước
+            _ = timeout_future => {
+                // Hủy bỏ task kiểm tra
+                confirmation_task.abort();
+                error!("Đã vượt quá thời gian chờ {} giây khi chờ xác nhận giao dịch NEAR: {}", timeout_seconds, tx_hash);
+                Err(BridgeError::TimeoutError(format!("Đã vượt quá thời gian chờ {} giây: {}", timeout_seconds, tx_hash)))
+            }
+        }
+    }
+
+    /// Kiểm tra tính hợp lệ của địa chỉ dựa trên chain
+    fn validate_address(&self, address: &str, chain: &DmdChain) -> BridgeResult<()> {
+        if address.is_empty() {
+            return Err(BridgeError::InvalidAddress("Địa chỉ không được để trống".to_string()));
+        }
+        
+        match chain {
+            DmdChain::Ethereum | DmdChain::BinanceSmartChain | DmdChain::Polygon | 
+            DmdChain::Arbitrum | DmdChain::Optimism | DmdChain::Base | DmdChain::Fantom => {
+                // Kiểm tra địa chỉ EVM: 0x + 40 hex characters
+                let evm_regex = Regex::new(r"^0x[0-9a-fA-F]{40}$").unwrap();
+                if !evm_regex.is_match(address) {
+                    return Err(BridgeError::InvalidAddress(
+                        format!("Địa chỉ EVM không hợp lệ (phải là 0x + 40 ký tự hex): {}", address)
+                    ));
+                }
+                
+                // Kiểm tra checksum cho địa chỉ EVM (đơn giản)
+                if !address.chars().skip(2).any(|c| c.is_uppercase()) && 
+                   !address.chars().skip(2).all(|c| c.is_lowercase()) {
+                    warn!("Địa chỉ EVM có thể không có checksum đúng: {}", address);
+                }
+            },
+            DmdChain::Near => {
+                // Kiểm tra địa chỉ NEAR: phải kết thúc bằng .near hoặc .testnet và không chứa ký tự đặc biệt trừ dấu chấm và gạch dưới
+                if !address.ends_with(".near") && !address.ends_with(".testnet") {
+                    return Err(BridgeError::InvalidAddress(
+                        format!("Địa chỉ NEAR không hợp lệ (phải kết thúc bằng .near hoặc .testnet): {}", address)
+                    ));
+                }
+                
+                let near_account_name = address.split('.').next().unwrap_or("");
+                let account_regex = Regex::new(r"^[a-z0-9_-]{2,64}$").unwrap();
+                if !account_regex.is_match(near_account_name) {
+                    return Err(BridgeError::InvalidAddress(
+                        format!("Tên tài khoản NEAR không hợp lệ (chỉ chấp nhận a-z, 0-9, _, - và độ dài 2-64 ký tự): {}", near_account_name)
+                    ));
+                }
+            },
+            DmdChain::Solana => {
+                // Kiểm tra địa chỉ Solana: base58 encoded string with 32-44 characters
+                let solana_regex = Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$").unwrap();
+                if !solana_regex.is_match(address) {
+                    return Err(BridgeError::InvalidAddress(
+                        format!("Địa chỉ Solana không hợp lệ (phải là chuỗi base58 độ dài 32-44 ký tự): {}", address)
+                    ));
+                }
+            },
+            _ => {
+                // Kiểm tra cơ bản cho các chain khác
+                // Đảm bảo không có ký tự đặc biệt và độ dài hợp lý
+                if address.chars().any(|c| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-') || 
+                   address.len() < 5 || address.len() > 100 {
+                    return Err(BridgeError::InvalidAddress(
+                        format!("Địa chỉ không hợp lệ cho chain {:?}: {}", chain, address)
+                    ));
+                }
+            },
+        }
+        
+        Ok(())
+    }
+    
+    /// Kiểm tra danh sách địa chỉ bị cấm
+    async fn check_blocked_address(&self, address: &str, chain: &DmdChain) -> BridgeResult<()> {
+        // Trong thực tế, đây sẽ là một danh sách được lấy từ DB hoặc API bên ngoài
+        // Nhưng cho ví dụ, chúng ta sẽ kiểm tra một số địa chỉ cứng
+        let blocked_addresses = [
+            "0x000000000000000000000000000000000000dEaD", // Địa chỉ "burn" phổ biến
+            "0x0000000000000000000000000000000000000000", // Địa chỉ zero
+            "blacklisted.near",
+            "suspicious.testnet",
+        ];
+        
+        if blocked_addresses.contains(&address) {
+            return Err(BridgeError::InvalidAddress(
+                format!("Địa chỉ {} bị chặn vì lý do bảo mật", address)
+            ));
+        }
+        
+        Ok(())
+    }
+    
+    /// Kiểm tra xem địa chỉ có phải là hợp đồng không (chỉ áp dụng cho EVM)
+    async fn is_contract_address(&self, address: &str, chain: &DmdChain) -> BridgeResult<bool> {
+        // Trong thực tế, sẽ gọi API của blockchain để kiểm tra
+        // Nhưng ở đây chúng ta mô phỏng
+        if super::error::is_evm_chain(chain) {
+            // Kiểm tra địa chỉ có phải là hợp đồng không
+            // Mô phỏng: coi như 10% địa chỉ là hợp đồng
+            let is_contract = address.as_bytes().iter().sum::<u8>() % 10 == 0;
+            
+            if is_contract {
+                warn!("Địa chỉ {} trên chain {:?} là địa chỉ hợp đồng", address, chain);
+            }
+            
+            return Ok(is_contract);
+        }
+        
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -268,6 +459,9 @@ impl BridgeHub for NearBridgeHub {
         to_near_account: &str, 
         amount: U256
     ) -> BridgeResult<BridgeTransaction> {
+        // Kiểm tra provider đã được khởi tạo
+        let provider = self.ensure_provider_initialized()?;
+        
         // Kiểm tra xem chain có được hỗ trợ không
         if !self.supported_chains.contains(&from_chain) {
             return Err(BridgeError::UnsupportedChain(
@@ -276,18 +470,31 @@ impl BridgeHub for NearBridgeHub {
         }
         
         // Kiểm tra LayerZero chain ID
-        if !self.lz_chain_map.contains_key(&from_chain) {
-            return Err(BridgeError::UnsupportedChain(
-                format!("Chain không có LZ chain ID: {:?}", from_chain)
-            ));
+        let lz_chain_id = match self.lz_chain_map.get(&from_chain) {
+            Some(id) => *id,
+            None => return Err(BridgeError::UnsupportedChain(
+                format!("Chain không có LayerZero chain ID: {:?}", from_chain)
+            )),
+        };
+        
+        // Kiểm tra kỹ địa chỉ nguồn
+        self.validate_address(from_address, &from_chain)?;
+        
+        // Kiểm tra địa chỉ có trong danh sách đen
+        self.check_blocked_address(from_address, &from_chain).await?;
+        
+        // Kiểm tra địa chỉ nguồn có phải là hợp đồng
+        if self.is_contract_address(from_address, &from_chain).await? {
+            // Nếu là hợp đồng, cần kiểm tra thêm (ví dụ whitelist các hợp đồng được phép)
+            // Đối với demo này, chúng ta chỉ cảnh báo
+            warn!("Địa chỉ nguồn là hợp đồng: {} trên chain {:?}", from_address, from_chain);
         }
         
-        // Kiểm tra địa chỉ nhận
-        if to_near_account.is_empty() {
-            return Err(BridgeError::InvalidAddress(
-                "Địa chỉ NEAR account không được để trống".to_string()
-            ));
-        }
+        // Kiểm tra kỹ địa chỉ đích (NEAR account)
+        self.validate_address(to_near_account, &DmdChain::Near)?;
+        
+        // Kiểm tra địa chỉ đích có trong danh sách đen
+        self.check_blocked_address(to_near_account, &DmdChain::Near).await?;
         
         // Kiểm tra số lượng
         if amount == U256::zero() {
@@ -296,8 +503,21 @@ impl BridgeHub for NearBridgeHub {
             ));
         }
         
-        // Kiểm tra provider
-        let provider = self.ensure_provider_initialized()?;
+        // Kiểm tra giới hạn số lượng
+        let (min_amount, max_amount) = self.get_bridge_limits(&from_chain)?;
+        let amount_f64 = amount.as_u128() as f64 / 1e18;
+        
+        if amount_f64 < min_amount {
+            return Err(BridgeError::InvalidAmount(
+                format!("Số lượng quá nhỏ. Tối thiểu: {} tokens", min_amount)
+            ));
+        }
+        
+        if amount_f64 > max_amount {
+            return Err(BridgeError::InvalidAmount(
+                format!("Số lượng quá lớn. Tối đa: {} tokens", max_amount)
+            ));
+        }
         
         // Tạo giao dịch mới
         let tx = self.create_transaction(
@@ -316,7 +536,7 @@ impl BridgeHub for NearBridgeHub {
         // Mô phỏng giao dịch nhận
         let tx_hash = format!("0x{}", Uuid::new_v4().simple());
         
-        // Cập nhật thông tin giao dịch
+        // Cập nhật thông tin giao dịch - chuyển sang trạng thái Processing
         let updated_tx = self.update_transaction(
             &tx.id,
             BridgeStatus::Processing,
@@ -325,13 +545,57 @@ impl BridgeHub for NearBridgeHub {
             None,
         ).await?;
         
-        // Log thông tin
-        info!(
-            "Receiving token from {:?} to NEAR, from: {}, to: {}, amount: {}, tx_id: {}",
-            from_chain, from_address, to_near_account, amount, tx.id
-        );
+        // Chờ xác nhận giao dịch với timeout được cấu hình
+        let timeout_seconds = self.config.transaction_timeout_seconds.unwrap_or(300); // Mặc định 5 phút
+        match self.wait_for_transaction_finality(&tx_hash, timeout_seconds).await {
+            Ok(true) => {
+                // Giao dịch thành công, cập nhật trạng thái
+                let confirmed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::Completed,
+                    None,
+                    None,
+                    None,
+                ).await?;
+                
+                info!("Giao dịch nhận token đã hoàn thành: {}", tx.id);
+                Ok(confirmed_tx)
+            },
+            Ok(false) => {
+                // Giao dịch thất bại
+                let failed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some("Giao dịch không được xác nhận".to_string()),
+                ).await?;
+                
+                warn!("Giao dịch nhận token thất bại: {}", tx.id);
+                Ok(failed_tx)
+            },
+            Err(e) => {
+                // Lỗi khi kiểm tra xác nhận (timeout hoặc lỗi khác)
+                let err_msg = format!("Lỗi khi chờ xác nhận giao dịch: {}", e);
+                let failed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some(err_msg.clone()),
+                ).await?;
+                
+                error!("{}", err_msg);
+                Ok(failed_tx)
+            }
+        }
         
-        Ok(updated_tx)
+        // Quản lý cache tự động
+        if let Err(e) = self.manage_cache().await {
+            warn!("Lỗi khi quản lý cache: {}", e);
+        }
+        
+        // Log thông tin đã được chuyển vào các trường hợp xử lý ở trên
     }
     
     /// Gửi token từ hub sang chain khác
@@ -381,7 +645,7 @@ impl BridgeHub for NearBridgeHub {
         // Giả lập giao dịch
         let source_tx_hash = format!("near_tx_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
         
-        // Cập nhật trạng thái
+        // Cập nhật trạng thái - chuyển sang Sending
         let updated_tx = self.update_transaction(
             &tx.id,
             BridgeStatus::Sending,
@@ -390,12 +654,57 @@ impl BridgeHub for NearBridgeHub {
             None,
         ).await?;
         
-        info!(
-            "Đã khởi tạo bridge từ NEAR -> {:?}, đến: {}, số lượng: {}, id: {}, tx: {}",
-            to_chain, to_address, amount, tx.id, source_tx_hash
-        );
+        // Chờ xác nhận giao dịch với timeout được cấu hình
+        let timeout_seconds = self.config.transaction_timeout_seconds.unwrap_or(300); // Mặc định 5 phút
+        match self.wait_for_transaction_finality(&source_tx_hash, timeout_seconds).await {
+            Ok(true) => {
+                // Giao dịch đã được xác nhận trên NEAR, chờ LayerZero relayer
+                let confirmed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::SourceConfirmed,
+                    None,
+                    None,
+                    None,
+                ).await?;
+                
+                info!("Giao dịch gửi token đã được xác nhận trên NEAR: {}", tx.id);
+                Ok(confirmed_tx)
+            },
+            Ok(false) => {
+                // Giao dịch thất bại
+                let failed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some("Giao dịch không được xác nhận trên NEAR".to_string()),
+                ).await?;
+                
+                warn!("Giao dịch gửi token thất bại: {}", tx.id);
+                Ok(failed_tx)
+            },
+            Err(e) => {
+                // Lỗi khi kiểm tra xác nhận (timeout hoặc lỗi khác)
+                let err_msg = format!("Lỗi khi chờ xác nhận giao dịch: {}", e);
+                let failed_tx = self.update_transaction(
+                    &tx.id,
+                    BridgeStatus::Failed,
+                    None,
+                    None,
+                    Some(err_msg.clone()),
+                ).await?;
+                
+                error!("{}", err_msg);
+                Ok(failed_tx)
+            }
+        }
         
-        Ok(updated_tx)
+        // Quản lý cache tự động
+        if let Err(e) = self.manage_cache().await {
+            warn!("Lỗi khi quản lý cache: {}", e);
+        }
+        
+        // Log thông tin đã được chuyển vào các trường hợp xử lý ở trên
     }
     
     /// Kiểm tra trạng thái giao dịch bridge
@@ -458,7 +767,28 @@ impl BridgeHub for NearBridgeHub {
     
     /// Lấy danh sách các chain được hỗ trợ
     fn get_supported_chains(&self) -> Vec<DmdChain> {
-        self.supported_chains.clone()
+        // Lấy các chain có trong lz_chain_map
+        let mut chains: Vec<DmdChain> = self.lz_chain_map.keys()
+            .filter(|&chain| *chain != DmdChain::Near) // Loại trừ NEAR vì đây là hub
+            .cloned()
+            .collect();
+        
+        // Sắp xếp để có kết quả ổn định
+        chains.sort_by_key(|chain| {
+            match chain {
+                DmdChain::Ethereum => 1,
+                DmdChain::BinanceSmartChain => 2,
+                DmdChain::Avalanche => 3,
+                DmdChain::Polygon => 4,
+                DmdChain::Arbitrum => 5,
+                DmdChain::Optimism => 6,
+                DmdChain::Fantom => 7,
+                DmdChain::Base => 8,
+                _ => 100, // Các chain khác
+            }
+        });
+        
+        chains
     }
     
     /// Dọn dẹp cache giao dịch
@@ -496,7 +826,11 @@ impl BridgeHub for NearBridgeHub {
     
     /// Quản lý cache tự động
     async fn manage_cache(&self) -> BridgeResult<()> {
-        let MAX_CACHE_SIZE: usize = 5000; // Giới hạn cache size
+        const MAX_CACHE_SIZE: usize = 5000; // Giới hạn cache size
+        const CACHE_CLEANUP_INTERVAL: u64 = 3600; // Dọn dẹp mỗi giờ
+        const MAX_AGE_HOURS: i64 = 24; // Giữ giao dịch tối đa 24 giờ
+        const CACHE_WARNING_THRESHOLD: usize = 4000; // Ngưỡng cảnh báo
+        const CACHE_CRITICAL_THRESHOLD: usize = 4500; // Ngưỡng tới hạn
         
         // Kiểm tra kích thước cache
         let cache_size = {
@@ -504,12 +838,88 @@ impl BridgeHub for NearBridgeHub {
             txs.len()
         };
         
-        // Nếu cache quá lớn, dọn dẹp
-        if cache_size > MAX_CACHE_SIZE {
-            debug!("Cache quá tải ({} giao dịch), đang dọn dẹp...", cache_size);
-            self.cleanup_transaction_cache().await?;
+        // Thực hiện dọn dẹp tự động trong các trường hợp sau:
+        let now = Utc::now();
+        
+        // 1. Cache quá tải (vượt ngưỡng tới hạn)
+        if cache_size > CACHE_CRITICAL_THRESHOLD {
+            warn!("Cache quá tải nghiêm trọng ({} giao dịch), dọn dẹp ngay...", cache_size);
+            // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 1 giờ
+            Self::_cleanup_completed_transactions(self.transactions.clone(), 1).await?;
+            return Ok(());
+        }
+        
+        // 2. Cache gần đạt ngưỡng (vượt ngưỡng cảnh báo)
+        if cache_size > CACHE_WARNING_THRESHOLD {
+            warn!("Cache gần đạt ngưỡng ({} giao dịch), dọn dẹp...", cache_size);
+            // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 6 giờ
+            Self::_cleanup_completed_transactions(self.transactions.clone(), 6).await?;
+            return Ok(());
+        }
+        
+        // 3. Dọn dẹp định kỳ (theo nguyên tắc xác suất để tránh tất cả các request cùng dọn)
+        // Chỉ thực hiện với xác suất 1% để tránh tất cả các request cùng thực hiện dọn dẹp
+        if cache_size > 1000 && rand::random::<f64>() < 0.01 {
+            debug!("Dọn dẹp cache định kỳ ({} giao dịch)...", cache_size);
+            // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 12 giờ
+            Self::_cleanup_completed_transactions(self.transactions.clone(), 12).await?;
         }
         
         Ok(())
+    }
+    
+    /// Phương thức nội bộ để dọn dẹp các giao dịch đã hoàn thành và cũ
+    async fn _cleanup_completed_transactions(
+        transactions: Arc<RwLock<HashMap<String, BridgeTransaction>>>, 
+        older_than_hours: i64
+    ) -> BridgeResult<usize> {
+        let mut txs = transactions.write().await;
+        let initial_size = txs.len();
+        
+        // Thời điểm hiện tại
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::hours(older_than_hours);
+        
+        // Lọc các giao dịch cần giữ lại
+        let to_retain: HashMap<String, BridgeTransaction> = txs
+            .drain()
+            .filter(|(_, tx)| {
+                // Giữ lại các giao dịch chưa hoàn thành
+                if tx.status != BridgeStatus::Completed && tx.status != BridgeStatus::Failed {
+                    return true;
+                }
+                
+                // Hoặc các giao dịch mới hơn mốc thời gian
+                tx.initiated_at > cutoff
+            })
+            .collect();
+        
+        // Cập nhật lại cache
+        let removed = initial_size - to_retain.len();
+        *txs = to_retain;
+        
+        debug!("Đã dọn dẹp {} giao dịch cũ hơn {} giờ, còn lại {}", 
+               removed, older_than_hours, txs.len());
+        
+        Ok(removed)
+    }
+
+    /// Trả về giới hạn bridge cho cặp chain cụ thể
+    fn get_bridge_limits(&self, from_chain: &DmdChain) -> BridgeResult<(f64, f64)> {
+        // Giới hạn mặc định
+        let default_min = 0.01;
+        let default_max = 10000.0;
+        
+        // Giới hạn tùy thuộc vào chain nguồn
+        match from_chain {
+            DmdChain::Ethereum => Ok((0.01, 50000.0)),
+            DmdChain::BinanceSmartChain => Ok((0.05, 100000.0)),
+            DmdChain::Polygon => Ok((1.0, 200000.0)),
+            DmdChain::Arbitrum => Ok((0.01, 50000.0)),
+            DmdChain::Optimism => Ok((0.01, 50000.0)),
+            DmdChain::Base => Ok((0.01, 50000.0)),
+            DmdChain::Solana => Ok((0.1, 100000.0)),
+            _ => Ok((default_min, default_max)),
+        }
     }
 } 

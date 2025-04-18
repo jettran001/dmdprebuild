@@ -44,6 +44,54 @@ pub enum BridgeError {
     /// Lỗi hệ thống
     #[error("Lỗi hệ thống: {0}")]
     SystemError(String),
+
+    /// Lỗi kết nối
+    #[error("Lỗi kết nối: {0}")]
+    ConnectionError(String),
+
+    /// Lỗi thời gian chờ
+    #[error("Lỗi thời gian chờ: {0}")]
+    TimeoutError(String),
+
+    /// Lỗi thiếu provider
+    #[error("Lỗi thiếu provider: {0}")]
+    MissingProvider(String),
+
+    /// Lỗi xác thực
+    #[error("Lỗi xác thực: {0}")]
+    ValidationError(String),
+
+    /// Lỗi tạo giao dịch
+    #[error("Lỗi tạo giao dịch: {0}")]
+    TransactionCreationError(String),
+
+    /// Lỗi cấu hình
+    #[error("Lỗi cấu hình: {0}")]
+    ConfigurationError(String),
+
+    /// Lỗi trạng thái giao dịch không hợp lệ
+    #[error("Lỗi trạng thái giao dịch không hợp lệ: {0}")]
+    InvalidTransactionStatus(String),
+
+    /// Lỗi Hash giao dịch không hợp lệ
+    #[error("Lỗi Hash giao dịch không hợp lệ: {0}")]
+    InvalidTransactionHash(String),
+
+    /// Lỗi ký giao dịch
+    #[error("Lỗi ký giao dịch: {0}")]
+    SigningError(String),
+
+    /// Lỗi Oracle
+    #[error("Lỗi Oracle: {0}")]
+    OracleError(String),
+
+    /// Lỗi chainId không hợp lệ
+    #[error("Lỗi chainId không hợp lệ: {0}")]
+    InvalidChainId(String),
+
+    /// Lỗi phí bridge không đủ
+    #[error("Lỗi phí bridge không đủ: {0}")]
+    InsufficientFee(String),
 }
 
 /// Kiểm tra xem bridge giữa hai chain có được hỗ trợ không
@@ -64,17 +112,26 @@ pub fn is_bridge_supported(source: &DmdChain, target: &DmdChain) -> bool {
     }
 }
 
-/// Kiểm tra xem chain có phải là EVM không
+/// Kiểm tra xem một DmdChain có phải là EVM chain hay không
 pub fn is_evm_chain(chain: &DmdChain) -> bool {
     matches!(
         chain,
-        DmdChain::Ethereum
-            | DmdChain::BinanceSmartChain
-            | DmdChain::Avalanche
-            | DmdChain::Polygon
-            | DmdChain::Arbitrum
-            | DmdChain::Optimism
-            | DmdChain::Base
+        DmdChain::Ethereum | 
+        DmdChain::BinanceSmartChain | 
+        DmdChain::Avalanche | 
+        DmdChain::Polygon | 
+        DmdChain::Arbitrum | 
+        DmdChain::Optimism | 
+        DmdChain::Base |
+        DmdChain::Zksync |
+        DmdChain::Linea |
+        DmdChain::Scroll |
+        DmdChain::Mantle |
+        DmdChain::Celo |
+        DmdChain::Fantom |
+        DmdChain::Cronos |
+        DmdChain::Moonbeam |
+        DmdChain::Gnosis
     )
 }
 

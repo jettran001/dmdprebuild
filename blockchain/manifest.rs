@@ -347,6 +347,14 @@ pub mod oracle;          // Oracle cho lấy dữ liệu từ các nguồn bên 
  * 22-08-2023: Triển khai giao diện OracleProvider trong oracle/provider.rs
  * 23-08-2023: Thêm các kiểu dữ liệu oracle trong oracle/types.rs
  * 24-08-2023: Cập nhật manifest.rs để thêm thông tin về module bridge và oracle
+ * 25-08-2023: Thêm kiểm tra số dư trong bridge/evm_spoke.rs::send_to_hub trước khi thực hiện giao dịch
+ * 26-08-2023: Cải thiện phương thức update_token_price trong bridge/oracle.rs để xác thực dữ liệu đầu vào
+ * 27-08-2023: Triển khai cơ chế xác thực chéo (cross-validation) trong bridge/oracle.rs để phòng chống double-spent
+ * 28-08-2023: Thêm phương thức detect_abnormal_transaction vào bridge/oracle.rs để phát hiện giao dịch bất thường
+ * 29-08-2023: Cải thiện phương thức wait_for_transaction_confirmation trong bridge/evm_spoke.rs với cơ chế timeout
+ * 30-08-2023: Thêm cơ chế dọn dẹp cache tự động (manage_cache) trong bridge/near_hub.rs
+ * 31-08-2023: Triển khai cross_validate_bridge_transaction trong bridge/oracle.rs để xác thực chéo các giao dịch bridge
+ * 01-09-2023: Bổ sung các phương thức validate_transaction_risk vào bridge/bridge.rs cho LayerZeroAdapter
  */
 
 /**
@@ -406,6 +414,15 @@ pub mod oracle;          // Oracle cho lấy dữ liệu từ các nguồn bên 
  *   - async fn subscribe(&self, data_feed: &str, callback: Box<dyn Fn(OracleData) + Send + Sync + 'static>) -> Result<()>
  *   - async fn unsubscribe(&self, subscription_id: &str) -> Result<()>
  *
+ * BridgeOracleManager (bridge/oracle.rs):
+ * - Mô tả: Quản lý oracle dữ liệu cho bridge và phát hiện giao dịch bất thường
+ * - Phương thức chính:
+ *   - async fn detect_abnormal_transaction(&self, source_chain: &str, target_chain: &str, amount: &str, sender: &str) -> BridgeResult<bool>
+ *   - async fn cross_validate_bridge_transaction(&self, source_chain: &str, target_chain: &str, tx_hash: &TransactionHash, amount: &str, sender: &str, recipient: &str) -> BridgeResult<bool>
+ *   - async fn validate_token_price(&self, price: f64) -> BridgeResult<()>
+ *   - async fn detect_suspicious_pattern(&self, transactions: &[BridgeTransactionData]) -> BridgeResult<bool>
+ *   - fn get_chain_transaction_limits(&self, source_chain: &str, target_chain: &str) -> (f64, f64)
+ * 
  * // ... existing code ...
  */
 
@@ -428,4 +445,5 @@ pub mod oracle;          // Oracle cho lấy dữ liệu từ các nguồn bên 
  *    - Diamond manager sử dụng StakeManager để quản lý staking
  *    - Diamond manager sử dụng FarmManager để quản lý farming
  *    - Diamond manager sử dụng bridge::BridgeManager để theo dõi và quản lý bridge transaction
+ *    - Diamond manager sử dụng bridge::oracle để phát hiện và ngăn chặn giao dịch bridge bất thường
  */

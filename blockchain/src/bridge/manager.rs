@@ -8,9 +8,35 @@ use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use uuid::Uuid;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
+use secrecy::{Secret, SecretString, ExposeSecret};
+use zeroize::Zeroize;
 
 /// Kết quả của hoạt động bridge
 pub type BridgeResult<T> = Result<T, BridgeError>;
+
+/// Cấu trúc bọc khóa riêng tư với khả năng tự động xóa khi bị hủy
+#[derive(Clone, Zeroize)]
+#[zeroize(drop)]
+pub struct SecurePrivateKey {
+    /// Khóa riêng tư được mã hóa
+    key: SecretString,
+}
+
+impl SecurePrivateKey {
+    /// Tạo một khóa riêng tư bảo mật mới
+    pub fn new(key: &str) -> Self {
+        Self {
+            key: SecretString::new(key.to_string()),
+        }
+    }
+    
+    /// Lấy giá trị khóa (chỉ nên sử dụng khi cần thiết)
+    pub fn expose_for_signing(&self) -> &str {
+        self.key.expose_secret()
+    }
+}
 
 /// Thông tin cấu hình bridge
 pub struct BridgeConfig {
@@ -20,8 +46,8 @@ pub struct BridgeConfig {
     pub hub_contract_address: String,
     /// Địa chỉ ví của bridge operator
     pub operator_address: String,
-    /// Địa chỉ khóa riêng tư của operator (nếu có)
-    pub operator_private_key: Option<String>,
+    /// Khóa riêng tư của operator (nếu có), được lưu trữ an toàn
+    operator_key: Option<SecurePrivateKey>,
     /// Thời gian tối đa chờ xác nhận (tính bằng giây)
     pub confirmation_timeout: u64,
     /// Số block cần để xác nhận trên mỗi chain
@@ -34,6 +60,71 @@ pub struct BridgeConfig {
     pub erc20_addresses: std::collections::HashMap<DmdChain, String>,
     /// Địa chỉ của hợp đồng ERC1155 trên các chain EVM
     pub erc1155_addresses: std::collections::HashMap<DmdChain, String>,
+}
+
+impl BridgeConfig {
+    /// Tạo mới cấu hình bridge
+    pub fn new(
+        hub_chain: DmdChain,
+        hub_contract_address: String,
+        operator_address: String,
+        operator_private_key: Option<String>,
+        confirmation_timeout: u64,
+        confirmation_blocks: std::collections::HashMap<DmdChain, u64>,
+        fee_percentage: f64,
+        min_fee: std::collections::HashMap<DmdChain, String>,
+        erc20_addresses: std::collections::HashMap<DmdChain, String>,
+        erc1155_addresses: std::collections::HashMap<DmdChain, String>,
+    ) -> Self {
+        // Chuyển đổi khóa riêng tư sang dạng bảo mật
+        let operator_key = operator_private_key.map(|key| SecurePrivateKey::new(&key));
+        
+        Self {
+            hub_chain,
+            hub_contract_address,
+            operator_address,
+            operator_key,
+            confirmation_timeout,
+            confirmation_blocks,
+            fee_percentage,
+            min_fee,
+            erc20_addresses,
+            erc1155_addresses,
+        }
+    }
+    
+    /// Kiểm tra xem có khóa riêng tư hay không
+    pub fn has_operator_key(&self) -> bool {
+        self.operator_key.is_some()
+    }
+    
+    /// Sử dụng khóa riêng tư để ký giao dịch
+    /// 
+    /// # Safety
+    /// Hàm này trả về khóa riêng tư bọc trong SecurePrivateKey.
+    /// Chỉ sử dụng khi cần thiết để ký giao dịch và đảm bảo không lưu trữ
+    /// hoặc ghi log giá trị này.
+    pub fn get_operator_key_for_signing(&self) -> Option<&SecurePrivateKey> {
+        self.operator_key.as_ref()
+    }
+    
+    /// Đặt khóa riêng tư mới, xóa khóa cũ khỏi bộ nhớ
+    pub fn set_operator_key(&mut self, private_key: Option<String>) {
+        // Chuyển đổi khóa mới sang dạng bảo mật
+        let new_key = private_key.map(|key| SecurePrivateKey::new(&key));
+        
+        // Cập nhật khóa
+        self.operator_key = new_key;
+    }
+}
+
+impl Drop for BridgeConfig {
+    fn drop(&mut self) {
+        // Làm sạch khóa riêng tư nếu có
+        if let Some(key) = &mut self.operator_key {
+            // SecurePrivateKey đã implement Drop nên sẽ tự động xóa
+        }
+    }
 }
 
 /// Trình quản lý bridge
@@ -67,28 +158,57 @@ impl BridgeManager {
 
     /// Tính phí bridge
     fn calculate_fee(&self, amount: &str, source_chain: &DmdChain, target_chain: &DmdChain) -> BridgeResult<String> {
-        // Chuyển đổi amount từ string sang f64
-        let amount_value = amount.parse::<f64>().map_err(|_| {
-            BridgeError::InvalidAmount(format!("Không thể chuyển đổi số lượng '{}' thành số", amount))
+        // Kiểm tra hợp lệ của input amount
+        if amount.trim().is_empty() {
+            return Err(BridgeError::InvalidAmount(
+                "Số lượng token không được để trống".to_string()
+            ));
+        }
+
+        // Sử dụng Decimal để đảm bảo độ chính xác với số lượng lớn
+        let amount_value = Decimal::from_str(amount).map_err(|err| {
+            BridgeError::InvalidAmount(format!(
+                "Không thể chuyển đổi số lượng '{}' thành số: {}",
+                amount, err
+            ))
         })?;
 
-        // Tính phí dựa trên phần trăm
-        let fee = amount_value * self.config.fee_percentage / 100.0;
+        // Kiểm tra số lượng token hợp lệ
+        if amount_value <= Decimal::ZERO {
+            return Err(BridgeError::InvalidAmount(
+                "Số lượng token phải lớn hơn 0".to_string()
+            ));
+        }
+
+        // Chuyển đổi fee percentage từ f64 sang Decimal
+        let fee_percentage = Decimal::from_f64(self.config.fee_percentage)
+            .ok_or_else(|| BridgeError::ConfigError("Không thể chuyển đổi fee_percentage".to_string()))?
+            / Decimal::from(100);
+
+        // Tính phí dựa trên phần trăm với độ chính xác cao
+        let fee = amount_value * fee_percentage;
 
         // Lấy phí tối thiểu cho chain đích
         let min_fee = self.config.min_fee.get(target_chain).ok_or_else(|| {
-            BridgeError::ConfigError(format!("Không tìm thấy cấu hình phí tối thiểu cho chain {:?}", target_chain))
+            BridgeError::ConfigError(format!(
+                "Không tìm thấy cấu hình phí tối thiểu cho chain {:?}",
+                target_chain
+            ))
         })?;
 
-        let min_fee_value = min_fee.parse::<f64>().map_err(|_| {
-            BridgeError::ConfigError(format!("Cấu hình phí tối thiểu không hợp lệ: {}", min_fee))
+        let min_fee_value = Decimal::from_str(min_fee).map_err(|err| {
+            BridgeError::ConfigError(format!(
+                "Cấu hình phí tối thiểu không hợp lệ '{}': {}",
+                min_fee, err
+            ))
         })?;
 
         // Lấy max của phí tính được và phí tối thiểu
         let final_fee = if fee < min_fee_value { min_fee_value } else { fee };
 
-        // Chuyển đổi lại thành string, làm tròn xuống 6 chữ số thập phân
-        Ok(format!("{:.6}", final_fee))
+        // Định dạng kết quả với 18 chữ số thập phân để đảm bảo độ chính xác
+        // cho các số lượng wei/gwei trong blockchain
+        Ok(format!("{:.18}", final_fee))
     }
 
     /// Khởi tạo giao dịch bridge từ chain nguồn đến chain đích
@@ -165,22 +285,59 @@ impl BridgeManager {
 
     /// Lấy danh sách giao dịch theo địa chỉ
     pub async fn get_transactions_by_address(&self, address: &str) -> BridgeResult<Vec<BridgeTransaction>> {
-        // Tìm cả trong source address và target address
+        // Kiểm tra tính hợp lệ của địa chỉ
+        if address.trim().is_empty() {
+            return Err(BridgeError::InvalidAddress("Địa chỉ không được để trống".to_string()));
+        }
+
+        // Tìm các giao dịch có địa chỉ nguồn là address
         let source_txs = self.transaction_repository.find_by_source_address(address).map_err(|err| {
             error!("Không thể tìm giao dịch theo địa chỉ nguồn: {}", err);
             BridgeError::SystemError(format!("Không thể tìm giao dịch: {}", err))
         })?;
 
+        // Tìm các giao dịch có địa chỉ đích là address
         let target_txs = self.transaction_repository.find_by_target_address(address).map_err(|err| {
             error!("Không thể tìm giao dịch theo địa chỉ đích: {}", err);
             BridgeError::SystemError(format!("Không thể tìm giao dịch: {}", err))
         })?;
 
-        // Kết hợp kết quả từ cả hai truy vấn
-        let mut result = Vec::new();
-        result.extend(source_txs);
-        result.extend(target_txs.into_iter().filter(|tx| !result.iter().any(|t| t.id == tx.id)));
+        // Sử dụng HashSet để loại bỏ các giao dịch trùng lặp
+        let mut result_map = std::collections::HashMap::new();
+        
+        // Thêm các giao dịch từ source_txs và đánh dấu nguồn
+        for tx in source_txs {
+            result_map.insert(tx.id.clone(), (tx, true, false));
+        }
+        
+        // Thêm hoặc cập nhật các giao dịch từ target_txs
+        for tx in target_txs {
+            match result_map.get_mut(&tx.id) {
+                Some((_, is_source, is_target)) => {
+                    // Giao dịch đã tồn tại, đánh dấu là target
+                    *is_target = true;
+                },
+                None => {
+                    // Giao dịch chưa tồn tại, thêm mới và đánh dấu là target
+                    result_map.insert(tx.id.clone(), (tx, false, true));
+                }
+            }
+        }
+        
+        // Chuyển đổi từ HashMap sang Vec, đồng thời ghi log khi một địa chỉ xuất hiện ở cả nguồn và đích
+        let result: Vec<BridgeTransaction> = result_map
+            .into_iter()
+            .map(|(id, (tx, is_source, is_target))| {
+                if is_source && is_target {
+                    info!("Giao dịch {} có cùng địa chỉ cho nguồn và đích: {}", id, address);
+                }
+                tx
+            })
+            .collect();
 
+        // Log số lượng giao dịch tìm thấy
+        debug!("Tìm thấy {} giao dịch cho địa chỉ {}", result.len(), address);
+        
         Ok(result)
     }
 }
@@ -278,7 +435,7 @@ mod tests {
             hub_chain: DmdChain::Near,
             hub_contract_address: "hub.near".to_string(),
             operator_address: "operator.near".to_string(),
-            operator_private_key: None,
+            operator_key: None,
             confirmation_timeout: 3600,
             confirmation_blocks,
             fee_percentage: 0.5,

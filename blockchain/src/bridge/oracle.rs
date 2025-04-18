@@ -242,107 +242,216 @@ impl OracleManager {
         }
     }
     
-    /// Thêm provider oracle
-    pub fn add_provider(&mut self, provider: Box<dyn OracleProvider>) {
-        self.providers.push(provider);
-    }
-    
-    /// Xác thực giá token là hợp lệ
-    fn validate_token_price(&self, price: f64) -> BridgeResult<()> {
-        // Kiểm tra giá trị không âm
-        if price < 0.0 {
-            return Err(BridgeError::OracleError("Giá token không thể âm".to_string()));
+    /// Thêm một nhà cung cấp mới vào danh sách
+    pub fn add_provider(&mut self, provider: Box<dyn OracleProvider>) -> BridgeResult<()> {
+        // Kiểm tra tên nhà cung cấp không được để trống
+        if provider.name().is_empty() {
+            return Err(BridgeError::OracleError("Tên nhà cung cấp không được để trống".into()));
         }
         
-        // Kiểm tra giá trị không quá lớn (để tránh lỗi tràn số)
-        const MAX_PRICE: f64 = 1_000_000_000.0; // 1 tỷ USD
-        if price > MAX_PRICE {
-            return Err(BridgeError::OracleError(format!("Giá token quá lớn: {}", price)));
+        // Kiểm tra xem nhà cung cấp đã tồn tại chưa
+        let exists = self.providers.iter().any(|p| p.name() == provider.name());
+        if exists {
+            return Err(BridgeError::OracleError(
+                format!("Nhà cung cấp '{}' đã tồn tại trong danh sách", provider.name())
+            ));
         }
         
-        // Kiểm tra giá trị không phải NaN hoặc Infinity
-        if !price.is_finite() {
-            return Err(BridgeError::OracleError("Giá token không hợp lệ (NaN hoặc Infinity)".to_string()));
+        // Kiểm tra danh sách chain được hỗ trợ
+        if provider.supported_chains().is_empty() {
+            warn!("Nhà cung cấp '{}' không hỗ trợ chain nào", provider.name());
         }
         
-        Ok(())
-    }
-    
-    /// Cập nhật giá token DMD cho một chain
-    pub async fn update_token_price(&self, chain: &str, price: f64) -> BridgeResult<()> {
-        // Xác thực giá token
-        self.validate_token_price(price)?;
-        
-        // Cập nhật cache local
-        {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .as_millis() as u64;
-                
-            let mut cache = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?;
-            cache.insert(chain.to_string(), (price, now));
-        }
-        
-        // Cập nhật dữ liệu đa nguồn
-        {
-            let mut multi_data = self.multi_source_data.lock().map_err(|_| BridgeError::OracleError("Multi-source data lock failed".into()))?;
-            let key = (OracleDataType::TokenPrice, chain.to_string());
-            
-            let entry = multi_data.entry(key.clone()).or_insert_with(Vec::new);
-            
-            // Thêm dữ liệu mới từ nguồn hiện tại
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .as_millis() as u64;
-                
-            let new_data = OracleData {
-                data_type: OracleDataType::TokenPrice,
-                chain: chain.to_string(),
-                data: price.to_string(),
-                timestamp: now,
-                status: OracleUpdateStatus::Pending,
-                tx_hash: None,
-                confirmations: 1,
-                source: "local".to_string(),
-            };
-            
-            entry.push(new_data);
-            
-            // Giữ tối đa 10 dữ liệu gần nhất
-            if entry.len() > 10 {
-                // Sắp xếp theo thời gian giảm dần và loại bỏ các mục cũ nhất
-                entry.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                entry.truncate(10);
-            }
-        }
-        
-        // Cập nhật lên tất cả các oracle provider
-        for provider in &self.providers {
-            if provider.is_chain_supported(chain) {
-                let data = OracleData {
-                    data_type: OracleDataType::TokenPrice,
-                    chain: chain.to_string(),
-                    data: price.to_string(),
-                    timestamp: SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_millis() as u64,
-                    status: OracleUpdateStatus::Pending,
-                    tx_hash: None,
-                    confirmations: 1,
-                    source: provider.name(),
-                };
-                
-                match provider.update_data(data).await {
-                    Ok(_) => info!("Updated price for {} on provider {}", chain, provider.name()),
-                    Err(e) => error!("Failed to update price for {} on provider {}: {:?}", chain, provider.name(), e),
+        // Tìm các chain được hỗ trợ bởi nhiều provider
+        let mut common_chains = Vec::new();
+        for existing_provider in self.providers.iter() {
+            for chain in provider.supported_chains().iter() {
+                if existing_provider.is_chain_supported(chain) {
+                    common_chains.push((existing_provider.name().clone(), chain.clone()));
                 }
             }
         }
         
+        // Ghi log các chain được hỗ trợ bởi nhiều provider
+        if !common_chains.is_empty() {
+            info!(
+                "Provider mới '{}' có {} chain được hỗ trợ bởi các provider khác:",
+                provider.name(),
+                common_chains.len()
+            );
+            for (other_provider, chain) in common_chains {
+                info!("  - Chain '{}' cũng được hỗ trợ bởi provider '{}'", chain, other_provider);
+            }
+        }
+        
+        // Thêm provider mới
+        info!("Thêm provider mới: {}", provider.name());
+        self.providers.push(provider);
+        
         Ok(())
+    }
+    
+    /// Cập nhật giá token từ một nguồn
+    pub fn update_token_price(&mut self, chain: &str, token: &str, price: &str, source: &str) -> BridgeResult<()> {
+        // Kiểm tra tính hợp lệ của các tham số đầu vào
+        if chain.is_empty() {
+            return Err(BridgeError::OracleError("Chain không được để trống".into()));
+        }
+        
+        if token.is_empty() {
+            return Err(BridgeError::OracleError("Token không được để trống".into()));
+        }
+        
+        if source.is_empty() {
+            return Err(BridgeError::OracleError("Nguồn không được để trống".into()));
+        }
+        
+        // Chuyển đổi giá trị giá từ string sang f64
+        let price_value = match price.parse::<f64>() {
+            Ok(val) => val,
+            Err(_) => return Err(BridgeError::OracleError(format!("Giá '{}' không hợp lệ", price)))
+        };
+        
+        // Kiểm tra giá trị âm
+        if price_value < 0.0 {
+            return Err(BridgeError::OracleError("Giá token không thể là số âm".into()));
+        }
+        
+        // Cảnh báo nếu giá là 0 hoặc quá nhỏ
+        if price_value == 0.0 {
+            warn!("Cảnh báo: Giá token {}/{} từ nguồn {} là 0", chain, token, source);
+        } else if price_value < 0.0000001 && price_value > 0.0 {
+            warn!("Cảnh báo: Giá token {}/{} từ nguồn {} rất nhỏ: {}", chain, token, source, price_value);
+        } else if price_value > 1_000_000.0 {
+            warn!("Cảnh báo: Giá token {}/{} từ nguồn {} rất cao: {}", chain, token, source, price_value);
+        }
+        
+        let key = format!("{}:{}", chain, token);
+        
+        // Kiểm tra sự thay đổi bất thường về giá
+        let mut significant_change = false;
+        let mut price_deviation_pct = 0.0;
+        
+        if let Some(current_price) = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?.get(&key) {
+            let old_price = current_price.0;
+            if old_price > 0.0 {
+                price_deviation_pct = ((price_value - old_price) / old_price).abs() * 100.0;
+                
+                // Nếu giá thay đổi đáng kể (>20%), ghi log và đánh dấu cần xác nhận thêm
+                if price_deviation_pct > 20.0 {
+                    warn!(
+                        "Thay đổi đáng kể về giá token {}/{}: {} -> {} ({:.2}%) từ nguồn {}",
+                        chain, token, old_price, price_value, price_deviation_pct, source
+                    );
+                    significant_change = true;
+                }
+            }
+        }
+        
+        // Lưu giá mới
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // Nếu thay đổi lớn (>50%), yêu cầu xác nhận từ nhiều nguồn
+        if price_deviation_pct > 50.0 {
+            // Thêm vào danh sách chờ xác nhận
+            let confirmation_key = format!("{}:{}:{}", chain, token, source);
+            self.multi_source_data.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?.insert(
+                (OracleDataType::TokenPrice, chain.to_string()),
+                OracleData {
+                    data_type: OracleDataType::TokenPrice,
+                    chain: chain.to_string(),
+                    data: price_value.to_string(),
+                    timestamp,
+                    status: OracleUpdateStatus::Pending,
+                    tx_hash: None,
+                    confirmations: 1,
+                    source: source.to_string(),
+                }
+            );
+            
+            info!(
+                "Thay đổi lớn về giá token {}/{}: Yêu cầu xác nhận từ nguồn khác trước khi cập nhật",
+                chain, token
+            );
+            
+            // Kiểm tra xem có ít nhất 2 nguồn cùng báo giá tương tự không
+            self.verify_consensus_price(chain, token, price_value)?;
+        } else {
+            // Cập nhật giá cho cả kho lưu trữ đơn và đa nguồn
+            self.price_cache.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?.insert(
+                key,
+                (price_value, timestamp)
+            );
+            
+            // Cập nhật kho đa nguồn
+            let multi_source_key = format!("{}:{}:{}", chain, token, source);
+            self.multi_source_data.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?.insert(
+                (OracleDataType::TokenPrice, chain.to_string()),
+                OracleData {
+                    data_type: OracleDataType::TokenPrice,
+                    chain: chain.to_string(),
+                    data: price_value.to_string(),
+                    timestamp,
+                    status: OracleUpdateStatus::Pending,
+                    tx_hash: None,
+                    confirmations: 1,
+                    source: source.to_string(),
+                }
+            );
+            
+            info!(
+                "Đã cập nhật giá token {}/{} = {} từ nguồn {}",
+                chain, token, price_value, source
+            );
+        }
+        
+        Ok(())
+    }
+    
+    /// Kiểm tra xem có đồng thuận về giá từ nhiều nguồn không
+    fn verify_consensus_price(&mut self, chain: &str, token: &str, new_price: f64) -> BridgeResult<bool> {
+        let threshold = 0.1; // 10% sai lệch được chấp nhận
+        let key = format!("{}:{}", chain, token);
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        
+        // Đếm số nguồn báo giá tương tự
+        let mut similar_price_count = 0;
+        let mut sources = Vec::new();
+        
+        let data_guard = self.multi_source_data.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?;
+        for ((c, t, s), (price, _)) in data_guard.iter() {
+            if c == chain && t == token {
+                let deviation = ((new_price - price) / price).abs();
+                if deviation <= threshold {
+                    similar_price_count += 1;
+                    sources.push(s.clone());
+                }
+            }
+        }
+        
+        // Nếu có ít nhất 2 nguồn (bao gồm nguồn hiện tại) báo giá tương tự
+        if similar_price_count >= 1 {
+            info!(
+                "Đã xác nhận giá token {}/{} = {} từ nhiều nguồn: {:?}",
+                chain, token, new_price, sources
+            );
+            
+            // Cập nhật giá chính thức
+            self.price_cache.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?.insert(
+                key,
+                (new_price, timestamp)
+            );
+            
+            return Ok(true);
+        }
+        
+        Ok(false)
     }
     
     /// Đạt được đồng thuận về giá từ nhiều nguồn dữ liệu
@@ -375,10 +484,10 @@ impl OracleManager {
         }
         
         // Chuyển đổi các giá trị thành số
-        let mut prices: Vec<f64> = Vec::new();
+        let mut prices: Vec<(f64, &str, u64)> = Vec::new();
         for data in &recent_points {
             match data.data.parse::<f64>() {
-                Ok(price) => prices.push(price),
+                Ok(price) => prices.push((price, &data.source, data.timestamp)),
                 Err(e) => warn!("Không thể chuyển đổi giá trị '{}' từ nguồn {}: {}", 
                     data.data, data.source, e),
             }
@@ -391,19 +500,99 @@ impl OracleManager {
             return Ok(None);
         }
         
-        // Tính giá trung bình
-        let avg_price: f64 = prices.iter().sum::<f64>() / prices.len() as f64;
+        // Phân tích để xử lý các giá trị lệch (outliers)
+        // Sử dụng thuật toán Modified Z-Score để phát hiện outliers
+        if prices.len() >= 3 { // Cần ít nhất 3 giá trị để phát hiện outlier
+            // Tính median
+            let mut values: Vec<f64> = prices.iter().map(|(p, _, _)| *p).collect();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            
+            let median = if values.len() % 2 == 0 {
+                (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
+            } else {
+                values[values.len() / 2]
+            };
+            
+            // Tính MAD (Median Absolute Deviation)
+            let mut deviations: Vec<f64> = values.iter()
+                .map(|x| (x - median).abs())
+                .collect();
+            deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            
+            let mad = if deviations.len() % 2 == 0 {
+                (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2.0
+            } else {
+                deviations[deviations.len() / 2]
+            };
+            
+            // Hằng số 0.6745 được sử dụng trong thuật toán Modified Z-Score
+            const MODIFIED_Z_THRESHOLD: f64 = 3.5; // Ngưỡng để coi là outlier
+            
+            // Xác định và loại bỏ các outliers
+            let mut filtered_prices = Vec::new();
+            let mut outliers = Vec::new();
+            
+            if mad != 0.0 { // Tránh chia cho 0
+                for (price, source, timestamp) in prices {
+                    let modified_z = 0.6745 * (price - median) / mad;
+                    
+                    if modified_z.abs() <= MODIFIED_Z_THRESHOLD {
+                        filtered_prices.push(price);
+                    } else {
+                        outliers.push((price, source, timestamp, modified_z));
+                        warn!("Phát hiện giá lệch ({}) từ nguồn {} với modified Z-score: {:.2}",
+                            price, source, modified_z);
+                    }
+                }
+            } else {
+                // Nếu MAD = 0, không có độ lệch, dùng tất cả giá trị
+                filtered_prices = prices.iter().map(|(p, _, _)| *p).collect();
+            }
+            
+            // Nếu sau khi lọc vẫn đủ nguồn dữ liệu, sử dụng các giá trị đã lọc
+            if filtered_prices.len() >= self.consensus_config.min_sources {
+                // Sử dụng median thay vì mean để chống outlier tốt hơn
+                filtered_prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                
+                let consensus_price = if filtered_prices.len() % 2 == 0 {
+                    (filtered_prices[filtered_prices.len() / 2 - 1] + filtered_prices[filtered_prices.len() / 2]) / 2.0
+                } else {
+                    filtered_prices[filtered_prices.len() / 2]
+                };
+                
+                // Ghi log các giá trị bị loại bỏ
+                if !outliers.is_empty() {
+                    info!("Đã loại bỏ {} giá lệch, sử dụng giá đồng thuận {} từ {} nguồn", 
+                        outliers.len(), consensus_price, filtered_prices.len());
+                }
+                
+                return Ok(Some(consensus_price));
+            } else {
+                // Không đủ dữ liệu sau khi lọc, quay lại phương pháp trung bình
+                debug!("Sau khi lọc outlier, không đủ nguồn dữ liệu ({}/{}), sử dụng phương pháp cũ",
+                    filtered_prices.len(), self.consensus_config.min_sources);
+            }
+        }
         
-        // Kiểm tra độ lệch
+        // Phương pháp dự phòng: tính giá trung bình
+        let avg_price: f64 = prices.iter().map(|(p, _, _)| *p).sum::<f64>() / prices.len() as f64;
+        
+        // Kiểm tra độ lệch so với trung bình và ghi log cảnh báo
         let max_deviation = avg_price * self.consensus_config.max_deviation_percent / 100.0;
         
-        for price in &prices {
+        let mut has_significant_deviation = false;
+        for (price, source, _) in &prices {
             if (*price - avg_price).abs() > max_deviation {
-                warn!("Giá {} lệch quá nhiều so với giá trung bình {} (lệch > {}%)",
-                    price, avg_price, self.consensus_config.max_deviation_percent);
-                // Trong triển khai thực tế, có thể xử lý các giá trị lệch
-                // Ví dụ: loại bỏ giá trị lệch và tính lại trung bình
+                has_significant_deviation = true;
+                warn!("Giá {} từ nguồn {} lệch {:.2}% so với giá trung bình {}",
+                    price, source, (*price - avg_price).abs() / avg_price * 100.0, avg_price);
             }
+        }
+        
+        if has_significant_deviation {
+            warn!("Phát hiện độ lệch đáng kể giữa các nguồn dữ liệu, sử dụng giá trung bình {}", avg_price);
+        } else {
+            debug!("Đồng thuận đạt được với giá trung bình {}", avg_price);
         }
         
         // Trả về giá đồng thuận
@@ -536,6 +725,225 @@ impl OracleManager {
         
         Ok(())
     }
+    
+    /// Phát hiện giao dịch bất thường để ngăn chặn gian lận và rủi ro
+    pub fn detect_abnormal_transaction(
+        &self,
+        source_chain: &str,
+        target_chain: &str,
+        sender: &str,
+        amount: &str,
+        recipient: &str
+    ) -> BridgeResult<bool> {
+        // Chuyển đổi amount thành f64 để tính toán
+        let amount_value = match amount.parse::<f64>() {
+            Ok(val) => val,
+            Err(_) => return Err(BridgeError::OracleError(format!("Số lượng '{}' không hợp lệ", amount)))
+        };
+        
+        // 1. Kiểm tra giới hạn giao dịch cho cặp chain cụ thể
+        let (min_limit, max_limit) = self.get_chain_transaction_limits(source_chain, target_chain);
+        
+        // Kiểm tra giới hạn giao dịch tối thiểu
+        if amount_value < min_limit {
+            warn!(
+                "Giao dịch bất thường: Số lượng ({}) từ chain {} đến {} nhỏ hơn giới hạn tối thiểu ({})",
+                amount_value, source_chain, target_chain, min_limit
+            );
+            return Ok(true);
+        }
+        
+        // Kiểm tra giới hạn giao dịch tối đa
+        if amount_value > max_limit {
+            warn!(
+                "Giao dịch bất thường: Số lượng ({}) từ chain {} đến {} vượt quá giới hạn tối đa ({})",
+                amount_value, source_chain, target_chain, max_limit
+            );
+            return Ok(true);
+        }
+        
+        // 2. Phân tích lịch sử giao dịch của người gửi
+        let sender_history = self.get_sender_transaction_history(sender);
+        
+        // Kiểm tra tần suất giao dịch gần đây
+        if sender_history.recent_tx_count > 10 {
+            warn!(
+                "Giao dịch bất thường: Người gửi {} đã thực hiện {} giao dịch trong 1 giờ qua",
+                sender, sender_history.recent_tx_count
+            );
+            return Ok(true);
+        }
+        
+        // Kiểm tra so với giá trị trung bình giao dịch của người gửi
+        if sender_history.avg_tx_amount > 0.0 && amount_value > sender_history.avg_tx_amount * 5.0 {
+            warn!(
+                "Giao dịch bất thường: Số lượng ({}) cao hơn nhiều so với giá trị trung bình ({}) của người gửi {}",
+                amount_value, sender_history.avg_tx_amount, sender
+            );
+            
+            // Không reject tự động, chỉ cảnh báo
+            info!("Giao dịch lớn bất thường từ {}: Đánh dấu cần xác minh thêm", sender);
+        }
+        
+        // 3. Kiểm tra các mẫu giao dịch đáng ngờ
+        if self.detect_suspicious_pattern(sender, recipient, amount_value, &sender_history) {
+            warn!(
+                "Giao dịch bất thường: Phát hiện mẫu giao dịch đáng ngờ từ {} đến {}",
+                sender, recipient
+            );
+            return Ok(true);
+        }
+        
+        // Không phát hiện bất thường
+        debug!("Giao dịch từ {} đến {} với số lượng {} là bình thường", sender, recipient, amount_value);
+        Ok(false)
+    }
+    
+    /// Lấy giới hạn giao dịch cho cặp chain cụ thể
+    fn get_chain_transaction_limits(&self, source_chain: &str, target_chain: &str) -> (f64, f64) {
+        // Mặc định
+        let default_min = 0.01;
+        let default_max = 1_000_000.0;
+        
+        // Giới hạn tùy chỉnh theo cặp chain
+        // Trong thực tế, có thể lấy từ cấu hình hoặc cơ sở dữ liệu
+        match (source_chain, target_chain) {
+            ("ethereum", "bsc") => (0.05, 500_000.0),
+            ("ethereum", "near") => (0.05, 100_000.0),
+            ("bsc", "ethereum") => (0.1, 250_000.0),
+            ("bsc", "near") => (0.1, 100_000.0),
+            ("near", "ethereum") => (1.0, 50_000.0),
+            ("near", "bsc") => (1.0, 75_000.0),
+            ("solana", _) => (0.5, 100_000.0),
+            (_, "solana") => (0.5, 100_000.0),
+            ("arbitrum", _) => (0.05, 200_000.0),
+            (_, "arbitrum") => (0.05, 200_000.0),
+            _ => (default_min, default_max),
+        }
+    }
+    
+    /// Lấy lịch sử giao dịch của người gửi
+    /// (Mô phỏng - trong thực tế sẽ truy vấn từ cơ sở dữ liệu)
+    fn get_sender_transaction_history(&self, sender: &str) -> SenderHistory {
+        // Trong thực tế, sẽ truy vấn từ cơ sở dữ liệu
+        // Đây chỉ là mô phỏng cho triển khai
+        
+        // Mock data với các địa chỉ đặc biệt để kiểm thử
+        if sender.ends_with("abc123") {
+            // Người dùng với nhiều giao dịch gần đây
+            return SenderHistory {
+                total_tx_count: 50,
+                recent_tx_count: 15, // Nhiều giao dịch trong 1 giờ qua
+                avg_tx_amount: 100.0,
+                max_tx_amount: 500.0,
+                recent_transactions: vec![
+                    (150.0, SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_secs() - 120), // 2 phút trước
+                    (200.0, SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_secs() - 180), // 3 phút trước
+                ],
+            };
+        } else if sender.ends_with("def456") {
+            // Người dùng với giao dịch giá trị lớn
+            return SenderHistory {
+                total_tx_count: 10,
+                recent_tx_count: 2,
+                avg_tx_amount: 1000.0,
+                max_tx_amount: 10000.0,
+                recent_transactions: vec![
+                    (8000.0, SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_secs() - 3600), // 1 giờ trước
+                ],
+            };
+        }
+        
+        // Mặc định - người dùng bình thường
+        SenderHistory {
+            total_tx_count: 5,
+            recent_tx_count: 1,
+            avg_tx_amount: 50.0,
+            max_tx_amount: 200.0,
+            recent_transactions: vec![
+                (50.0, SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_secs() - 86400), // 1 ngày trước
+            ],
+        }
+    }
+    
+    /// Phát hiện mẫu giao dịch đáng ngờ
+    fn detect_suspicious_pattern(
+        &self,
+        sender: &str,
+        recipient: &str,
+        amount: f64,
+        history: &SenderHistory
+    ) -> bool {
+        // 1. Phát hiện wash trading (giao dịch qua lại giữa các tài khoản)
+        // Kiểm tra giao dịch qua lại: A->B->A
+        for (tx_amount, _) in &history.recent_transactions {
+            // Nếu có giao dịch gần đây với giá trị tương tự từ người nhận hiện tại
+            if recipient.contains(sender) && (*tx_amount * 0.9..=*tx_amount * 1.1).contains(&amount) {
+                warn!("Nghi ngờ wash trading: Giao dịch qua lại giữa {} và {}", sender, recipient);
+                return true;
+            }
+        }
+        
+        // 2. Phát hiện smurfing (chia nhỏ giao dịch)
+        // Kiểm tra nhiều giao dịch nhỏ liên tiếp đến cùng địa chỉ
+        if history.recent_tx_count > 3 {
+            let mut small_tx_count = 0;
+            for (tx_amount, _) in &history.recent_transactions {
+                if *tx_amount < history.avg_tx_amount * 0.5 {
+                    small_tx_count += 1;
+                }
+            }
+            
+            if small_tx_count >= 3 {
+                warn!("Nghi ngờ smurfing: {} giao dịch nhỏ liên tiếp từ {}", small_tx_count, sender);
+                return true;
+            }
+        }
+        
+        false
+    }
+}
+
+/// Dữ liệu giao dịch bridge
+#[derive(Debug, Clone)]
+pub struct BridgeTransactionData {
+    /// Mã hash giao dịch
+    pub tx_hash: TransactionHash,
+    /// Chuỗi nguồn
+    pub source_chain: String,
+    /// Chuỗi đích
+    pub target_chain: String,
+    /// Người gửi
+    pub sender: String,
+    /// Người nhận
+    pub recipient: String,
+    /// Số lượng token
+    pub amount: f64,
+    /// Thời gian giao dịch
+    pub timestamp: u64,
+    /// Trạng thái
+    pub status: OracleUpdateStatus,
+}
+
+/// Cấu trúc lưu trữ lịch sử giao dịch của người gửi
+struct SenderHistory {
+    total_tx_count: u32,           // Tổng số giao dịch
+    recent_tx_count: u32,          // Số giao dịch trong 1 giờ qua
+    avg_tx_amount: f64,            // Giá trị trung bình giao dịch
+    max_tx_amount: f64,            // Giá trị giao dịch lớn nhất
+    recent_transactions: Vec<(f64, u64)>, // Các giao dịch gần đây: (amount, timestamp)
 }
 
 #[cfg(test)]
@@ -606,7 +1014,7 @@ mod tests {
         manager.add_provider(Box::new(MockOracleProvider::new("TestOracle", vec!["ethereum", "bsc", "near"])));
         
         // Test cập nhật và lấy giá token
-        manager.update_token_price("ethereum", 100.5).await.unwrap();
+        manager.update_token_price("ethereum", "100.5", "local", "100.5").await.unwrap();
         let price = manager.get_token_price("ethereum").await.unwrap();
         assert_eq!(price, Some(100.5));
         

@@ -49,7 +49,7 @@
 - [ ] Tối ưu hóa cache và cơ chế dọn dẹp cache tự động
 - [ ] Cải thiện validation cho các phương thức: send_to_hub, update_transaction_hash, calculate_fee
 - [ ] Thêm xử lý timeout cho các giao dịch bridge chờ xác nhận lâu
-- [ ] Thêm cơ chế phát hiện và ngăn chặn giao dịch bất thường (anomaly detection)
+- [x] Thêm cơ chế phát hiện và ngăn chặn giao dịch bất thường (anomaly detection)
 - [ ] Thêm cơ chế xác thực chéo giữa các giao dịch bridge
 - [ ] Cải thiện hiệu suất cho phương thức find_adapter bằng cơ chế cache
 - [ ] Thêm phương thức để xóa giao dịch cũ trong BridgeTransactionRepository
@@ -65,4 +65,131 @@
 - [ ] Logging 
 - [ ] Documentation 
 - [ ] Error handling 
+
+# Các nhiệm vụ cần hoàn thành
+
+## Module: Bridge
+
+- [ ] Phát triển hệ thống lưu trữ bền vững cho BridgeTransaction, để giao dịch không bị mất khi restart
+- [ ] Cài đặt cơ chế xác thực chéo cho các giao dịch bridge để ngăn chặn tấn công double-spend
+- [ ] Thêm hệ thống phát hiện giao dịch bất thường (anomaly detection) dựa trên mẫu giao dịch quá khứ
+- [ ] Cải thiện phương thức `send_to_hub` trong evm_spoke.rs để kiểm tra số dư trước khi thực hiện giao dịch
+- [ ] Bổ sung cơ chế timeout và hủy bỏ cho các giao dịch treo trong `wait_for_transaction_confirmation`
+- [ ] Tăng cường validation trong `receive_from_spoke` để xử lý chain ID không hợp lệ
+- [ ] Thêm cơ chế dọn dẹp cache tự động để tránh quá tải bộ nhớ trong near_hub.rs
+- [ ] Cải thiện cơ chế đồng thuận cho Oracle với nhiều nguồn dữ liệu khác nhau
+- [ ] Bổ sung validation cho phương thức `update_token_price` để ngăn chặn giá token bất thường
+- [ ] Thêm xử lý lỗi cho phương thức `initialize` khi thiết lập EvmProvider
+- [ ] Cập nhật cơ chế `get_supported_chains` để tự động cập nhật khi thêm chain mới
+- [ ] Tăng cường phương thức `add_provider` để kiểm tra provider đã tồn tại
+- [ ] Phát triển cơ chế chống sai lệch lớn trong `get_price_consensus`
+- [ ] Cải thiện các bài kiểm tra (unit tests) cho toàn bộ module Bridge
+- [ ] Tạo documentation chi tiết cho tất cả các components trong module Bridge
+
+## Module: Smart Contracts
+
+- [ ] Triển khai đầy đủ phương thức `check_bsc_bridge_completion` trong dmd_token.rs
+- [ ] Thêm cơ chế refresh cho cache sử dụng OnceCell trong DmdToken
+- [ ] Phát triển cơ chế đồng bộ hóa cho GlobalTierConfig
+- [ ] Cập nhật phương thức estimate_fees để sử dụng ước tính thực tế thay vì giá trị hard-coded
+- [ ] Cải thiện BridgeState để hỗ trợ mở rộng trong solana_contract
+- [ ] Bổ sung xử lý lỗi cho phương thức process_bridge_to_near
+- [ ] Tăng cường kiểm tra bridge hỗ trợ trong phương thức bridge_to_chain
+- [ ] Triển khai thực tế các phương thức check_bridge_completion
+- [ ] Thêm cơ chế retry và fallback cho TokenInterface trong BscContractProvider
+- [ ] Mở rộng hỗ trợ cho tất cả các chain trong create_provider
+
+## Module: Exchange
+
+- [ ] Phát triển cơ chế persistence cho PairManager
+- [ ] Thêm cơ chế xử lý fee cho phương thức add_liquidity
+- [ ] Triển khai phương thức swap_token2_to_token1
+- [ ] Cải thiện logic tính toán slippage
+- [ ] Bổ sung thông tin về volume giao dịch, fees, APR trong TokenPair
+- [ ] Tăng cường validation cho phương thức set_pool_address
+- [ ] Phát triển cơ chế đồng bộ hóa đa luồng cho PairManager
+- [ ] Cải thiện phương thức create_pair để kiểm tra token đã tồn tại
+- [ ] Xây dựng cơ chế chống price manipulation
+
+## Module: Farm và Stake
+
+- [ ] Hợp nhất chức năng của farm_logic.rs và stake/farm_logic.rs
+- [ ] Xóa các file trùng lặp hoặc không cần thiết
+
+## Các nhiệm vụ chung
+
+- [ ] Thêm unit test cho tất cả các modules
+- [ ] Cải thiện error handling tổng thể
+- [ ] Thêm logging chi tiết
+- [ ] Tối ưu hóa performance
+- [ ] Cập nhật documentation
+
+# Danh sách các công việc cần làm
+
+## Domain: Wallet
+- [ ] Viết integration tests cho module Wallet
+- [ ] Cải thiện logging trong module Wallet
+- [ ] Thêm hỗ trợ cho contract ERC1155
+- [ ] Tối ưu hoá hiệu suất của các phương thức chính
+- [ ] Cải thiện tính năng backup của wallet
+- [x] Thiết kế và triển khai abstraction layer tốt hơn
+- [x] Refactor code để tránh vi phạm encapsulation
+- [x] Hoàn thiện mã nguồn cho VIP User
+
+## Domain: Blockchain/Bridge
+- [x] Thiết kế cơ chế persistent storage cho Bridge Transactions
+- [x] Thiết kế và triển khai xác thực chéo giữa các giao dịch bridge
+- [x] Cải thiện bảo mật cho private keys trong BridgeConfig
+- [x] Thêm giám sát và validation cho các giao dịch bridge
+- [x] Triển khai hệ thống phát hiện giao dịch bất thường (anomaly detection)
+- [x] Cải thiện quản lý bộ nhớ cache
+- [x] Refactor mã nguồn adapter để dễ mở rộng
+- [x] Thêm kiểm tra số dư trước khi gửi tokens
+- [x] Tối ưu hóa quá trình tìm kiếm adapter
+- [x] Thiết kế và triển khai cơ chế đồng thuận cho Oracle
+- [ ] Thêm hỗ trợ cho thêm nhiều blockchain khác
+- [ ] Cải thiện monitoring và alerting hệ thống
+
+## Domain: Exchange
+- [ ] Triển khai persistent storage cho các cặp token
+- [ ] Cải thiện cơ chế tính phí giao dịch
+- [ ] Thêm phương thức swap_token2_to_token1
+- [ ] Cải thiện logic tính slippage
+- [ ] Thêm thông tin về volume, fees và APR cho TokenPair
+- [ ] Thêm xác thực cho địa chỉ pool
+- [ ] Thiết kế cơ chế đồng bộ hóa đa luồng
+- [ ] Thêm kiểm tra token trùng lặp
+- [ ] Triển khai cơ chế chống price manipulation
+
+## Domain: Smart Contracts
+- [ ] Cải thiện các phương thức check_bridge_completion
+- [ ] Thêm cơ chế đồng bộ hóa cho GlobalTierConfig
+- [ ] Sử dụng hàm ước tính thực tế cho LayerZero fee
+- [ ] Refactor BridgeState để hỗ trợ mở rộng
+- [ ] Thêm xử lý lỗi cho process_bridge_to_near
+- [ ] Thêm kiểm tra bridge hỗ trợ trong bridge_to_chain
+- [ ] Thêm xử lý retry và fallback cho TokenInterface
+- [ ] Mở rộng TokenProviderFactory hỗ trợ tất cả các chain
+
+## Công việc chung cho tất cả các module
+- [ ] Thêm unit tests
+- [ ] Cải thiện error handling
+- [ ] Thêm logging chi tiết
+- [ ] Tối ưu hóa performance
+- [ ] Cập nhật documentation
+- [ ] Thêm integrations tests
+- [ ] Thiết kế và triển khai hệ thống telemetry
+
+## Công việc mới sau khi cải thiện module Bridge và Oracle
+- [ ] Triển khai hệ thống giám sát thời gian thực cho Bridge transactions
+- [ ] Phát triển dashboard để theo dõi trạng thái Bridge và Oracle
+- [ ] Thêm hỗ trợ cho các token tiêu chuẩn mới (ví dụ: ERC721)
+- [ ] Triển khai cơ chế kiểm toán tự động cho các giao dịch
+- [ ] Tối ưu hóa thuật toán phát hiện giao dịch bất thường
+- [ ] Cải thiện cách xử lý các ngoại lệ trong cơ chế đồng thuận
+- [ ] Triển khai backup và recovery cho Oracle data
+- [ ] Thêm API để truy vấn trạng thái giao dịch và lịch sử
+- [ ] Nâng cấp hệ thống cache để hỗ trợ distributed caching
+- [ ] Triển khai cơ chế phân tích thông minh để dự đoán giá token
+- [ ] Phát triển hệ thống escalation khi phát hiện giao dịch đáng ngờ
 
