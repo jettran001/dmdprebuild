@@ -1,4 +1,86 @@
- Kế hoạch phát triển tương lai:
+# Kế hoạch phát triển tương lai:
+
+## Smartcontract prebuild
+- Thời gian hoàn thành: 4 tuần
+
+### 1. Tái cấu trúc DMD Token với mô hình hub-spoke
+- [ ] Refactor DMD Token thành hub cho tất cả các blockchain
+  - [ ] Tạo interface chung TokenHub định nghĩa các phương thức chuẩn cho hub
+  - [ ] Cập nhật DmdToken implement TokenHub để điều phối các hoạt động giữa các blockchain
+  - [ ] Thêm phương thức distribution_stats() để truy vấn phân phối token trên các chain
+  - [ ] Tạo cơ chế đồng bộ hóa để đảm bảo tổng supply 1 tỷ token trên tất cả các chain
+
+### 2. Cấu trúc lại các smart contract theo blockchain (EVM và non-EVM)
+- [ ] Tạo folder cấu trúc dành riêng cho mỗi blockchain
+  - [ ] smartcontracts/evm/
+    - [ ] ethereum_contract.rs
+    - [ ] bsc_contract.rs
+    - [ ] polygon_contract.rs
+    - [ ] arbitrum_contract.rs
+    - [ ] optimism_contract.rs
+    - [ ] fantom_contract.rs
+    - [ ] avalanche_contract.rs
+    - [ ] evm_shared.rs
+  - [ ] smartcontracts/non_evm/
+    - [ ] solana_contract.rs
+    - [ ] near_contract.rs
+    - [ ] ton_contract.rs
+    - [ ] non_evm_shared.rs
+
+### 3. Tạo module bridge riêng biệt với các adapter chuyên biệt
+- [ ] bridge/
+  - [ ] mod.rs (định nghĩa các trait và interface)
+  - [ ] bridge_manager.rs (quản lý các adapter và giao dịch)
+  - [ ] adapters/
+    - [ ] evm_to_evm_adapter.rs (bridge giữa các chain EVM)
+    - [ ] evm_to_non_evm_adapter.rs (bridge từ EVM sang non-EVM)
+    - [ ] non_evm_to_evm_adapter.rs (bridge từ non-EVM sang EVM)
+    - [ ] solana_near_adapter.rs (bridge giữa Solana và NEAR)
+    - [ ] ton_near_adapter.rs (bridge giữa TON và NEAR)
+  - [ ] status_monitor.rs (theo dõi trạng thái giao dịch)
+  - [ ] fee_calculator.rs (tính toán phí bridge)
+  - [ ] security/
+    - [ ] transaction_validator.rs (xác minh giao dịch)
+    - [ ] fraud_detector.rs (phát hiện gian lận)
+
+### 4. Triển khai các tính năng token quản lý cho từng blockchain
+- [ ] Đảm bảo mỗi implementation token trên từng blockchain có các tính năng:
+  - [ ] Quản lý tổng cung cục bộ
+  - [ ] Xử lý transfer trong cùng blockchain
+  - [ ] Kiểm tra số dư
+  - [ ] Lưu trữ trạng thái token (locked, staked, farming)
+  - [ ] API để truy vấn thông tin token trên chain
+  - [ ] Tương tác với smart contract triển khai trên từng blockchain
+
+### 5. Triển khai storage layer cho bridge và token
+- [ ] Cấu trúc lưu trữ giao dịch bridge với tính bền vững
+  - [ ] Tạo persistent repository cho bridge transactions
+  - [ ] Cơ chế lưu trữ và khôi phục trạng thái giao dịch khi restart
+  - [ ] Cơ chế xử lý sự cố và khôi phục từ lỗi
+- [ ] Cơ chế lưu trữ phân phối token trên các blockchain
+  - [ ] Lưu trữ thông tin tổng cung trên từng chain
+  - [ ] Lịch sử bridge giữa các chain
+
+### 6. Triển khai API đồng nhất cho frontend
+- [ ] Tạo các API endpoints cho:
+  - [ ] Lấy thông tin token trên tất cả các chain
+  - [ ] Lấy lịch sử giao dịch bridge
+  - [ ] Khởi tạo giao dịch bridge
+  - [ ] Kiểm tra trạng thái giao dịch bridge
+  - [ ] Ước tính phí bridge
+
+### 7. Tối ưu hóa và Testing
+- [ ] Phát triển bộ test toàn diện cho mọi thành phần
+  - [ ] Unit tests cho mỗi adapter và contract
+  - [ ] Integration tests cho bridge system
+  - [ ] Stress tests cho hệ thống bridge
+  - [ ] Kiểm tra bảo mật
+- [ ] Tối ưu hóa hiệu suất
+  - [ ] Cơ chế cache thông minh
+  - [ ] Tối ưu hóa xử lý đồng thời
+  - [ ] Giảm thiểu lỗi và tăng khả năng khôi phục
+
+# Kế hoạch phát triển tương lai:
 1.Wallet
 - [ ] Integration tests
 - [ ] Module tests toàn diện
@@ -192,4 +274,151 @@
 - [ ] Nâng cấp hệ thống cache để hỗ trợ distributed caching
 - [ ] Triển khai cơ chế phân tích thông minh để dự đoán giá token
 - [ ] Phát triển hệ thống escalation khi phát hiện giao dịch đáng ngờ
+
+# Kế hoạch triển khai sửa lỗi Bridge System
+## Cập nhật: [Ngày hiện tại]
+
+### 1. Hoàn thiện triển khai BridgeHub trait trong sol_hub.rs
+- **Ưu tiên**: Cao
+- **Phức tạp**: Trung bình
+- **Thời gian**: 2-3 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Di chuyển các phương thức `receive_from_spoke` và `send_to_spoke` vào trong khối `impl BridgeHub for SolBridgeHub`
+  - [ ] Triển khai phương thức `check_transaction_status` để kiểm tra trạng thái giao dịch
+  - [ ] Triển khai phương thức `get_transaction` để lấy thông tin giao dịch
+  - [ ] Triển khai phương thức `estimate_fee` để ước tính phí giao dịch
+  - [ ] Triển khai phương thức `get_supported_chains` để lấy danh sách chain hỗ trợ
+  - [ ] Triển khai phương thức `cleanup_transaction_cache` để dọn dẹp cache giao dịch cũ
+  - [ ] Triển khai phương thức `manage_cache` để quản lý cache tự động
+  - [ ] Thực hiện unit test cho tất cả các phương thức mới triển khai
+
+### 2. Áp dụng bảo mật cho khóa riêng tư trong sol_hub.rs
+- **Ưu tiên**: Rất cao
+- **Phức tạp**: Cao
+- **Thời gian**: 3-4 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Tích hợp KeyVault vào SolBridgeHub
+  - [ ] Sửa phương thức `send_to_spoke` để sử dụng key_id thay vì private_key
+  - [ ] Thêm quá trình xác thực key_id trước khi sử dụng
+  - [ ] Triển khai cơ chế xóa key khỏi bộ nhớ sau khi sử dụng
+  - [ ] Thêm giới hạn số lần truy cập key trong một khoảng thời gian
+  - [ ] Triển khai cơ chế ghi log chi tiết cho hoạt động sử dụng key
+  - [ ] Thực hiện kiểm thử bảo mật cho quy trình xử lý khóa
+
+### 3. Triển khai kiểm tra số dư đầy đủ
+- **Ưu tiên**: Cao
+- **Phức tạp**: Thấp
+- **Thời gian**: 1-2 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai phương thức `get_balance` để lấy số dư SPL token
+  - [ ] Triển khai phương thức `get_sol_balance` để lấy số dư SOL
+  - [ ] Cải thiện phương thức `send_to_spoke` để kiểm tra số dư trước khi gửi giao dịch
+  - [ ] Thêm kiểm tra số dư phí (SOL) để đảm bảo đủ cho việc thanh toán phí giao dịch
+  - [ ] Triển khai kiểm thử cho các trường hợp số dư không đủ
+
+### 4. Triển khai kiểm soát đồng thời
+- **Ưu tiên**: Cao
+- **Phức tạp**: Cao
+- **Thời gian**: 4-5 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Thêm các trường `transaction_locks`, `concurrent_tx_limiter` và `active_transactions` vào struct
+  - [ ] Triển khai phương thức `create_transaction_with_lock` để đảm bảo không có giao dịch trùng lặp
+  - [ ] Triển khai phương thức `release_transaction_lock` để giải phóng khóa sau khi hoàn thành
+  - [ ] Cập nhật các phương thức `receive_from_spoke` và `send_to_spoke` để sử dụng cơ chế khóa
+  - [ ] Thêm giới hạn số lượng giao dịch đồng thời tối đa
+  - [ ] Triển khai cơ chế theo dõi tình trạng overload
+  - [ ] Triển khai kiểm thử cho các tình huống đồng thời
+
+### 5. Triển khai cơ chế retry với backoff
+- **Ưu tiên**: Trung bình
+- **Phức tạp**: Trung bình
+- **Thời gian**: 2-3 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai phương thức `perform_transaction_with_retry` với tham số backoff
+  - [ ] Cập nhật `store_transaction` để sử dụng cơ chế retry
+  - [ ] Cập nhật `update_transaction` để sử dụng cơ chế retry
+  - [ ] Cập nhật `wait_for_transaction_finality` để sử dụng cơ chế retry thông minh
+  - [ ] Triển khai cơ chế loại bỏ các lỗi tạm thời vs lỗi vĩnh viễn
+  - [ ] Triển khai kiểm thử cho các tình huống retry
+
+### 6. Mô hình bảo mật nhiều lớp
+- **Ưu tiên**: Cao
+- **Phức tạp**: Cao
+- **Thời gian**: 5-7 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai lớp xác thực đầu vào với `validate_input_parameters`
+  - [ ] Triển khai lớp kiểm tra quyền hạn với `verify_permissions`
+  - [ ] Triển khai lớp giới hạn tần suất với `rate_limiter`
+  - [ ] Triển khai lớp xác thực nguồn gốc yêu cầu với `verify_request_origin`
+  - [ ] Triển khai lớp ghi log chi tiết cho mục đích audit
+  - [ ] Triển khai lớp phát hiện giao dịch bất thường với phân tích hành vi
+  - [ ] Triển khai kiểm thử cho từng lớp bảo mật
+
+### 7. Triển khai Circuit Breaker
+- **Ưu tiên**: Trung bình
+- **Phức tạp**: Trung bình
+- **Thời gian**: 3-4 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai struct `CircuitBreaker` với các trạng thái và lý do
+  - [ ] Thêm trường `circuit_breaker` vào struct SolBridgeHub
+  - [ ] Triển khai phương thức `check_circuit_breaker` để kiểm tra trạng thái
+  - [ ] Triển khai phương thức `trigger_circuit_breaker` để kích hoạt circuit breaker
+  - [ ] Triển khai cơ chế reset tự động sau một khoảng thời gian
+  - [ ] Triển khai cơ chế thông báo admin khi circuit breaker được kích hoạt
+  - [ ] Triển khai kiểm thử cho các tình huống circuit breaker
+
+### 8. Xác thực bổ sung cho giao dịch blockchain
+- **Ưu tiên**: Cao
+- **Phức tạp**: Cao
+- **Thời gian**: 4-5 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai xác thực nonce để ngăn tấn công replay
+  - [ ] Triển khai kiểm tra giới hạn gas/phí trước khi gửi giao dịch
+  - [ ] Triển khai thiết lập deadline cho giao dịch
+  - [ ] Triển khai kiểm tra signature cho giao dịch từ LayerZero
+  - [ ] Triển khai xác thực đa chữ ký cho giao dịch có giá trị cao
+  - [ ] Triển khai blacklist địa chỉ động dựa trên dữ liệu từ API bên ngoài
+  - [ ] Triển khai kiểm thử cho các trường hợp tấn công
+
+### 9. Tích hợp Persistent Repository
+- **Ưu tiên**: Cao
+- **Phức tạp**: Trung bình
+- **Thời gian**: 3-4 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Tạo interface cho repository trong SolBridgeHub
+  - [ ] Tích hợp BridgeTransactionRepository hiện có vào SolBridgeHub
+  - [ ] Cập nhật các phương thức lưu và truy xuất giao dịch để sử dụng repository
+  - [ ] Triển khai cơ chế cache hai lớp (memory + persistent)
+  - [ ] Triển khai cơ chế đồng bộ hóa giữa cache và persistent storage
+  - [ ] Đảm bảo atomic trong các thao tác repository
+  - [ ] Triển khai kiểm thử cho các tình huống mất kết nối hoặc lỗi I/O
+
+### 10. Kiểm thử tích hợp và hiệu suất
+- **Ưu tiên**: Trung bình
+- **Phức tạp**: Cao
+- **Thời gian**: 5-7 ngày
+- **Người phụ trách**: TBD
+- **Các bước**:
+  - [ ] Triển khai kiểm thử tích hợp giữa SolBridgeHub và EvmBridgeSpoke
+  - [ ] Triển khai kiểm thử tích hợp giữa SolBridgeHub và Bridge Manager
+  - [ ] Triển khai kiểm thử tích hợp với các dịch vụ ngoài như LayerZero
+  - [ ] Thực hiện benchmark để đánh giá hiệu suất của bridge
+  - [ ] Đánh giá khả năng mở rộng với nhiều giao dịch đồng thời
+  - [ ] Đánh giá memory footprint và CPU usage
+  - [ ] Tối ưu hóa dựa trên kết quả đánh giá hiệu suất
+
+### Ghi chú:
+- Các PR nên được review bởi ít nhất 2 người trước khi merge
+- Kiểm thử hiệu suất nên được thực hiện trên môi trường tương tự production
+- Mọi thay đổi liên quan đến bảo mật cần được review bởi team bảo mật
+- Cập nhật file `.bugs` sau khi hoàn thành mỗi task
 

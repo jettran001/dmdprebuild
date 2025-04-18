@@ -363,7 +363,8 @@ mod tests {
 
     impl BridgeTransactionRepository for MockBridgeTransactionRepository {
         fn save(&self, transaction: &BridgeTransaction) -> Result<(), String> {
-            let mut transactions = self.transactions.lock().unwrap();
+            let mut transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             
             // Kiểm tra xem giao dịch đã tồn tại chưa
             if let Some(idx) = transactions.iter().position(|t| t.id == transaction.id) {
@@ -376,37 +377,44 @@ mod tests {
         }
         
         fn find_by_id(&self, id: &str) -> Result<Option<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().find(|t| t.id == id).cloned())
         }
         
         fn find_by_source_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().find(|t| t.source_tx_id.as_ref().map_or(false, |id| id == tx_id)).cloned())
         }
         
         fn find_by_hub_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().find(|t| t.hub_tx_id.as_ref().map_or(false, |id| id == tx_id)).cloned())
         }
         
         fn find_by_target_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().find(|t| t.target_tx_id.as_ref().map_or(false, |id| id == tx_id)).cloned())
         }
         
         fn find_by_source_address(&self, address: &str) -> Result<Vec<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().filter(|t| t.source_address == address).cloned().collect())
         }
         
         fn find_by_target_address(&self, address: &str) -> Result<Vec<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().filter(|t| t.target_address == address).cloned().collect())
         }
         
         fn find_by_status(&self, status: &BridgeTransactionStatus) -> Result<Vec<BridgeTransaction>, String> {
-            let transactions = self.transactions.lock().unwrap();
+            let transactions = self.transactions.lock()
+                .map_err(|e| format!("Không thể lấy lock cho danh sách giao dịch: {}", e))?;
             Ok(transactions.iter().filter(|t| &t.status == status).cloned().collect())
         }
     }

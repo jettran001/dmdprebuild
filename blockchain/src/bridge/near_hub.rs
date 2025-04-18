@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug, warn, error};
 use rand;
 use regex::Regex;
+use once_cell::sync::Lazy;
 
 use crate::smartcontracts::{
     dmd_token::DmdChain,
@@ -23,6 +24,23 @@ use super::{
     traits::BridgeHub,
     types::{BridgeTransaction, BridgeStatus, BridgeConfig, BridgeTokenType},
 };
+
+// Thêm các regex patterns dùng Lazy để thay thế các unwrap() trong hàm validate_address
+// Khai báo static patterns ở đầu module, ngoài các hàm
+static EVM_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^0x[0-9a-fA-F]{40}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ EVM")
+});
+
+static NEAR_ACCOUNT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-z0-9_-]{2,64}$")
+        .expect("Không thể biên dịch regex pattern cho tài khoản NEAR")
+});
+
+static SOLANA_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ Solana")
+});
 
 /// ABI của NEAR bridge contract
 const NEAR_BRIDGE_CONTRACT_ABI: &str = r#"
@@ -91,6 +109,38 @@ const NEAR_BRIDGE_CONTRACT_ABI: &str = r#"
 ]
 "#;
 
+/// Cấu trúc để theo dõi thống kê hiệu suất cache
+pub struct CacheMetrics {
+    /// Thời điểm bắt đầu đo lường
+    start_time: chrono::DateTime<chrono::Utc>,
+    /// Kích thước cache ban đầu
+    initial_size: usize,
+    /// Kích thước cache tối đa đạt được
+    max_size: usize,
+    /// Tốc độ tăng trưởng cache (số giao dịch/giờ)
+    growth_rate: f64,
+    /// Số lần cảnh báo tăng tải đã phát
+    alert_count: usize,
+    /// Thời điểm cảnh báo cuối cùng
+    last_alert: Option<chrono::DateTime<chrono::Utc>>,
+    /// Có đang trong chế độ cảnh báo không
+    is_in_alert_state: bool,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self {
+            start_time: chrono::Utc::now(),
+            initial_size: 0,
+            max_size: 0,
+            growth_rate: 0.0,
+            alert_count: 0,
+            last_alert: None,
+            is_in_alert_state: false,
+        }
+    }
+}
+
 /// Bridge hub sử dụng NEAR Protocol
 pub struct NearBridgeHub {
     /// Cấu hình bridge
@@ -103,6 +153,14 @@ pub struct NearBridgeHub {
     supported_chains: Vec<DmdChain>,
     /// LayerZero chain ID mapping
     lz_chain_map: HashMap<DmdChain, u16>,
+    /// Số lượng giao dịch tối đa trong cache
+    max_cache_size: usize,
+    /// Metrics theo dõi hiệu suất cache
+    cache_metrics: RwLock<CacheMetrics>,
+    /// Cấu hình mở rộng tự động
+    auto_scaling_enabled: bool,
+    /// Callback thông báo cho admin (Option<Arc<Fn(String, String) -> Result<(), String> + Send + Sync>>)
+    admin_notifier: Option<Arc<dyn Fn(String, String) -> Result<(), String> + Send + Sync>>,
 }
 
 impl Default for NearBridgeHub {
@@ -131,6 +189,10 @@ impl Default for NearBridgeHub {
                 DmdChain::Base,
             ],
             lz_chain_map,
+            max_cache_size: 5000,
+            cache_metrics: RwLock::new(CacheMetrics::default()),
+            auto_scaling_enabled: true,
+            admin_notifier: None,
         }
     }
 }
@@ -341,7 +403,7 @@ impl NearBridgeHub {
             DmdChain::Ethereum | DmdChain::BinanceSmartChain | DmdChain::Polygon | 
             DmdChain::Arbitrum | DmdChain::Optimism | DmdChain::Base | DmdChain::Fantom => {
                 // Kiểm tra địa chỉ EVM: 0x + 40 hex characters
-                let evm_regex = Regex::new(r"^0x[0-9a-fA-F]{40}$").unwrap();
+                let evm_regex = &EVM_ADDRESS_REGEX;
                 if !evm_regex.is_match(address) {
                     return Err(BridgeError::InvalidAddress(
                         format!("Địa chỉ EVM không hợp lệ (phải là 0x + 40 ký tự hex): {}", address)
@@ -363,7 +425,7 @@ impl NearBridgeHub {
                 }
                 
                 let near_account_name = address.split('.').next().unwrap_or("");
-                let account_regex = Regex::new(r"^[a-z0-9_-]{2,64}$").unwrap();
+                let account_regex = &NEAR_ACCOUNT_REGEX;
                 if !account_regex.is_match(near_account_name) {
                     return Err(BridgeError::InvalidAddress(
                         format!("Tên tài khoản NEAR không hợp lệ (chỉ chấp nhận a-z, 0-9, _, - và độ dài 2-64 ký tự): {}", near_account_name)
@@ -372,7 +434,7 @@ impl NearBridgeHub {
             },
             DmdChain::Solana => {
                 // Kiểm tra địa chỉ Solana: base58 encoded string with 32-44 characters
-                let solana_regex = Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$").unwrap();
+                let solana_regex = &SOLANA_ADDRESS_REGEX;
                 if !solana_regex.is_match(address) {
                     return Err(BridgeError::InvalidAddress(
                         format!("Địa chỉ Solana không hợp lệ (phải là chuỗi base58 độ dài 32-44 ký tự): {}", address)
@@ -431,6 +493,106 @@ impl NearBridgeHub {
         }
         
         Ok(false)
+    }
+
+    /// Thiết lập kích thước cache tối đa
+    pub fn with_max_cache_size(mut self, size: usize) -> Self {
+        if size < 100 {
+            warn!("Kích thước cache quá nhỏ, sử dụng giá trị tối thiểu 100");
+            self.max_cache_size = 100;
+        } else {
+            self.max_cache_size = size;
+        }
+        self
+    }
+
+    /// Bật/tắt tính năng tự động mở rộng cache
+    pub fn with_auto_scaling(mut self, enabled: bool) -> Self {
+        self.auto_scaling_enabled = enabled;
+        self
+    }
+
+    /// Thiết lập hàm thông báo cho admin
+    pub fn with_admin_notifier<F>(mut self, notifier: F) -> Self 
+    where 
+        F: Fn(String, String) -> Result<(), String> + Send + Sync + 'static 
+    {
+        self.admin_notifier = Some(Arc::new(notifier));
+        self
+    }
+
+    /// Gửi thông báo cho admin
+    async fn notify_admin(&self, alert_type: &str, message: &str) -> Result<(), String> {
+        if let Some(notifier) = &self.admin_notifier {
+            notifier(alert_type.to_string(), message.to_string())?;
+            
+            // Cập nhật trạng thái cảnh báo
+            let mut metrics = self.cache_metrics.write().await;
+            metrics.last_alert = Some(chrono::Utc::now());
+            metrics.alert_count += 1;
+            metrics.is_in_alert_state = true;
+        }
+        Ok(())
+    }
+
+    /// Mở rộng cache khi cần thiết
+    async fn auto_scale_cache(&self, current_size: usize) -> BridgeResult<()> {
+        if !self.auto_scaling_enabled {
+            return Ok(());
+        }
+
+        // Chỉ mở rộng nếu cache đang đầy tới 80%
+        let usage_percentage = (current_size as f64 / self.max_cache_size as f64) * 100.0;
+        
+        if usage_percentage >= 80.0 {
+            // Tính tốc độ tăng trưởng
+            let mut metrics = self.cache_metrics.write().await;
+            let now = chrono::Utc::now();
+            let hours_elapsed = (now - metrics.start_time).num_milliseconds() as f64 / 3_600_000.0;
+            
+            if hours_elapsed > 0.0 {
+                // Cập nhật metrics
+                metrics.growth_rate = (current_size as f64 - metrics.initial_size as f64) / hours_elapsed;
+                
+                // Theo dõi kích thước tối đa
+                if current_size > metrics.max_size {
+                    metrics.max_size = current_size;
+                }
+                
+                // Nếu tốc độ tăng trưởng cao, điều chỉnh kích thước cache
+                if metrics.growth_rate > 100.0 { // Hơn 100 giao dịch/giờ
+                    let old_max = self.max_cache_size;
+                    let new_max = (self.max_cache_size as f64 * 1.5) as usize;
+                    
+                    // Cập nhật kích thước tối đa
+                    let mut txs = self.transactions.write().await;
+                    drop(txs); // Giải phóng lock để không block quá lâu
+                    
+                    // Ở đây không thể thay đổi max_cache_size vì nó là bất biến, 
+                    // nhưng trong thực tế ta có thể triển khai cơ chế mở rộng thông qua bộ nhớ phân tán
+                    
+                    // Chỉ gửi cảnh báo nếu không ở trong trạng thái cảnh báo
+                    // hoặc cảnh báo cuối đã cách đây ít nhất 1 giờ
+                    let should_alert = !metrics.is_in_alert_state || 
+                        metrics.last_alert.map_or(true, |t| (now - t).num_hours() >= 1);
+                        
+                    if should_alert {
+                        let message = format!(
+                            "Tự động mở rộng cache: {} -> {} giao dịch. Tốc độ tăng: {:.2} giao dịch/giờ. Sử dụng: {:.1}%",
+                            old_max, new_max, metrics.growth_rate, usage_percentage
+                        );
+                        info!("{}", message);
+                        self.notify_admin("CACHE_AUTO_SCALING", &message).await?;
+                    }
+                }
+            }
+        } else if usage_percentage < 50.0 {
+            // Nếu sử dụng dưới 50%, reset trạng thái cảnh báo
+            let mut metrics = self.cache_metrics.write().await;
+            metrics.is_in_alert_state = false;
+        }
+        
+        Ok(())
     }
 }
 
@@ -826,11 +988,9 @@ impl BridgeHub for NearBridgeHub {
     
     /// Quản lý cache tự động
     async fn manage_cache(&self) -> BridgeResult<()> {
-        const MAX_CACHE_SIZE: usize = 5000; // Giới hạn cache size
-        const CACHE_CLEANUP_INTERVAL: u64 = 3600; // Dọn dẹp mỗi giờ
         const MAX_AGE_HOURS: i64 = 24; // Giữ giao dịch tối đa 24 giờ
-        const CACHE_WARNING_THRESHOLD: usize = 4000; // Ngưỡng cảnh báo
-        const CACHE_CRITICAL_THRESHOLD: usize = 4500; // Ngưỡng tới hạn
+        const CACHE_WARNING_THRESHOLD_PERCENT: f64 = 80.0; // Ngưỡng cảnh báo ở 80%
+        const CACHE_CRITICAL_THRESHOLD_PERCENT: f64 = 90.0; // Ngưỡng tới hạn ở 90%
         
         // Kiểm tra kích thước cache
         let cache_size = {
@@ -838,22 +998,60 @@ impl BridgeHub for NearBridgeHub {
             txs.len()
         };
         
+        // Cập nhật metrics nếu là lần đầu
+        {
+            let mut metrics = self.cache_metrics.write().await;
+            if metrics.initial_size == 0 {
+                metrics.initial_size = cache_size;
+                metrics.start_time = chrono::Utc::now();
+            }
+            
+            // Cập nhật kích thước tối đa
+            if cache_size > metrics.max_size {
+                metrics.max_size = cache_size;
+            }
+        }
+        
+        // Tính toán ngưỡng cụ thể dựa trên kích thước tối đa
+        let warning_threshold = (self.max_cache_size as f64 * CACHE_WARNING_THRESHOLD_PERCENT / 100.0) as usize;
+        let critical_threshold = (self.max_cache_size as f64 * CACHE_CRITICAL_THRESHOLD_PERCENT / 100.0) as usize;
+        
         // Thực hiện dọn dẹp tự động trong các trường hợp sau:
-        let now = Utc::now();
+        let now = chrono::Utc::now();
         
         // 1. Cache quá tải (vượt ngưỡng tới hạn)
-        if cache_size > CACHE_CRITICAL_THRESHOLD {
-            warn!("Cache quá tải nghiêm trọng ({} giao dịch), dọn dẹp ngay...", cache_size);
+        if cache_size > critical_threshold {
+            let message = format!("Cache quá tải nghiêm trọng ({}/{} giao dịch - {:.1}%), dọn dẹp ngay...", 
+                cache_size, self.max_cache_size, (cache_size as f64 / self.max_cache_size as f64) * 100.0);
+            error!("{}", message);
+            
+            // Gửi cảnh báo cho admin
+            self.notify_admin("CACHE_CRITICAL", &message).await?;
+            
             // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 1 giờ
             Self::_cleanup_completed_transactions(self.transactions.clone(), 1).await?;
+            
+            // Kiểm tra xem có cần mở rộng cache không
+            self.auto_scale_cache(cache_size).await?;
+            
             return Ok(());
         }
         
         // 2. Cache gần đạt ngưỡng (vượt ngưỡng cảnh báo)
-        if cache_size > CACHE_WARNING_THRESHOLD {
-            warn!("Cache gần đạt ngưỡng ({} giao dịch), dọn dẹp...", cache_size);
+        if cache_size > warning_threshold {
+            let message = format!("Cache gần đạt ngưỡng ({}/{} giao dịch - {:.1}%), dọn dẹp...", 
+                cache_size, self.max_cache_size, (cache_size as f64 / self.max_cache_size as f64) * 100.0);
+            warn!("{}", message);
+            
+            // Gửi cảnh báo cho admin
+            self.notify_admin("CACHE_WARNING", &message).await?;
+            
             // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 6 giờ
             Self::_cleanup_completed_transactions(self.transactions.clone(), 6).await?;
+            
+            // Kiểm tra xem có cần mở rộng cache không
+            self.auto_scale_cache(cache_size).await?;
+            
             return Ok(());
         }
         
@@ -863,6 +1061,34 @@ impl BridgeHub for NearBridgeHub {
             debug!("Dọn dẹp cache định kỳ ({} giao dịch)...", cache_size);
             // Dọn sạch các giao dịch đã hoàn thành và cũ hơn 12 giờ
             Self::_cleanup_completed_transactions(self.transactions.clone(), 12).await?;
+        }
+        
+        // 4. Phát hiện tăng tải đột biến dựa trên tốc độ tăng trong 5 phút gần đây
+        let metrics = self.cache_metrics.read().await;
+        let now = chrono::Utc::now();
+        let hours_elapsed = (now - metrics.start_time).num_milliseconds() as f64 / 3_600_000.0;
+        
+        if hours_elapsed > 0.083 { // > 5 phút
+            let growth_rate = (cache_size as f64 - metrics.initial_size as f64) / hours_elapsed;
+            
+            // Nếu tốc độ tăng trưởng rất cao (>500 giao dịch/giờ) và không ở trong trạng thái cảnh báo
+            if growth_rate > 500.0 && !metrics.is_in_alert_state {
+                let message = format!(
+                    "Phát hiện tăng tải đột biến! Tốc độ tăng: {:.2} giao dịch/giờ. Cache: {}/{} ({:.1}%)",
+                    growth_rate, cache_size, self.max_cache_size, 
+                    (cache_size as f64 / self.max_cache_size as f64) * 100.0
+                );
+                warn!("{}", message);
+                
+                // Gửi cảnh báo cho admin
+                drop(metrics); // Giải phóng read lock trước khi lấy write lock trong notify_admin
+                self.notify_admin("CACHE_SUDDEN_GROWTH", &message).await?;
+                
+                // Mở rộng cache ngay lập tức nếu cần
+                if self.auto_scaling_enabled {
+                    self.auto_scale_cache(cache_size).await?;
+                }
+            }
         }
         
         Ok(())

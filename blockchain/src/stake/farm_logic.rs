@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use ethers::types::{Address, U256};
 use tracing::{info, warn, error};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 use crate::stake::{
     StakePoolConfig,
@@ -20,9 +22,13 @@ use crate::stake::{
     StakePoolCache,
 };
 use super::constants::*;
+use crate::common::farm_base::{
+    FarmError, FarmResult, FarmStatus, BaseFarmPool, FarmingOperations,
+    BlockchainSyncOperations, get_current_timestamp, calculate_rewards, validate_apr
+};
 
 /// Cấu hình cho farm pool
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FarmPoolConfig {
     /// Địa chỉ của pool
     pub address: Address,
@@ -43,7 +49,7 @@ pub struct FarmPoolConfig {
 }
 
 /// Thông tin farm của người dùng
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserFarmInfo {
     /// Địa chỉ người dùng
     pub user_address: Address,
@@ -336,5 +342,261 @@ impl FarmManager for FarmManagerImpl {
         } else {
             Err(anyhow::anyhow!("No farm found"))
         }
+    }
+}
+
+pub struct StakeManager {
+    pools: HashMap<String, StakePoolConfig>,
+    user_stakes: HashMap<String, HashMap<String, UserStakeInfo>>,
+}
+
+impl StakeManager {
+    pub fn new() -> Self {
+        StakeManager {
+            pools: HashMap::new(),
+            user_stakes: HashMap::new(),
+        }
+    }
+
+    fn get_key(user_id: &str, pool_id: &str) -> String {
+        format!("{}:{}", user_id, pool_id)
+    }
+
+    async fn update_user_rewards(&mut self, user_id: &str, pool_id: &str) -> FarmResult<()> {
+        let now = get_current_timestamp();
+        
+        // Lấy thông tin pool
+        let pool = self.get_pool(pool_id)?;
+        
+        // Kiểm tra nếu pool không active thì không cập nhật rewards
+        if pool.status != FarmStatus::Active {
+            return Ok(());
+        }
+        
+        // Tìm thông tin stake của user
+        if let Some(user_stakes) = self.user_stakes.get_mut(user_id) {
+            if let Some(user_stake) = user_stakes.get_mut(pool_id) {
+                // Tính toán rewards dựa trên thời gian từ lần update cuối
+                let last_update = user_stake.last_update;
+                let new_rewards = calculate_rewards(
+                    user_stake.staked_amount,
+                    pool.apr,
+                    last_update,
+                    now
+                )?;
+                
+                // Cập nhật rewards và thời gian
+                user_stake.rewards += new_rewards;
+                user_stake.last_update = now;
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+impl BaseFarmPool for StakeManager {
+    type PoolId = String;
+    type PoolConfig = StakePoolConfig;
+    type UserId = String;
+    type UserInfo = UserStakeInfo;
+    type AmountType = f64;
+    
+    fn get_pool(&self, pool_id: &Self::PoolId) -> FarmResult<&Self::PoolConfig> {
+        self.pools.get(pool_id).ok_or_else(|| FarmError::PoolNotFound(pool_id.clone()))
+    }
+    
+    fn get_all_pools(&self) -> Vec<&Self::PoolConfig> {
+        self.pools.values().collect()
+    }
+    
+    fn get_user_farm(&self, user_id: &Self::UserId, pool_id: &Self::PoolId) -> FarmResult<&Self::UserInfo> {
+        self.user_stakes
+            .get(user_id)
+            .and_then(|stakes| stakes.get(pool_id))
+            .ok_or_else(|| FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id)))
+    }
+    
+    fn get_user_farms(&self, user_id: &Self::UserId) -> Vec<&Self::UserInfo> {
+        match self.user_stakes.get(user_id) {
+            Some(stakes) => stakes.values().collect(),
+            None => vec![],
+        }
+    }
+    
+    fn update_apr(&mut self, pool_id: &Self::PoolId, new_apr: f64) -> FarmResult<()> {
+        // Xác nhận APR hợp lệ
+        validate_apr(new_apr)?;
+        
+        // Cập nhật APR cho pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.apr = new_apr;
+            pool.updated_at = get_current_timestamp();
+            Ok(())
+        } else {
+            Err(FarmError::PoolNotFound(pool_id.clone()))
+        }
+    }
+}
+
+impl FarmingOperations for StakeManager {
+    fn add_liquidity(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId,
+        amount: Self::AmountType
+    ) -> FarmResult<()> {
+        // Xác nhận pool tồn tại
+        let pool = self.get_pool(pool_id)?;
+        
+        // Kiểm tra xem pool có active không
+        if pool.status != FarmStatus::Active {
+            return Err(FarmError::InvalidFarmStatus {
+                current_status: format!("{:?}", pool.status),
+                required_status: format!("{:?}", FarmStatus::Active),
+            });
+        }
+        
+        // Xác nhận số lượng hợp lệ
+        if amount <= 0.0 {
+            return Err(FarmError::InsufficientLiquidity {
+                required: amount,
+                available: 0.0,
+            });
+        }
+        
+        // Cập nhật rewards trước khi thêm stake mới
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy hoặc tạo thông tin stake của user
+        let user_stakes = self.user_stakes.entry(user_id.clone()).or_insert_with(HashMap::new);
+        let now = get_current_timestamp();
+        
+        // Cập nhật hoặc tạo mới thông tin stake
+        let user_stake = user_stakes.entry(pool_id.clone()).or_insert(UserStakeInfo {
+            user_id: user_id.clone(),
+            pool_id: pool_id.clone(),
+            staked_amount: 0.0,
+            rewards: 0.0,
+            last_update: now,
+        });
+        
+        // Cập nhật số lượng staked
+        user_stake.staked_amount += amount;
+        
+        // Cập nhật tổng số staked của pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.total_staked += amount;
+            pool.updated_at = now;
+        }
+        
+        Ok(())
+    }
+    
+    fn remove_liquidity(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId,
+        amount: Self::AmountType
+    ) -> FarmResult<Self::AmountType> {
+        // Cập nhật rewards trước khi rút stake
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy thông tin stake của user
+        let user_stake = match self.user_stakes.get_mut(user_id) {
+            Some(stakes) => match stakes.get_mut(pool_id) {
+                Some(stake) => stake,
+                None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+            },
+            None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+        };
+        
+        // Kiểm tra số lượng
+        if amount > user_stake.staked_amount {
+            return Err(FarmError::InsufficientLiquidity {
+                required: amount,
+                available: user_stake.staked_amount,
+            });
+        }
+        
+        // Cập nhật số lượng staked của user
+        user_stake.staked_amount -= amount;
+        
+        // Cập nhật tổng số staked của pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.total_staked -= amount;
+            pool.updated_at = get_current_timestamp();
+        }
+        
+        // Nếu user đã rút toàn bộ, trả về rewards và xóa thông tin stake
+        if user_stake.staked_amount <= 0.0 {
+            let rewards = user_stake.rewards;
+            self.user_stakes.get_mut(user_id).and_then(|stakes| {
+                stakes.remove(pool_id);
+                if stakes.is_empty() {
+                    self.user_stakes.remove(user_id);
+                }
+                Some(())
+            });
+            
+            return Ok(rewards);
+        }
+        
+        Ok(amount)
+    }
+    
+    fn harvest(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId
+    ) -> FarmResult<Self::AmountType> {
+        // Cập nhật rewards trước khi thu hoạch
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy thông tin stake của user
+        let user_stake = match self.user_stakes.get_mut(user_id) {
+            Some(stakes) => match stakes.get_mut(pool_id) {
+                Some(stake) => stake,
+                None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+            },
+            None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+        };
+        
+        // Lấy rewards hiện có
+        let rewards = user_stake.rewards;
+        
+        // Reset rewards
+        user_stake.rewards = 0.0;
+        
+        Ok(rewards)
+    }
+}
+
+impl BlockchainSyncOperations for StakeManager {
+    async fn sync_pools_from_blockchain(&mut self) -> FarmResult<()> {
+        // Đây là nơi để thực hiện đồng bộ hóa dữ liệu pools từ blockchain
+        // Trong một triển khai thực tế, đây sẽ là các gọi API hoặc giao tiếp với smart contracts
+        
+        info!("Đồng bộ hóa stake pools từ blockchain");
+        
+        // TODO: Thêm logic đồng bộ hóa thực tế
+        
+        Ok(())
+    }
+    
+    async fn sync_user_farms_from_blockchain(&mut self) -> FarmResult<()> {
+        // Đây là nơi để thực hiện đồng bộ hóa dữ liệu stake của người dùng từ blockchain
+        
+        info!("Đồng bộ hóa thông tin stake của người dùng từ blockchain");
+        
+        // TODO: Thêm logic đồng bộ hóa thực tế
+        
+        Ok(())
     }
 } 

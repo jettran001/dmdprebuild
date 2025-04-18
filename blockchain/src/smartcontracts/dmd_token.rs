@@ -198,132 +198,98 @@ pub async fn transfer_to_polygon(&self, private_key: &str, to_address: &str, amo
     // DMD token contract address on Polygon
     let contract_address = Address::from_str(&polygon_config.token_address)?;
     
-    // Check sender's token balance
-    let contract = Contract::new(
-        contract_address,
-        include_bytes!("../abi/erc20_abi.json").to_vec(),
-        provider.clone()
-    );
-    
-    let balance: U256 = contract.method("balanceOf", from_address)?.call().await?;
-    if balance < amount {
-        return Err(anyhow!("Insufficient token balance: {} < {}", balance, amount));
-    }
-    
     // Create client middleware
     let client = SignerMiddleware::new(provider.clone(), wallet);
     
-    // Check current gas price to optimize transaction fee
-    let gas_price = client.get_gas_price().await?;
-    let max_priority_fee = U256::from(30_000_000_000u64); // 30 Gwei
+    // Create contract instance
+    let contract = Contract::new(
+        contract_address,
+        include_bytes!("../abis/ERC20.json").to_vec(),
+        client.clone()
+    );
     
-    // Get current nonce for the sender
-    let nonce = provider.get_transaction_count(from_address, None).await?;
+    // Check balance before transfer
+    let balance: U256 = contract.method("balanceOf", from_address)?.call().await?;
     
-    // Create payload for transfer(address,uint256) function
-    let function_signature = "transfer(address,uint256)";
-    let function_selector = &ethers::utils::keccak256(function_signature.as_bytes())[0..4];
+    if balance < amount {
+        return Err(anyhow!("Insufficient token balance: has {}, needs {}", balance, amount));
+    }
     
-    let mut data = Vec::from(function_selector);
+    // Check MATIC balance for gas
+    let gas_price = provider.get_gas_price().await?;
+    let gas_limit = U256::from(100000u64); // Ước tính gas limit cho transfer
+    let gas_cost = gas_price.checked_mul(gas_limit)
+        .ok_or_else(|| anyhow!("Tràn số khi tính phí gas"))?;
     
-    // Encode recipient address (padded to 32 bytes)
-    let to = Address::from_str(to_address)?;
-    let mut to_bytes = [0u8; 32];
-    to_bytes[12..].copy_from_slice(&to.as_bytes());
-    data.extend_from_slice(&to_bytes);
+    let matic_balance = provider.get_balance(from_address, None).await?;
+    if matic_balance < gas_cost {
+        return Err(anyhow!("Insufficient MATIC for gas: has {}, needs {}", matic_balance, gas_cost));
+    }
     
-    // Encode token amount (padded to 32 bytes)
-    let amount_bytes = amount.to_be_bytes();
-    data.extend_from_slice(&amount_bytes);
+    // Call transfer function
+    let transfer_call = contract.method::<_, bool>("transfer", (Address::from_str(to_address)?, amount))?;
     
-    // Create and send transaction with custom gas parameters and explicit nonce
-    let tx = TransactionRequest::new()
-        .to(contract_address)
-        .data(data)
-        .gas_price(gas_price)
-        .nonce(nonce)
-        .from(from_address);
+    // Send transaction with retry mechanism
+    const MAX_RETRIES: u32 = 3;
+    let mut retry_count = 0;
+    let mut last_error = None;
     
-    // Try to send the transaction, with retry mechanism for nonce conflicts
-    let mut current_attempt = 0;
-    const MAX_ATTEMPTS: usize = 3;
-    let mut pending_tx = None;
-    
-    while current_attempt < MAX_ATTEMPTS {
-        match client.send_transaction(tx.clone(), None).await {
-            Ok(tx) => {
-                pending_tx = Some(tx);
-                break;
-            },
-            Err(err) => {
-                let err_string = err.to_string().to_lowercase();
-                
-                // Check if error is related to nonce
-                if err_string.contains("nonce too low") || 
-                   err_string.contains("transaction underpriced") || 
-                   err_string.contains("already known") {
-                    
-                    current_attempt += 1;
-                    
-                    if current_attempt < MAX_ATTEMPTS {
-                        // Get updated nonce
-                        let new_nonce = provider.get_transaction_count(from_address, None).await?;
-                        
-                        // Update gas price slightly to avoid "transaction underpriced" error
-                        let new_gas_price = gas_price + gas_price / 10; // Increase by 10%
-                        
-                        // Create new transaction with updated nonce and gas price
-                        let updated_tx = tx.clone()
-                            .nonce(new_nonce)
-                            .gas_price(new_gas_price);
-                        
-                        info!("Retrying with updated nonce {} and gas price {}", new_nonce, new_gas_price);
-                        
-                        // Small delay before retry
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        
-                        // Update tx for next iteration
-                        let tx = updated_tx;
-                    } else {
-                        return Err(anyhow!("Failed to send transaction after {} attempts: {}", MAX_ATTEMPTS, err));
+    while retry_count < MAX_RETRIES {
+        match transfer_call.clone().send().await {
+            Ok(pending_tx) => {
+                // Wait for transaction confirmation with timeout
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(180), // 3 minute timeout
+                    pending_tx.await
+                ).await {
+                    Ok(receipt_result) => {
+                        match receipt_result {
+                            Ok(Some(receipt)) => {
+                                // Check transaction status
+                                if receipt.status.unwrap_or_default() == U64::from(1) {
+                                    let tx_hash = format!("0x{:x}", receipt.transaction_hash);
+                                    info!("Polygon transaction successful: {}", tx_hash);
+                                    return Ok(tx_hash);
+                                } else {
+                                    // Transaction failed on-chain
+                                    return Err(anyhow!("Transaction failed on-chain: status {:?}", receipt.status));
+                                }
+                            },
+                            Ok(None) => {
+                                last_error = Some(anyhow!("Transaction confirmed but no receipt available"));
+                                break;
+                            },
+                            Err(e) => {
+                                warn!("Error waiting for transaction receipt on retry {}: {}", retry_count, e);
+                                last_error = Some(anyhow!("Error waiting for receipt: {}", e));
+                                retry_count += 1;
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        // Timeout waiting for receipt
+                        warn!("Timeout waiting for transaction receipt on retry {}", retry_count);
+                        last_error = Some(anyhow!("Timeout waiting for transaction receipt"));
+                        retry_count += 1;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
                     }
-                } else {
-                    // For other errors, no retry
-                    return Err(anyhow!("Transaction error: {}", err));
                 }
+            },
+            Err(e) => {
+                warn!("Error sending transaction on retry {}: {}", retry_count, e);
+                last_error = Some(anyhow!("Error sending transaction: {}", e));
+                retry_count += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
             }
         }
     }
     
-    let pending_tx = pending_tx.ok_or_else(|| anyhow!("Failed to send transaction"))?;
-    
-    // Wait for transaction with timeout
-    let receipt = match tokio::time::timeout(
-        tokio::time::Duration::from_secs(180), // 3 minute timeout
-        pending_tx.await
-    ).await {
-        Ok(result) => match result {
-            Ok(Some(receipt)) => receipt,
-            Ok(None) => return Err(anyhow!("No receipt received")),
-            Err(err) => return Err(anyhow!("Error waiting for receipt: {}", err)),
-        },
-        Err(_) => {
-            // Timeout occurred, return transaction hash for user to check later
-            info!("Timeout waiting for transaction confirmation. Transaction hash: 0x{:x}", 
-                pending_tx.tx_hash());
-            return Ok(format!("0x{:x} (pending)", pending_tx.tx_hash()));
-        }
-    };
-    
-    // Check transaction status
-    if receipt.status != Some(1.into()) {
-        return Err(anyhow!("Transaction failed: 0x{:x}", receipt.transaction_hash));
-    }
-    
-    let tx_hash = format!("0x{:x}", receipt.transaction_hash);
-    info!("Polygon transaction successful: {}", tx_hash);
-    
-    Ok(tx_hash)
+    // All retries failed
+    Err(last_error.unwrap_or_else(|| anyhow!("Failed to send transaction after {} retries", MAX_RETRIES)))
 }
 
 /// Transfer DMD token on Arbitrum
@@ -578,12 +544,55 @@ lazy_static! {
 
 /// Bridge tokens from current blockchain to target blockchain
 pub async fn bridge_tokens(&self, private_key: &str, to_address: &str, to_chain: DmdChain, amount: U256) -> Result<String> {
-    // Retry parameters
-    const MAX_RETRIES: usize = 3;
-    const INITIAL_BACKOFF_MS: u64 = 1000;
-    const MAX_BACKOFF_MS: u64 = 10000;
+    // Kiểm tra tham số đầu vào và môi trường
+    self.validate_bridge_parameters(private_key, to_address, to_chain)?;
     
-    // Check input parameters
+    // Lấy cấu hình từ chuỗi hiện tại
+    let from_chain = self.current_chain;
+    let from_config = self.get_chain_config(from_chain)?;
+    
+    // Tạo key duy nhất cho giao dịch bridge để tránh race condition
+    let bridge_key = self.create_bridge_transaction_key(to_address, from_chain, to_chain, private_key)?;
+    
+    // Kiểm tra và khóa giao dịch để đảm bảo không có race condition
+    self.check_and_lock_bridge_transaction(&bridge_key, from_chain, to_chain)?;
+    
+    // Ghi log thông tin giao dịch
+    info!(
+        "Starting bridge DMD tokens: {} -> {}, from {} to {}, amount: {}",
+        from_chain.name(), to_chain.name(), mask_private_key(private_key), to_address, amount
+    );
+    
+    // Tạo bản ghi giao dịch bridge trong cơ sở dữ liệu
+    let sender_address = private_key_to_public_address(private_key)?;
+    let bridge_record_id = self.create_bridge_transaction_record(
+        &bridge_key,
+        &sender_address,
+        to_address,
+        from_chain,
+        to_chain,
+        amount,
+        TransactionStatus::Pending
+    ).await?;
+    
+    // Thực hiện giao dịch bridge với cơ chế retry
+    let bridge_result = self.execute_bridge_with_retry(
+        private_key, to_address, from_chain, to_chain, amount, &bridge_record_id
+    ).await;
+    
+    // Xóa giao dịch khỏi danh sách đang xử lý
+    {
+        let mut pending_bridges = PENDING_BRIDGES.lock().unwrap();
+        pending_bridges.remove(&bridge_key);
+    }
+    
+    // Trả về kết quả
+    bridge_result
+}
+
+/// Kiểm tra tham số đầu vào cho bridge_tokens
+fn validate_bridge_parameters(&self, private_key: &str, to_address: &str, to_chain: DmdChain) -> Result<()> {
+    // Kiểm tra tham số đầu vào
     if private_key.is_empty() {
         return Err(anyhow!("Private key cannot be empty"));
     }
@@ -592,7 +601,7 @@ pub async fn bridge_tokens(&self, private_key: &str, to_address: &str, to_chain:
         return Err(anyhow!("Recipient address cannot be empty"));
     }
     
-    // Check if address is compatible with target chain
+    // Kiểm tra xem địa chỉ có tương thích với chuỗi đích
     match to_chain {
         DmdChain::Near => {
             if !to_address.ends_with(".near") && !to_address.ends_with(".testnet") && !to_address.contains(".") {
@@ -606,141 +615,136 @@ pub async fn bridge_tokens(&self, private_key: &str, to_address: &str, to_chain:
             }
         },
         _ => {
-            // EVM-compatible blockchain
+            // Chuỗi tương thích EVM
             if !to_address.starts_with("0x") || to_address.len() != 42 {
                 return Err(anyhow!("Invalid EVM address: {}", to_address));
             }
         }
     }
     
-    // Get configuration from current chain
-    let from_chain = self.current_chain;
-    let from_config = self.get_chain_config(from_chain)?;
-    
-    // Create unique key for each bridge transaction to avoid race condition
+    Ok(())
+}
+
+/// Tạo key giao dịch bridge duy nhất
+fn create_bridge_transaction_key(&self, to_address: &str, from_chain: DmdChain, to_chain: DmdChain, private_key: &str) -> Result<String> {
+    // Rút gọn địa chỉ để tạo key ngắn hơn
     let address_short = if to_address.len() > 10 {
         to_address[0..10].to_string()
     } else {
         to_address.to_string()
     };
     
-    // Get sender's address
+    // Lấy địa chỉ của người gửi
     let sender_address = private_key_to_public_address(private_key)?;
     
-    // Create unique transaction ID for monitoring
-    let bridge_key = format!("{}_to_{}_{}_{}",
+    // Tạo ID giao dịch duy nhất để theo dõi
+    Ok(format!("{}_to_{}_{}_{}",
         from_chain.name(),
         to_chain.name(),
         address_short,
         sender_address
-    );
+    ))
+}
+
+/// Kiểm tra và khóa giao dịch bridge để tránh race condition
+fn check_and_lock_bridge_transaction(&self, bridge_key: &str, from_chain: DmdChain, to_chain: DmdChain) -> Result<()> {
+    // Sử dụng mutex để đảm bảo không có race condition khi nhiều người dùng bridge cùng một lúc
+    // Khóa mutex trong một phạm vi để giải phóng ngay lập tức sau khi kiểm tra
+    let mutex_guard = ACTIVE_BRIDGE_MUTEX.lock().unwrap();
+    let mut pending_bridges = PENDING_BRIDGES.lock().unwrap();
     
-    // Use mutex to ensure no race condition when multiple users bridge at the same time
-    // Lock mutex in a scope to release immediately after checking
-    {
-        let mutex_guard = ACTIVE_BRIDGE_MUTEX.lock().unwrap();
-        let mut pending_bridges = PENDING_BRIDGES.lock().unwrap();
-        
-        // Check if there is already a bridge transaction with this key being processed
-        if let Some((fc, tc, timestamp)) = pending_bridges.get(&bridge_key) {
-            let elapsed_secs = (chrono::Utc::now().timestamp() as u64) - *timestamp;
-            if elapsed_secs < 300 { // 5 minutes
-                return Err(anyhow!("Bridge transaction from {} to {} for this address is already processing ({} seconds left)",
-                    fc.name(), tc.name(), 300 - elapsed_secs));
-            } else {
-                // If more than 5 minutes, delete old transaction and allow new transaction
-                pending_bridges.remove(&bridge_key);
-            }
+    // Kiểm tra xem đã có giao dịch bridge với key này đang được xử lý hay không
+    if let Some((fc, tc, timestamp)) = pending_bridges.get(bridge_key) {
+        let elapsed_secs = (chrono::Utc::now().timestamp() as u64) - *timestamp;
+        if elapsed_secs < 300 { // 5 phút
+            return Err(anyhow!("Bridge transaction from {} to {} for this address is already processing ({} seconds left)",
+                fc.name(), tc.name(), 300 - elapsed_secs));
+        } else {
+            // Nếu hơn 5 phút, xóa giao dịch cũ và cho phép giao dịch mới
+            pending_bridges.remove(bridge_key);
         }
-        
-        // Add new transaction to processing list
-        pending_bridges.insert(bridge_key.clone(), (from_chain, to_chain, chrono::Utc::now().timestamp() as u64));
     }
     
-    // Log transaction information
-    info!(
-        "Starting bridge DMD tokens: {} -> {}, from {} to {}, amount: {}",
-        from_chain.name(), to_chain.name(), mask_private_key(private_key), to_address, amount
-    );
+    // Thêm giao dịch mới vào danh sách đang xử lý
+    pending_bridges.insert(bridge_key.clone(), (from_chain, to_chain, chrono::Utc::now().timestamp() as u64));
     
-    // Create bridge transaction record in database
-    let bridge_record_id = self.create_bridge_transaction_record(
-        &bridge_key,
-        &sender_address,
-        to_address,
-        from_chain,
-        to_chain,
-        amount,
-        TransactionStatus::Pending
-    ).await?;
+    Ok(())
+}
+
+/// Thực hiện giao dịch bridge với cơ chế retry
+async fn execute_bridge_with_retry(
+    &self,
+    private_key: &str,
+    to_address: &str,
+    from_chain: DmdChain,
+    to_chain: DmdChain,
+    amount: U256,
+    bridge_record_id: &str
+) -> Result<String> {
+    // Tham số retry
+    const MAX_RETRIES: usize = 3;
+    const INITIAL_BACKOFF_MS: u64 = 1000;
+    const MAX_BACKOFF_MS: u64 = 10000;
     
-    // Loop with retry mechanism
+    // Biến lưu trữ trạng thái và kết quả
     let mut last_error = None;
     let mut backoff_ms = INITIAL_BACKOFF_MS;
-    
-    // Flag to mark processing status
     let mut bridge_success = false;
     let mut bridge_tx_hash = String::new();
     
+    // Vòng lặp với cơ chế retry
     for attempt in 0..MAX_RETRIES {
+        // Xử lý backoff cho các lần thử lại
         if attempt > 0 {
             info!("Retry bridge attempt {}/{}, wait {}ms...", attempt + 1, MAX_RETRIES, backoff_ms);
             tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
             
-            // Update bridge record status
+            // Cập nhật trạng thái giao dịch
             self.update_bridge_transaction_status(
-                &bridge_record_id,
+                bridge_record_id,
                 TransactionStatus::Pending,
                 Some(format!("Retry attempt {}/{}", attempt + 1, MAX_RETRIES))
             ).await?;
             
-            // Increase waiting time exponentially (exponential backoff)
-            // Increase waiting time exponentially (exponential backoff)
+            // Tăng thời gian chờ theo cấp số nhân (exponential backoff)
             backoff_ms = std::cmp::min(backoff_ms * 2, MAX_BACKOFF_MS);
         }
         
+        // Thực hiện giao dịch bridge dựa trên cặp chuỗi nguồn-đích
         let result = match (from_chain, to_chain) {
-            // Bridge from BSC to other blockchains
+            // Bridge từ BSC đến các blockchain khác
             (DmdChain::Bsc, DmdChain::Near) => {
-                match self.bridge_from_bsc_to_near(private_key, to_address, amount).await {
-                    Ok(tx_hash) => Ok(tx_hash),
-                    Err(e) => {
+                self.bridge_from_bsc_to_near(private_key, to_address, amount).await
+                    .map_err(|e| {
                         error!("Bridge from BSC to NEAR (attempt {}/{}): {}", attempt + 1, MAX_RETRIES, e);
-                        Err(e)
-                    }
-                }
+                        e
+                    })
             },
             (DmdChain::Bsc, DmdChain::Solana) => {
-                match self.bridge_from_bsc_to_solana(private_key, to_address, amount).await {
-                    Ok(tx_hash) => Ok(tx_hash),
-                    Err(e) => {
+                self.bridge_from_bsc_to_solana(private_key, to_address, amount).await
+                    .map_err(|e| {
                         error!("Bridge from BSC to Solana (attempt {}/{}): {}", attempt + 1, MAX_RETRIES, e);
-                        Err(e)
-                    }
-                }
+                        e
+                    })
             },
             (DmdChain::Bsc, chain) if chain.is_evm_compatible() => {
-                match self.bridge_from_bsc_to_evm(private_key, to_address, to_chain, amount).await {
-                    Ok(tx_hash) => Ok(tx_hash),
-                    Err(e) => {
+                self.bridge_from_bsc_to_evm(private_key, to_address, to_chain, amount).await
+                    .map_err(|e| {
                         error!("Bridge from BSC to {} (attempt {}/{}): {}", to_chain.name(), attempt + 1, MAX_RETRIES, e);
-                        Err(e)
-                    }
-                }
+                        e
+                    })
             },
             
-            // Bridge from NEAR to other blockchains
+            // Bridge từ NEAR đến các blockchain khác
             (DmdChain::Near, DmdChain::Bsc) => {
-                match self.bridge_from_near_to_bsc(private_key, to_address, amount).await {
-                    Ok(tx_hash) => Ok(tx_hash),
-                    Err(e) => {
+                self.bridge_from_near_to_bsc(private_key, to_address, amount).await
+                    .map_err(|e| {
                         error!("Bridge from NEAR to BSC (attempt {}/{}): {}", attempt + 1, MAX_RETRIES, e);
-                        Err(e)
-                    }
-                }
+                        e
+                    })
             },
             
-            // Other bridge cases
+            // Các trường hợp bridge khác
             _ => {
                 let msg = format!("Bridge from {} to {} not supported", from_chain.name(), to_chain.name());
                 error!("{}", msg);
@@ -748,21 +752,22 @@ pub async fn bridge_tokens(&self, private_key: &str, to_address: &str, to_chain:
             }
         };
         
+        // Xử lý kết quả giao dịch
         match result {
             Ok(tx_hash) => {
                 info!("Bridge tokens successful from {} to {}, TX: {}", from_chain.name(), to_chain.name(), tx_hash);
                 
-                // Save transaction hash
+                // Lưu hash giao dịch
                 bridge_success = true;
                 bridge_tx_hash = tx_hash.clone();
                 
-                // Create transaction monitor to track status
+                // Tạo monitor để theo dõi trạng thái giao dịch
                 self.monitor_bridge_transaction(tx_hash.clone(), from_chain, to_chain).await;
                 
                 break;
             },
             Err(e) => {
-                // Classify error to decide whether to retry
+                // Phân loại lỗi để quyết định có nên thử lại không
                 let should_retry = match e.to_string().to_lowercase() {
                     s if s.contains("timeout") || s.contains("timed out") => {
                         warn!("Bridge timeout, will retry");
@@ -800,17 +805,11 @@ pub async fn bridge_tokens(&self, private_key: &str, to_address: &str, to_chain:
         }
     }
     
-    // Remove transaction from processing list
-    {
-        let mut pending_bridges = PENDING_BRIDGES.lock().unwrap();
-        pending_bridges.remove(&bridge_key);
-    }
-    
-    // Return result
+    // Trả về kết quả cuối cùng
     if bridge_success {
         Ok(bridge_tx_hash)
     } else {
-        // If all attempts failed
+        // Nếu tất cả các lần thử đều thất bại
         let err_msg = match last_error {
             Some(e) => format!("Bridge tokens failed after {} attempts: {}", MAX_RETRIES, e),
             None => format!("Bridge tokens failed after {} attempts with unknown error", MAX_RETRIES),

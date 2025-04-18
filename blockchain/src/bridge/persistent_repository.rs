@@ -55,7 +55,9 @@ impl JsonBridgeTransactionRepository {
             if !data.trim().is_empty() {
                 let transactions: HashMap<String, BridgeTransaction> = serde_json::from_str(&data)
                     .context("Không thể parse dữ liệu JSON từ file lưu trữ")?;
-                *cache.write().unwrap() = transactions;
+                cache.write()
+                    .map_err(|e| anyhow!("Không thể lấy write lock cho cache: {}", e))?
+                    .clone_from(&transactions);
             }
         }
         
@@ -80,17 +82,47 @@ impl JsonBridgeTransactionRepository {
             while let Some(op) = rx.recv().await {
                 match op {
                     SaveOperation::SaveTransaction(transaction) => {
-                        let mut cache_guard = cache.write().unwrap();
+                        let mut cache_guard = cache.write()
+                            .map_err(|e| {
+                                error!("Không thể lấy write lock khi lưu transaction: {}", e);
+                                // Vẫn tiếp tục xử lý mà không panic
+                            }).unwrap_or_else(|_| {
+                                // Cố gắng lấy lock mới nếu lock bị poison
+                                match cache.try_write() {
+                                    Ok(guard) => guard,
+                                    Err(e) => {
+                                        error!("Không thể khôi phục sau poison lock: {}", e);
+                                        // Tạo guard trống để tiếp tục hoạt động
+                                        let new_cache = Arc::new(RwLock::new(HashMap::new()));
+                                        match new_cache.write() {
+                                            Ok(guard) => guard,
+                                            Err(_) => panic!("Không thể tạo cache mới sau khi lock bị poison")
+                                        }
+                                    }
+                                }
+                            });
                         cache_guard.insert(transaction.id.clone(), transaction);
                         need_flush = true;
                     },
                     SaveOperation::DeleteTransaction(id) => {
-                        let mut cache_guard = cache.write().unwrap();
+                        let mut cache_guard = match cache.write() {
+                            Ok(guard) => guard,
+                            Err(e) => {
+                                error!("Không thể lấy write lock khi xóa transaction: {}", e);
+                                return;
+                            }
+                        };
                         cache_guard.remove(&id);
                         need_flush = true;
                     },
                     SaveOperation::BulkDelete(ids) => {
-                        let mut cache_guard = cache.write().unwrap();
+                        let mut cache_guard = match cache.write() {
+                            Ok(guard) => guard,
+                            Err(e) => {
+                                error!("Không thể lấy write lock khi xóa nhiều transaction: {}", e);
+                                return;
+                            }
+                        };
                         for id in ids {
                             cache_guard.remove(&id);
                         }
@@ -102,7 +134,11 @@ impl JsonBridgeTransactionRepository {
                 }
                 
                 if need_flush {
-                    let cache_guard = cache.read().unwrap();
+                    let cache_guard = cache.read()
+                        .map_err(|e| {
+                            error!("Không thể lấy read lock khi flush cache: {}", e);
+                            return;
+                        }).unwrap();
                     // Tránh ghi vào file quá thường xuyên
                     if let Err(e) = Self::write_to_file(&file_path, &cache_guard) {
                         error!("Không thể ghi dữ liệu vào file: {}", e);
@@ -263,7 +299,11 @@ impl JsonBridgeTransactionRepository {
         }
         
         // Nếu không, đồng bộ ngay lập tức
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| {
+                error!("Không thể lấy read lock khi flush cache: {}", e);
+                return Ok(());
+            })?;
         Self::write_to_file(&self.file_path, &cache_guard)
     }
 }
@@ -279,7 +319,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
         }
         
         // Nếu không, lưu ngay lập tức
-        let mut cache_guard = self.cache.write().unwrap();
+        let mut cache_guard = self.cache.write()
+            .map_err(|e| format!("Không thể lấy write lock cho cache: {}", e))?;
         cache_guard.insert(transaction.id.clone(), transaction.clone());
         
         match Self::write_to_file(&self.file_path, &cache_guard) {
@@ -305,7 +346,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
         }
         
         // Nếu không, lưu tất cả vào cache và ghi vào file một lần
-        let mut cache_guard = self.cache.write().unwrap();
+        let mut cache_guard = self.cache.write()
+            .map_err(|e| format!("Không thể lấy write lock cho cache: {}", e))?;
         
         // Đo thời gian để ghi log hiệu suất
         let start_time = std::time::Instant::now();
@@ -339,26 +381,30 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn find_by_id(&self, id: &str) -> Result<Option<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.get(id).cloned())
     }
     
     fn find_by_source_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .find(|tx| tx.source_tx_id.as_ref().map_or(false, |id| id == tx_id))
             .cloned())
     }
     
     fn find_by_target_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .find(|tx| tx.target_tx_id.as_ref().map_or(false, |id| id == tx_id))
             .cloned())
     }
     
     fn find_by_source_address(&self, address: &str) -> Result<Vec<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .filter(|tx| tx.source_address == address)
             .cloned()
@@ -366,7 +412,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn find_by_target_address(&self, address: &str) -> Result<Vec<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .filter(|tx| tx.target_address == address)
             .cloned()
@@ -374,7 +421,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn find_by_status(&self, status: &BridgeTransactionStatus) -> Result<Vec<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .filter(|tx| &tx.status == status)
             .cloned()
@@ -391,7 +439,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
         }
         
         // Nếu không, xóa ngay lập tức
-        let mut cache_guard = self.cache.write().unwrap();
+        let mut cache_guard = self.cache.write()
+            .map_err(|e| format!("Không thể lấy write lock cho cache: {}", e))?;
         let existed = cache_guard.remove(id).is_some();
         
         if existed {
@@ -405,7 +454,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn delete_older_than(&self, timestamp: u64) -> Result<usize, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         let ids_to_delete: Vec<String> = cache_guard.values()
             .filter(|tx| tx.created_at < timestamp)
             .map(|tx| tx.id.clone())
@@ -422,7 +472,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
         }
         
         // Nếu không, xóa ngay lập tức
-        let mut cache_guard = self.cache.write().unwrap();
+        let mut cache_guard = self.cache.write()
+            .map_err(|e| format!("Không thể lấy write lock cho cache: {}", e))?;
         for id in &ids_to_delete {
             cache_guard.remove(id);
         }
@@ -434,7 +485,8 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn limit_transaction_count(&self, max_count: usize) -> Result<usize, String> {
-        let mut cache_guard = self.cache.write().unwrap();
+        let mut cache_guard = self.cache.write()
+            .map_err(|e| format!("Không thể lấy write lock cho cache: {}", e))?;
         
         // Sắp xếp giao dịch theo thời gian tạo (mới nhất trước)
         let mut transactions: Vec<_> = cache_guard.values().cloned().collect();
@@ -465,12 +517,14 @@ impl BridgeTransactionRepository for JsonBridgeTransactionRepository {
     }
     
     fn get_all_transactions(&self) -> Result<Vec<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values().cloned().collect())
     }
     
     fn find_by_hub_tx_id(&self, tx_id: &str) -> Result<Option<BridgeTransaction>, String> {
-        let cache_guard = self.cache.read().unwrap();
+        let cache_guard = self.cache.read()
+            .map_err(|e| format!("Không thể lấy read lock cho cache: {}", e))?;
         Ok(cache_guard.values()
             .find(|tx| tx.hub_tx_id.as_ref().map_or(false, |id| id == tx_id))
             .cloned())

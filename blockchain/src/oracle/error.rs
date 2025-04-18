@@ -53,4 +53,29 @@ pub enum OracleError {
     /// Lỗi từ Smart Contract
     #[error("Lỗi từ Smart Contract: {0}")]
     SmartContractError(String),
+    
+    /// Không có nguồn dữ liệu khả dụng
+    #[error("Không có nguồn dữ liệu khả dụng")]
+    NoDataSources,
+    
+    /// Kiểu dữ liệu không được hỗ trợ
+    #[error("Kiểu dữ liệu không được hỗ trợ: {0}")]
+    UnsupportedDataType(String),
+    
+    /// Lỗi từ nhiều nguồn dữ liệu
+    #[error("Lỗi từ nhiều nguồn dữ liệu: {0}")]
+    MultiSourceFailure(String),
+    
+    /// Quá nhiều yêu cầu thất bại
+    #[error("Quá nhiều yêu cầu thất bại: {0}")]
+    TooManyFailures(String),
+    
+    /// Lỗi từ một nguồn dữ liệu cụ thể
+    #[error("Lỗi từ nguồn dữ liệu {source}: {message}")]
+    SourceError {
+        /// Tên nguồn dữ liệu
+        source: String,
+        /// Thông điệp lỗi
+        message: String,
+    },
 } 

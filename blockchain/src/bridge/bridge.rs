@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, BTreeMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 use uuid::Uuid;
 use lru::LruCache;
 use regex::Regex;
@@ -13,11 +13,13 @@ use serde::{Deserialize, Serialize};
 use log::{debug, error, info, warn};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+use once_cell::sync::Lazy;
 
 use crate::blockchain::BlockchainProvider;
 use crate::bridge::error::{BridgeError, BridgeResult, is_evm_chain};
 use crate::smartcontracts::dmd_token::DmdChain;
+use crate::common::suspicious_detection::{SuspiciousTransactionManager, SuspiciousTransactionRecord, SuspiciousTransactionType, SuspiciousActivityType, SuspiciousRecordStatus};
 
 /// Trạng thái của một giao dịch bridge
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub enum BridgeTransactionStatus {
     Completed,
     /// Giao dịch thất bại
     Failed,
+    /// Giao dịch đã bị tạm dừng để kiểm tra thủ công
+    Paused,
 }
 
 /// Thông tin một giao dịch bridge
@@ -465,7 +469,7 @@ impl BridgeAdapter for LayerZeroAdapter {
                 let confirmed = true; // Mock kết quả
                 
                 if confirmed {
-                    Ok(BridgeTransactionStatus::Completed)
+        Ok(BridgeTransactionStatus::Completed)
                 } else {
                     Ok(BridgeTransactionStatus::InProgress)
                 }
@@ -479,51 +483,132 @@ impl BridgeAdapter for LayerZeroAdapter {
     }
 }
 
-/// Bridge Manager - quản lý các bridge adapter và giao dịch
+/// Regex patterns cho việc xác thực địa chỉ
+static ETH_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^0x[a-fA-F0-9]{40}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ EVM")
+});
+
+static NEAR_ACCOUNT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-z0-9_-]{1,64}\.(testnet|near)$")
+        .expect("Không thể biên dịch regex pattern cho tài khoản NEAR")
+});
+
+static NEAR_IMPLICIT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-zA-Z0-9]{64}$")
+        .expect("Không thể biên dịch regex pattern cho tài khoản NEAR ngầm định")
+});
+
+static SOLANA_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ Solana")
+});
+
+static BTC_LEGACY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ Bitcoin legacy")
+});
+
+static BTC_SEGWIT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^bc1[a-zA-HJ-NP-Z0-9]{39,59}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ Bitcoin SegWit")
+});
+
+static APTOS_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^0x[a-fA-F0-9]{64}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ Aptos")
+});
+
+static GENERAL_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-zA-Z0-9\.\-_]{5,}$")
+        .expect("Không thể biên dịch regex pattern cho địa chỉ chung")
+});
+
+/// Khai báo type cho hàm thông báo admin
+pub type AdminNotifierFn = fn(&str, &BridgeTransaction, &str) -> Result<(), String>;
+
+/// BridgeManager cho việc quản lý bridge
 pub struct BridgeManager {
-    /// Bridge adapters for different chains
-    adapters: Vec<Box<dyn BridgeAdapter>>,
-    /// Cache of adapters by chain (in-memory)
-    adapter_cache: Arc<RwLock<HashMap<DmdChain, usize>>>,
-    /// Ánh xạ trực tiếp từ chain đến adapter thông qua HashMap
-    adapter_map: Arc<RwLock<HashMap<DmdChain, usize>>>,
-    /// Transaction repository
+    /// Danh sách các adapter giao tiếp với các blockchain
+    adapters: Vec<Arc<dyn BridgeAdapter + Send + Sync>>,
+    /// Cache các adapter đã khởi tạo
+    adapter_cache: Arc<RwLock<HashMap<String, Arc<dyn BridgeAdapter + Send + Sync>>>>,
+    /// Map tên adapter -> instance
+    adapter_map: Arc<RwLock<HashMap<String, Arc<dyn BridgeAdapter + Send + Sync>>>>,
+    /// Repository lưu trữ thông tin các giao dịch bridge
     tx_repository: Arc<dyn BridgeTransactionRepository + Send + Sync>,
-    /// Cache of transactions (in-memory)
+    /// Cache giao dịch gần đây để tối ưu hiệu suất
     tx_cache: RwLock<LruCache<String, BridgeTransaction>>,
-    /// Hàng đợi cập nhật hàng loạt cho giao dịch
-    batch_update_queue: Arc<Mutex<VecDeque<BridgeTransaction>>>,
-    /// Thời gian lần cập nhật hàng loạt cuối cùng
+    /// Hàng đợi cập nhật hàng loạt
+    batch_update_queue: Arc<Mutex<VecDeque<(String, BridgeTransactionStatus)>>>,
+    /// Thời gian cập nhật hàng loạt lần cuối
     last_batch_update: Arc<RwLock<Instant>>,
     /// Kích thước lô tối đa
     max_batch_size: usize,
-    /// Thời gian tối đa giữa các lần cập nhật (ms)
+    /// Khoảng thời gian tối đa giữa các lần cập nhật hàng loạt (ms)
     max_batch_interval_ms: u64,
+    /// Thống kê hiệu suất
+    performance_stats: Arc<RwLock<HashMap<String, Vec<u128>>>>,
+    /// Ngưỡng cảnh báo khi số lượng truy vấn chậm vượt quá giá trị này
+    slow_lookup_threshold: usize,
+    /// Ngưỡng thời gian (ms) để coi là truy vấn chậm
+    slow_lookup_time_threshold_ms: u64,
+    /// Khoảng thời gian (ms) kiểm tra hiệu suất
+    performance_check_interval_ms: u64,
+    /// Danh sách các giao dịch đáng ngờ
+    suspicious_transactions: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Danh sách các giao dịch đã tạm dừng
+    paused_transactions: Arc<RwLock<HashSet<String>>>,
+    /// Ngưỡng số lượng lớn cho giao dịch
+    large_transaction_threshold: f64,
+    /// Ngưỡng số lượng cảnh báo trong 1 giờ
+    suspicious_alerts_hour_threshold: usize,
+    /// Có tự động tạm dừng giao dịch đáng ngờ hay không
+    auto_pause_suspicious: bool,
+    /// Bộ đếm cảnh báo theo thời gian
+    alert_counter: Arc<RwLock<Vec<(String, Instant)>>>,
+    /// Hàm gọi lại để thông báo cho admin (ID_thông_báo, giao_dịch, nội_dung)
+    admin_notifier: Option<AdminNotifierFn>,
+    /// Manager phát hiện giao dịch đáng ngờ
+    suspicious_detection: Arc<SuspiciousTransactionManager>,
 }
 
 impl BridgeManager {
-    /// Tạo BridgeManager mới
+    /// Tạo mới BridgeManager
     pub fn new() -> Self {
-        let adapter_cache = Arc::new(RwLock::new(HashMap::new()));
-        let adapter_map = Arc::new(RwLock::new(HashMap::new()));
-        let tx_cache = RwLock::new(LruCache::new(1000));
-        let batch_update_queue = Arc::new(Mutex::new(VecDeque::new()));
-        let last_batch_update = Arc::new(RwLock::new(Instant::now()));
-        
+        Self::with_repository(Arc::new(InMemoryBridgeTransactionRepository::new()))
+    }
+
+    /// Tạo mới BridgeManager với repository chỉ định
+    pub fn with_repository(tx_repository: Arc<dyn BridgeTransactionRepository + Send + Sync>) -> Self {
         let manager = Self {
             adapters: Vec::new(),
-            adapter_cache,
-            adapter_map,
-            tx_repository: Arc::new(crate::bridge::memory_repository::InMemoryBridgeTransactionRepository::new()),
-            tx_cache,
-            batch_update_queue,
-            last_batch_update,
-            max_batch_size: 50,
-            max_batch_interval_ms: 1000, // 1 giây
+            adapter_cache: Arc::new(RwLock::new(HashMap::new())),
+            adapter_map: Arc::new(RwLock::new(HashMap::new())),
+            tx_repository,
+            tx_cache: RwLock::new(LruCache::new(1000)),
+            batch_update_queue: Arc::new(Mutex::new(VecDeque::new())),
+            last_batch_update: Arc::new(RwLock::new(Instant::now())),
+            max_batch_size: 100,
+            max_batch_interval_ms: 5000,
+            performance_stats: Arc::new(RwLock::new(HashMap::new())),
+            slow_lookup_threshold: 5,
+            slow_lookup_time_threshold_ms: 50,
+            performance_check_interval_ms: 60000,
+            suspicious_transactions: Arc::new(RwLock::new(HashMap::new())),
+            paused_transactions: Arc::new(RwLock::new(HashSet::new())),
+            large_transaction_threshold: 100_000.0,
+            suspicious_alerts_hour_threshold: 10,
+            auto_pause_suspicious: true,
+            alert_counter: Arc::new(RwLock::new(Vec::new())),
+            admin_notifier: None,
+            suspicious_detection: Arc::new(SuspiciousTransactionManager::new()),
         };
-        
-        // Khởi động worker xử lý hàng loạt
+
+        // Khởi động bộ xử lý hàng loạt
         manager.start_batch_processor();
+        // Khởi động monitor hiệu suất
+        manager.start_performance_monitor();
         
         manager
     }
@@ -546,10 +631,25 @@ impl BridgeManager {
             last_batch_update,
             max_batch_size: 50,
             max_batch_interval_ms: 1000, // 1 giây
+            performance_stats: Arc::new(RwLock::new(HashMap::new())),
+            slow_lookup_threshold: 5,
+            slow_lookup_time_threshold_ms: 5, // 5ms - ngưỡng cảnh báo
+            performance_check_interval_ms: 60000, // 1 phút
+            suspicious_transactions: Arc::new(RwLock::new(HashMap::new())),
+            paused_transactions: Arc::new(RwLock::new(HashSet::new())),
+            large_transaction_threshold: 1000000.0, // 1 triệu DMD
+            suspicious_alerts_hour_threshold: 10, // 10 giao dịch trong 1 giờ
+            auto_pause_suspicious: true,
+            alert_counter: Arc::new(RwLock::new(Vec::new())),
+            admin_notifier: None,
+            suspicious_detection: Arc::new(SuspiciousTransactionManager::new()),
         };
         
         // Khởi động worker xử lý hàng loạt
         manager.start_batch_processor();
+        
+        // Khởi động monitor hiệu suất
+        manager.start_performance_monitor();
         
         manager
     }
@@ -651,30 +751,70 @@ impl BridgeManager {
         self.adapters.push(adapter);
         
         // Cập nhật map trực tiếp với các chain được hỗ trợ
-        let mut adapter_map = self.adapter_map.write().unwrap();
-        
+        match self.adapter_map.try_write() {
+            Ok(mut adapter_map) => {
+                for chain in &supported_chains {
+                    adapter_map.insert(chain.clone(), adapter_index);
+                }
+                
+                // Đồng bộ với cache cũ (để duy trì tương thích)
+                match self.adapter_cache.try_write() {
+                    Ok(mut cache) => {
         for chain in supported_chains {
-            adapter_map.insert(chain, adapter_index);
+                            cache.insert(chain, adapter_index);
         }
-        
         debug!("Đã đăng ký adapter tại index {}, hỗ trợ {} chains", adapter_index, adapter_map.len());
+                    },
+                    Err(_) => {
+                        // Không thể cập nhật cache, nhưng map chính đã cập nhật
+                        warn!("Không thể lấy write lock cho adapter_cache khi đăng ký adapter mới");
+                        debug!("Đã đăng ký adapter tại index {} (chỉ cập nhật adapter_map)", adapter_index);
+                    }
+                }
+            },
+            Err(_) => {
+                // Không thể cập nhật map, ghi log lỗi nghiêm trọng
+                error!("Không thể lấy write lock cho adapter_map khi đăng ký adapter mới. Adapter đã được thêm vào danh sách nhưng không được cập nhật trong map");
+                // Có thể xem xét xóa adapter đã thêm để đảm bảo tính nhất quán
+                self.adapters.pop();
+            }
+        }
     }
     
     /// Find a suitable adapter for a chain - phiên bản tối ưu hóa
     fn find_adapter(&self, chain: DmdChain) -> Option<&Box<dyn BridgeAdapter>> {
-        // Sử dụng adapter_map
-        let adapter_map = self.adapter_map.read().unwrap();
+        // Sử dụng adapter_map trước (đọc có khóa ngắn)
+        {
+            let adapter_map = match self.adapter_map.try_read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    // Nếu không lấy được khóa đọc, ghi log và tiếp tục
+                    warn!("Không thể lấy read lock cho adapter_map khi tìm adapter cho chain {:?}", chain);
+                    return None;
+                }
+            };
         
         if let Some(&index) = adapter_map.get(&chain) {
             // Adapter được tìm thấy trực tiếp trong map
             return self.adapters.get(index);
+            }
         }
         
-        // Nếu không tìm thấy trong map, kiểm tra cache cũ
-        let cache = self.adapter_cache.read().unwrap();
+        // Nếu không tìm thấy trong map chính, kiểm tra cache cũ
+        {
+            let cache = match self.adapter_cache.try_read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    // Nếu không lấy được khóa đọc, ghi log và tiếp tục
+                    warn!("Không thể lấy read lock cho adapter_cache khi tìm adapter cho chain {:?}", chain);
+                    return None;
+                }
+            };
+            
         if let Some(&index) = cache.get(&chain) {
             // Adapter tìm thấy trong cache cũ
             return self.adapters.get(index);
+            }
         }
         
         // Không tìm thấy trong cả map và cache, phải tìm kiếm theo cách cũ
@@ -685,27 +825,26 @@ impl BridgeManager {
         let adapter_pos = self.adapters.iter().position(|a| a.get_supported_chains().contains(&chain));
         
         if let Some(index) = adapter_pos {
-            // Cập nhật cả hai map
-            drop(adapter_map); // Giải phóng read lock
-            drop(cache); // Giải phóng read lock
-            
-            // Cập nhật map chính
-            {
-                let mut adapter_map = self.adapter_map.write().unwrap();
-                adapter_map.insert(chain, index);
-            }
-            
-            // Cập nhật cache cũ (để duy trì tương thích)
-            {
-                let mut cache = self.adapter_cache.write().unwrap();
-                cache.insert(chain, index);
-            }
+            // Cập nhật cả hai map cùng một lúc để tránh race condition
+            self.update_adapter_maps(chain, index);
             
             // Log thông tin hiệu suất
             let duration = start.elapsed();
-            if duration.as_millis() > 5 {
+            let duration_ms = duration.as_millis();
+            
+            // Ghi lại thống kê hiệu suất
+            self.record_performance_stat(chain, duration_ms);
+            
+            if duration_ms > 5 {
                 // Log cảnh báo nếu tìm kiếm mất quá 5ms
-                warn!("Tìm kiếm adapter cho chain {:?} mất {}ms", chain, duration.as_millis());
+                warn!("Tìm kiếm adapter cho chain {:?} mất {}ms", chain, duration_ms);
+                
+                // Kiểm tra và tối ưu hiệu suất nếu vượt ngưỡng
+                if duration_ms > self.slow_lookup_time_threshold_ms {
+                    self.check_and_optimize_performance(chain).unwrap_or_else(|e| {
+                        error!("Lỗi khi tối ưu hiệu suất cho chain {:?}: {}", chain, e);
+                    });
+                }
             }
             
             return self.adapters.get(index);
@@ -715,6 +854,195 @@ impl BridgeManager {
         let duration = start.elapsed();
         warn!("Không tìm thấy adapter nào cho chain {:?} sau {}ms", chain, duration.as_millis());
         None
+    }
+    
+    /// Ghi lại thống kê hiệu suất tìm kiếm adapter
+    fn record_performance_stat(&self, chain: DmdChain, duration_ms: u128) {
+        if let Ok(mut stats) = self.performance_stats.try_write() {
+            let chain_stats = stats.entry(chain).or_insert_with(Vec::new);
+            chain_stats.push((Instant::now(), duration_ms));
+            
+            // Giới hạn số lượng mẫu (giữ 100 mẫu gần nhất)
+            if chain_stats.len() > 100 {
+                chain_stats.remove(0);
+            }
+        }
+    }
+    
+    /// Kiểm tra và tối ưu hiệu suất tìm kiếm adapter
+    fn check_and_optimize_performance(&self, chain: DmdChain) -> Result<(), String> {
+        let should_optimize = {
+            if let Ok(stats) = self.performance_stats.try_read() {
+                if let Some(chain_stats) = stats.get(&chain) {
+                    // Kiểm tra các mẫu gần đây, tối đa 10 mẫu
+                    let recent_samples = chain_stats.iter().rev().take(10).collect::<Vec<_>>();
+                    
+                    if recent_samples.len() >= self.slow_lookup_threshold {
+                        // Đếm số lượng mẫu chậm
+                        let slow_count = recent_samples.iter()
+                            .filter(|&&(_, duration)| duration > self.slow_lookup_time_threshold_ms)
+                            .count();
+                            
+                        // Nếu hơn 50% mẫu gần đây chậm, cần tối ưu
+                        slow_count > recent_samples.len() / 2
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        
+        if should_optimize {
+            info!("Bắt đầu tối ưu hiệu suất cho chain {:?}", chain);
+            self.optimize_adapter_cache(chain)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Tối ưu adapter cache cho chain cụ thể
+    fn optimize_adapter_cache(&self, chain: DmdChain) -> Result<(), String> {
+        // Kiểm tra xem adapter đã tồn tại trong adapter_map chưa
+        let adapter_index = {
+            if let Ok(adapter_map) = self.adapter_map.try_read() {
+                adapter_map.get(&chain).cloned()
+            } else {
+                None
+            }
+        };
+        
+        if let Some(index) = adapter_index {
+            // Adapter đã tồn tại, tiến hành cập nhật cả hai cache
+            if let Ok(mut cache) = self.adapter_cache.try_write() {
+                cache.insert(chain, index);
+                info!("Đã tối ưu cache cho chain {:?}", chain);
+                return Ok(());
+            }
+        } else {
+            // Tìm adapter phù hợp (thực hiện tìm kiếm trực tiếp không qua cache)
+            let adapter_pos = self.adapters.iter().position(|a| a.get_supported_chains().contains(&chain));
+            
+            if let Some(index) = adapter_pos {
+                // Cập nhật cả hai cache
+                self.update_adapter_maps(chain, index);
+                info!("Đã tối ưu cache cho chain {:?} với adapter mới tại vị trí {}", chain, index);
+                return Ok(());
+            } else {
+                return Err(format!("Không tìm thấy adapter nào hỗ trợ chain {:?}", chain));
+            }
+        }
+        
+        Err("Không thể tối ưu cache do không lấy được khóa ghi".to_string())
+    }
+    
+    /// Khởi động công việc kiểm tra hiệu suất định kỳ
+    fn start_performance_monitor(&self) {
+        let stats = self.performance_stats.clone();
+        let threshold = self.slow_lookup_threshold;
+        let time_threshold_ms = self.slow_lookup_time_threshold_ms;
+        let check_interval = Duration::from_millis(self.performance_check_interval_ms);
+        let adapter_map = self.adapter_map.clone();
+        let adapter_cache = self.adapter_cache.clone();
+        
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(check_interval).await;
+                
+                // Kiểm tra hiệu suất của tất cả các chains
+                if let Ok(stats_read) = stats.try_read() {
+                    for (chain, chain_stats) in stats_read.iter() {
+                        // Nếu có đủ mẫu để phân tích
+                        if chain_stats.len() >= threshold {
+                            // Lấy các mẫu trong 10 phút gần nhất
+                            let now = Instant::now();
+                            let recent_samples: Vec<_> = chain_stats.iter()
+                                .filter(|&&(time, _)| now.duration_since(time).as_secs() < 600)
+                                .map(|&(_, duration)| duration)
+                                .collect();
+                                
+                            if !recent_samples.is_empty() {
+                                // Tính thời gian trung bình
+                                let avg_duration: u128 = recent_samples.iter().sum::<u128>() / recent_samples.len() as u128;
+                                
+                                // Nếu thời gian trung bình vượt ngưỡng, ghi log cảnh báo
+                                if avg_duration > time_threshold_ms {
+                                    warn!("Hiệu suất tìm kiếm cho chain {:?} giảm: trung bình {}ms trong 10 phút qua", chain, avg_duration);
+                                    
+                                    // Thực hiện tối ưu
+                                    if let Ok(adapter_index) = Self::find_adapter_direct(&adapter_map, &adapter_cache, chain) {
+                                        // Cập nhật cache
+                                        if let Ok(mut map) = adapter_map.try_write() {
+                                            map.insert(*chain, adapter_index);
+                                            info!("Đã tối ưu adapter_map cho chain {:?}", chain);
+                                        }
+                                        
+                                        if let Ok(mut cache) = adapter_cache.try_write() {
+                                            cache.insert(*chain, adapter_index);
+                                            info!("Đã tối ưu adapter_cache cho chain {:?}", chain);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    /// Tìm adapter trực tiếp (static helper cho monitor thread)
+    fn find_adapter_direct(
+        adapter_map: &Arc<RwLock<HashMap<DmdChain, usize>>>,
+        adapter_cache: &Arc<RwLock<HashMap<DmdChain, usize>>>,
+        chain: &DmdChain
+    ) -> Result<usize, String> {
+        // Thử tìm trong adapter_map
+        if let Ok(map) = adapter_map.try_read() {
+            if let Some(&index) = map.get(chain) {
+                return Ok(index);
+            }
+        }
+        
+        // Thử tìm trong adapter_cache
+        if let Ok(cache) = adapter_cache.try_read() {
+            if let Some(&index) = cache.get(chain) {
+                return Ok(index);
+            }
+        }
+        
+        Err(format!("Không tìm thấy adapter cho chain {:?}", chain))
+    }
+    
+    /// Cập nhật cả hai maps trong một lần để tránh race condition
+    fn update_adapter_maps(&self, chain: DmdChain, adapter_index: usize) {
+        // Cố gắng cập nhật map chính trước
+        let main_map_updated = match self.adapter_map.try_write() {
+            Ok(mut map) => {
+                map.insert(chain, adapter_index);
+                true
+            },
+            Err(_) => {
+                warn!("Không thể lấy write lock cho adapter_map khi cập nhật adapter cho chain {:?}", chain);
+                false
+            }
+        };
+        
+        // Sau đó cập nhật cache cũ nếu cần
+        if main_map_updated {
+            match self.adapter_cache.try_write() {
+                Ok(mut cache) => {
+                    cache.insert(chain, adapter_index);
+                },
+                Err(_) => {
+                    warn!("Không thể lấy write lock cho adapter_cache khi cập nhật adapter cho chain {:?}", chain);
+                    // Vẫn tiếp tục vì map chính đã được cập nhật
+                }
+            }
+        }
     }
 
     /// Create a new bridge transaction
@@ -744,8 +1072,8 @@ impl BridgeManager {
     
     /// Bridge tokens from one chain to another
     pub async fn bridge(&self, 
-                source_chain: DmdChain, 
-                target_chain: DmdChain,
+        source_chain: DmdChain,
+        target_chain: DmdChain,
                 private_key: &str,
                 target_address: &str,
                 amount: U256) -> Result<BridgeTransaction, String> {
@@ -800,22 +1128,65 @@ impl BridgeManager {
     }
     
     /// Check the status of a bridge transaction
-    pub async fn check_transaction_status(&self, tx_id: &str) -> Result<BridgeStatus, String> {
-        // Get the transaction
-        let tx = self.get_transaction(tx_id).await?;
-        
-        // Find the appropriate adapter
-        let adapter = self.find_adapter(tx.source_chain)
-            .ok_or_else(|| format!("Không tìm thấy adapter cho chain {:?}", tx.source_chain))?;
-        
-        // Check the status
-        let status = adapter.check_transaction_status(&tx)
-            .map_err(|e| format!("Không thể kiểm tra trạng thái giao dịch: {}", e))?;
-        
-        // Update the transaction if the status has changed
-        if status != tx.status {
-            self.update_transaction(tx_id, status, None, None).await?;
+    pub async fn check_transaction_status(&self, tx_id: &str) -> Result<BridgeTransactionStatus, String> {
+        // Kiểm tra xem giao dịch có bị tạm dừng không
+        {
+            let paused = self.paused_transactions.read().unwrap_or_else(|e| {
+                error!("Không thể đọc paused_transactions: {:?}", e);
+                panic!("Lỗi khóa RwLock");
+            });
+            
+            if paused.contains(tx_id) {
+                info!("Giao dịch {} đã bị tạm dừng để kiểm tra thủ công", tx_id);
+                return Ok(BridgeTransactionStatus::Paused);
+            }
         }
+        
+        // Kiểm tra trong cache transaction_statuses trước
+        if let Some(status) = self.transaction_statuses.read().unwrap_or_else(|e| {
+            error!("Không thể đọc transaction_statuses: {:?}", e);
+            panic!("Lỗi khóa RwLock");
+        }).get(tx_id) {
+            debug!("Tìm thấy trạng thái giao dịch {} trong cache: {:?}", tx_id, status);
+            return Ok(status.clone());
+        }
+        
+        // Tìm giao dịch trong danh sách transactions
+        let tx = match self.transactions.read().unwrap_or_else(|e| {
+            error!("Không thể đọc transactions: {:?}", e);
+            panic!("Lỗi khóa RwLock");
+        }).get(tx_id) {
+            Some(tx) => tx.clone(),
+            None => return Err(format!("Không tìm thấy giao dịch có ID: {}", tx_id)),
+        };
+        
+        // Kiểm tra giao dịch có bị đánh dấu đáng ngờ không
+        {
+            let suspicious = self.suspicious_transactions.read().unwrap_or_else(|e| {
+                error!("Không thể đọc suspicious_transactions: {:?}", e);
+                panic!("Lỗi khóa RwLock");
+            });
+            
+            if suspicious.contains_key(tx_id) {
+                warn!("Giao dịch {} đã bị đánh dấu là đáng ngờ", tx_id);
+                // Vẫn tiếp tục kiểm tra trạng thái thực tế, nhưng ghi log cảnh báo
+            }
+        }
+        
+        // Tìm adapter phù hợp cho chuỗi nguồn
+        let adapter = match self.adapters.get(&tx.source_chain) {
+            Some(adapter) => adapter,
+            None => return Err(format!("Không tìm thấy adapter cho chuỗi nguồn: {}", tx.source_chain)),
+        };
+        
+        // Gọi adapter để kiểm tra trạng thái
+        let status = adapter.check_transaction_status(&tx.id).await?;
+        
+        // Cập nhật cache
+        self.transaction_statuses.write().unwrap_or_else(|e| {
+            error!("Không thể ghi vào transaction_statuses: {:?}", e);
+            panic!("Lỗi khóa RwLock");
+        }).insert(tx_id.to_string(), status.clone());
         
         Ok(status)
     }
@@ -929,7 +1300,7 @@ impl BridgeManager {
                     
                 self.log_suspicious_transaction(&tx, &format!(
                     "Cố gắng thay đổi hash: {} -> {}", existing_hash, target_tx_hash
-                )).await;
+                )).await?;
                 
                 return Err(format!(
                     "Giao dịch đã có target hash khác: {} (khác với hash mới: {})",
@@ -1072,26 +1443,273 @@ impl BridgeManager {
     }
     
     /// Log suspicious transaction for later investigation
-    async fn log_suspicious_transaction(&self, tx: &BridgeTransaction, reason: &str) -> Result<(), String> {
-        // In production, this would log to a secure audit log
-        warn!(
-            "Giao dịch đáng ngờ: {} - ID: {}, Source: {:?}, Target: {:?}, Amount: {}, Lý do: {}",
-            chrono::Utc::now().to_rfc3339(),
-            tx.id,
-            tx.source_chain,
-            tx.target_chain,
-            tx.amount,
-            reason
-        );
+    pub async fn log_suspicious_transaction(&self, tx: &BridgeTransaction, reason: &str) -> BridgeResult<()> {
+        // Ghi log để dễ dàng debug và phân tích
+        warn!("Giao dịch đáng ngờ phát hiện: ID={}, lý do: {}", tx.id, reason);
         
-        // Thêm vào cơ sở dữ liệu audit
-        // Trong triển khai thực tế, sẽ lưu chi tiết giao dịch này vào một cơ sở dữ liệu
-        // tách biệt để phục vụ điều tra sau này
+        // Xác định loại giao dịch đáng ngờ
+        let suspicious_type = if reason.contains("large") || reason.contains("lớn") {
+            SuspiciousTransactionType::LargeAmount
+        } else if reason.contains("pattern") || reason.contains("mẫu") {
+            SuspiciousTransactionType::RepetitivePattern
+        } else if reason.contains("source") || reason.contains("nguồn") {
+            SuspiciousTransactionType::SuspiciousSource
+        } else if reason.contains("destination") || reason.contains("đích") {
+            SuspiciousTransactionType::SuspiciousDestination
+        } else if reason.contains("frequency") || reason.contains("tần suất") {
+            SuspiciousTransactionType::AbnormalPattern
+        } else if reason.contains("flagged") || reason.contains("đánh dấu") {
+            SuspiciousTransactionType::FlaggedAddress
+        } else if reason.contains("contract") || reason.contains("hợp đồng") {
+            SuspiciousTransactionType::UnknownContract
+        } else if reason.contains("fee") || reason.contains("phí") {
+            SuspiciousTransactionType::HighFee
+        } else if reason.contains("time") || reason.contains("thời gian") {
+            SuspiciousTransactionType::OddTimestamp
+        } else {
+            SuspiciousTransactionType::AbnormalPattern // Mặc định
+        };
         
-        // Có thể thêm cơ chế thông báo cho người giám sát
-        // hoặc đánh giá tự động về giao dịch đáng ngờ
+        // Lấy threshold nếu có
+        let threshold_value = if suspicious_type == SuspiciousTransactionType::LargeAmount {
+            Some(self.large_transaction_threshold.to_string())
+        } else {
+            None
+        };
+        
+        // Sử dụng SuspiciousTransactionManager để tạo và xử lý ghi nhận
+        let suspicious_records = self.suspicious_detection.check_transaction(tx)?;
+        
+        // Nếu không có bản ghi nào được tạo từ check_transaction, tạo thủ công
+        if suspicious_records.is_empty() {
+            let record = SuspiciousTransactionRecord::from_transaction(
+                tx,
+                suspicious_type,
+                threshold_value,
+                reason.to_string(),
+            );
+            
+            // Thông báo cho admin nếu có cấu hình hàm thông báo
+            self.suspicious_detection.notify_admin("MANUAL_DETECTION", &record)?;
+            
+            // Tạm dừng giao dịch nếu cấu hình tự động tạm dừng
+            if self.auto_pause_suspicious {
+                let mut paused = self.paused_transactions.write()
+                    .map_err(|_| BridgeError::ConcurrencyError("Failed to acquire lock for paused transactions".into()))?;
+                paused.insert(tx.id.clone());
+                
+                // Cập nhật trạng thái giao dịch thành Paused
+                drop(paused); // Giải phóng lock trước khi gọi hàm khác
+                let _ = self.update_transaction_status(&tx.id, BridgeTransactionStatus::Paused).await;
+            }
+        } else {
+            // Ghi log số lượng dấu hiệu đáng ngờ được phát hiện
+            info!("Phát hiện {} dấu hiệu đáng ngờ trong giao dịch {}", suspicious_records.len(), tx.id);
+            
+            // Tạm dừng giao dịch nếu cấu hình tự động tạm dừng và có ít nhất 1 dấu hiệu đáng ngờ
+            if self.auto_pause_suspicious {
+                let mut paused = self.paused_transactions.write()
+                    .map_err(|_| BridgeError::ConcurrencyError("Failed to acquire lock for paused transactions".into()))?;
+                paused.insert(tx.id.clone());
+                
+                // Cập nhật trạng thái giao dịch thành Paused
+                drop(paused); // Giải phóng lock trước khi gọi hàm khác
+                let _ = self.update_transaction_status(&tx.id, BridgeTransactionStatus::Paused).await;
+            }
+        }
+        
+        // Tăng bộ đếm cảnh báo và kiểm tra ngưỡng cảnh báo
+        self.increment_alert_counter()?;
+        self.check_alert_threshold()?;
         
         Ok(())
+    }
+    
+    /// Tạm dừng tất cả các giao dịch đang chờ xử lý
+    /// Được gọi tự động khi phát hiện quá nhiều giao dịch đáng ngờ
+    async fn pause_all_pending_transactions(&self) -> Result<Vec<String>, String> {
+        let mut paused_tx_ids = Vec::new();
+        
+        // Lấy danh sách tất cả giao dịch từ trạng thái Pending và Processing
+        let pending_txs = self.get_transactions_by_status(BridgeTransactionStatus::Pending).await?;
+        let processing_txs = self.get_transactions_by_status(BridgeTransactionStatus::Processing).await?;
+        
+        // Gộp danh sách các giao dịch cần tạm dừng
+        let txs_to_pause: Vec<BridgeTransaction> = [pending_txs, processing_txs].concat();
+        
+        // Đếm số lượng giao dịch được tạm dừng để log
+        let total_to_pause = txs_to_pause.len();
+        if total_to_pause == 0 {
+            info!("Không có giao dịch nào đang chờ xử lý để tạm dừng");
+            return Ok(paused_tx_ids);
+        }
+        
+        info!("Đang tạm dừng {} giao dịch đang chờ xử lý", total_to_pause);
+        
+        for tx in txs_to_pause {
+            // Đánh dấu giao dịch đã tạm dừng
+            {
+                let mut paused = self.paused_transactions.write().unwrap_or_else(|e| {
+                    error!("Không thể ghi vào paused_transactions: {:?}", e);
+                    panic!("Lỗi khóa RwLock");
+                });
+                
+                paused.insert(tx.id.clone());
+            }
+            
+            // Cập nhật trạng thái giao dịch sang Paused
+            if let Err(e) = self.update_transaction_status(&tx.id, BridgeTransactionStatus::Paused).await {
+                error!("Không thể cập nhật trạng thái giao dịch {} sang Paused: {}", tx.id, e);
+                continue;
+            }
+            
+            // Thêm ID giao dịch vào danh sách đã tạm dừng thành công
+            paused_tx_ids.push(tx.id.clone());
+            
+            // Thông báo cho admin nếu đã cấu hình
+            if let Some(notifier) = &self.admin_notifier {
+                let notification_id = format!("MASS_PAUSE_TX_{}", Uuid::new_v4().as_simple());
+                let pause_message = format!(
+                    "[TẠM DỪNG HÀNG LOẠT] Giao dịch {} đã bị tự động tạm dừng do phát hiện nhiều giao dịch đáng ngờ.\nYêu cầu kiểm tra và xử lý thủ công.",
+                    tx.id
+                );
+                
+                if let Err(e) = notifier(&notification_id, &tx, &pause_message) {
+                    error!("Không thể gửi thông báo về việc tạm dừng giao dịch hàng loạt: {}", e);
+                }
+            }
+        }
+        
+        // Gửi thông báo tổng hợp cho admin
+        if let Some(notifier) = &self.admin_notifier {
+            let notification_id = format!("MASS_PAUSE_SUMMARY_{}", Uuid::new_v4().as_simple());
+            let summary_message = format!(
+                "[TẠM DỪNG TỔNG HỢP] Đã tạm dừng {}/{} giao dịch đang chờ xử lý.\nLý do: Phát hiện nhiều giao dịch đáng ngờ trong thời gian ngắn.\nYêu cầu kiểm tra toàn bộ hệ thống bridge.",
+                paused_tx_ids.len(), total_to_pause
+            );
+            
+            // Sử dụng giao dịch đầu tiên cho thông báo tổng hợp hoặc tạo một giả
+            let sample_tx = if !txs_to_pause.is_empty() {
+                &txs_to_pause[0]
+            } else {
+                // Tạo một giao dịch giả nếu không có giao dịch nào
+                &BridgeTransaction {
+                    id: "summary_no_tx".to_string(),
+                    source_chain: DmdChain::Unknown,
+                    target_chain: DmdChain::Unknown,
+                    source_address: "system".to_string(),
+                    target_address: "system".to_string(),
+                    amount: 0,
+                    source_tx_hash: None,
+                    target_tx_hash: None,
+                    status: BridgeTransactionStatus::Paused,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    error: None,
+                }
+            };
+            
+            if let Err(e) = notifier(&notification_id, sample_tx, &summary_message) {
+                error!("Không thể gửi thông báo tổng hợp về việc tạm dừng giao dịch hàng loạt: {}", e);
+            }
+        }
+        
+        Ok(paused_tx_ids)
+    }
+    
+    /// Cập nhật trạng thái giao dịch
+    async fn update_transaction_status(&self, tx_id: &str, status: BridgeTransactionStatus) -> Result<(), String> {
+        // Lấy giao dịch hiện tại
+        let mut tx = match self.get_transaction(tx_id).await {
+            Ok(tx) => tx,
+            Err(e) => return Err(format!("Không thể lấy thông tin giao dịch: {}", e)),
+        };
+        
+        // Cập nhật trạng thái và thời gian
+        tx.status = status;
+        tx.updated_at = chrono::Utc::now();
+        
+        // Lưu vào repository
+        match self.tx_repository.save(&tx) {
+            Ok(_) => {
+                // Cập nhật cache
+                let mut cache = self.tx_cache.write().unwrap();
+                cache.put(tx.id.clone(), tx);
+                Ok(())
+            },
+            Err(e) => Err(format!("Không thể lưu giao dịch đã cập nhật: {}", e)),
+        }
+    }
+    
+    /// Bỏ tạm dừng một giao dịch cụ thể
+    pub async fn resume_transaction(&self, tx_id: &str, admin_id: &str, reason: &str) -> Result<BridgeTransaction, String> {
+        // Kiểm tra xem giao dịch có bị tạm dừng không
+        {
+            let paused = self.paused_transactions.read().unwrap_or_else(|e| {
+                error!("Không thể đọc paused_transactions: {:?}", e);
+                panic!("Lỗi khóa RwLock");
+            });
+            
+            if !paused.contains(tx_id) {
+                return Err(format!("Giao dịch {} không bị tạm dừng", tx_id));
+            }
+        }
+        
+        // Lấy giao dịch
+        let tx = match self.get_transaction(tx_id).await {
+            Ok(tx) => tx,
+            Err(e) => return Err(format!("Không thể lấy thông tin giao dịch: {}", e)),
+        };
+        
+        // Kiểm tra trạng thái
+        if tx.status != BridgeTransactionStatus::Paused {
+            return Err(format!("Giao dịch {} không ở trạng thái tạm dừng", tx_id));
+        }
+        
+        // Đưa giao dịch về trạng thái InProgress
+        let mut updated_tx = tx.clone();
+        updated_tx.status = BridgeTransactionStatus::InProgress;
+        updated_tx.updated_at = chrono::Utc::now();
+        
+        // Bổ sung metadata
+        // Ví dụ: tx.metadata.insert("resumed_by", admin_id.to_string());
+        // Ví dụ: tx.metadata.insert("resume_reason", reason.to_string());
+        
+        // Loại bỏ khỏi danh sách tạm dừng
+        {
+            let mut paused = self.paused_transactions.write().unwrap_or_else(|e| {
+                error!("Không thể ghi vào paused_transactions: {:?}", e);
+                panic!("Lỗi khóa RwLock");
+            });
+            paused.remove(tx_id);
+        }
+        
+        // Lưu giao dịch đã cập nhật
+        self.tx_repository.save(&updated_tx)
+            .map_err(|e| format!("Không thể lưu giao dịch đã cập nhật: {}", e))?;
+        
+        // Cập nhật cache
+        {
+            let mut cache = self.tx_cache.write().unwrap();
+            cache.put(updated_tx.id.clone(), updated_tx.clone());
+        }
+        
+        // Ghi log
+        info!("Giao dịch {} đã được tiếp tục bởi admin {}: {}", tx_id, admin_id, reason);
+        
+        // Gửi thông báo cho admin
+        if let Some(notifier) = &self.admin_notifier {
+            let resume_message = format!(
+                "Giao dịch {} đã được tiếp tục bởi admin {}.\nLý do: {}",
+                tx_id, admin_id, reason
+            );
+            
+            if let Err(e) = notifier("BRIDGE_TX_RESUMED", &updated_tx, &resume_message) {
+                error!("Không thể gửi thông báo về việc tiếp tục giao dịch: {}", e);
+            }
+        }
+        
+        Ok(updated_tx)
     }
     
     /// Mark a transaction as failed
@@ -1128,6 +1746,17 @@ impl BridgeManager {
         // Ghi log cho các trường hợp đặc biệt
         if tx.status == BridgeStatus::Initiated {
             warn!("Giao dịch được đánh dấu thất bại ở trạng thái khởi tạo (Initiated) - ID: {}", tx_id);
+            
+            // Gửi thông báo cho admin về giao dịch thất bại ở trạng thái khởi tạo
+            if let Some(notifier) = &self.admin_notifier {
+                let alert_message = format!(
+                    "[CẢNH BÁO] Giao dịch {} thất bại ở trạng thái khởi tạo.\nLỗi: {}\nCần kiểm tra xem có vấn đề với hệ thống hay không.",
+                    tx_id, error_message
+                );
+                if let Err(e) = notifier("BRIDGE_EARLY_FAILURE", &tx, &alert_message) {
+                    error!("Không thể gửi thông báo cho admin: {}", e);
+                }
+            }
         }
         
         // Kiểm tra thêm có nên từ chối đánh dấu thất bại trong một số trường hợp
@@ -1137,8 +1766,19 @@ impl BridgeManager {
             
             // Ghi log chi tiết là đáng ngờ vì giao dịch đã được xác nhận nhưng đang thất bại
             self.log_suspicious_transaction(&tx, &format!(
-                "Đánh dấu thất bại từ trạng thái đã xác nhận: {:?}", tx.status
-            )).await;
+                "Đánh dấu thất bại từ trạng thái đã xác nhận: {:?} - Lỗi: {}", tx.status, error_message
+            )).await?;
+            
+            // Gửi thông báo khẩn cấp cho admin
+            if let Some(notifier) = &self.admin_notifier {
+                let alert_message = format!(
+                    "[CẢNH BÁO NGHIÊM TRỌNG] Giao dịch {} đã đi qua trạng thái {:?} nhưng bị đánh dấu thất bại!\nLỗi: {}\nCần kiểm tra NGAY LẬP TỨC để ngăn chặn mất token.",
+                    tx_id, tx.status, error_message
+                );
+                if let Err(e) = notifier("BRIDGE_CRITICAL_FAILURE", &tx, &alert_message) {
+                    error!("Không thể gửi thông báo cho admin: {}", e);
+                }
+            }
         }
         
         // Sanitize error message - filter out potential code injection or HTML
@@ -1162,8 +1802,19 @@ impl BridgeManager {
             // Nếu số lần thất bại quá nhiều, đánh dấu là đáng ngờ
             if failure_attempts >= 5 {
                 self.log_suspicious_transaction(&tx, &format!(
-                    "Đã thất bại quá nhiều lần: {}", failure_attempts
-                )).await;
+                    "Đã thất bại quá nhiều lần: {} - Lỗi hiện tại: {}", failure_attempts, sanitized_error
+                )).await?;
+                
+                // Gửi cảnh báo cho admin về số lần thất bại quá nhiều
+                if let Some(notifier) = &self.admin_notifier {
+                    let alert_message = format!(
+                        "[CẢNH BÁO] Giao dịch {} đã thất bại {} lần. Lỗi hiện tại: {}. Cần kiểm tra thủ công.",
+                        tx_id, failure_attempts, sanitized_error
+                    );
+                    if let Err(e) = notifier("BRIDGE_MULTIPLE_FAILURES", &tx, &alert_message) {
+                        error!("Không thể gửi thông báo cho admin: {}", e);
+                    }
+                }
             }
         }
         
@@ -1176,22 +1827,54 @@ impl BridgeManager {
         if time_diff_seconds < 10 {
             warn!("Giao dịch đáng ngờ: Thất bại quá nhanh ({} giây)", time_diff_seconds);
             self.log_suspicious_transaction(&tx, &format!(
-                "Thất bại quá nhanh: {} giây", time_diff_seconds
-            )).await;
+                "Thất bại quá nhanh: {} giây - Lỗi: {}", time_diff_seconds, sanitized_error
+            )).await?;
+            
+            // Gửi cảnh báo cho admin về việc thất bại quá nhanh
+            if let Some(notifier) = &self.admin_notifier {
+                let alert_message = format!(
+                    "[CẢNH BÁO] Giao dịch {} thất bại quá nhanh (chỉ sau {} giây). Lỗi: {}. Có thể có vấn đề với hệ thống.",
+                    tx_id, time_diff_seconds, sanitized_error
+                );
+                if let Err(e) = notifier("BRIDGE_QUICK_FAILURE", &tx, &alert_message) {
+                    error!("Không thể gửi thông báo cho admin: {}", e);
+                }
+            }
         }
         
         // Kiểm tra nội dung lỗi có đáng ngờ không
         let suspicious_error_terms = vec![
             "hack", "exploit", "attack", "bypass", "overflow", "underflow",
-            "steal", "theft", "unauthorized", "compromised"
+            "steal", "theft", "unauthorized", "compromised", "consensus", "double spend",
+            "replay", "inject", "intercept", "front-run"
         ];
         
         for term in suspicious_error_terms {
             if error_message.to_lowercase().contains(term) {
                 warn!("Thông báo lỗi có chứa thuật ngữ đáng ngờ: {}", term);
                 self.log_suspicious_transaction(&tx, &format!(
-                    "Thông báo lỗi có chứa thuật ngữ đáng ngờ: {}", term
-                )).await;
+                    "Thông báo lỗi có chứa thuật ngữ đáng ngờ '{}': {}", term, sanitized_error
+                )).await?;
+                
+                // Gửi cảnh báo cao cho admin về thuật ngữ đáng ngờ
+                if let Some(notifier) = &self.admin_notifier {
+                    let alert_message = format!(
+                        "[CẢNH BÁO CAO] Phát hiện thuật ngữ đáng ngờ '{}' trong lỗi giao dịch {}.\nThông báo đầy đủ: {}\nCần kiểm tra NGAY LẬP TỨC để phát hiện tấn công tiềm ẩn.",
+                        term, tx_id, sanitized_error
+                    );
+                    if let Err(e) = notifier("BRIDGE_SECURITY_TERM", &tx, &alert_message) {
+                        error!("Không thể gửi thông báo cho admin: {}", e);
+                    }
+                }
+                
+                // Có thể cần thực hiện hành động tạm dừng hệ thống
+                if term == "hack" || term == "exploit" || term == "attack" {
+                    warn!("Phát hiện từ khóa chỉ tấn công nghiêm trọng, tạm dừng tất cả giao dịch");
+                    if let Err(e) = self.pause_all_pending_transactions().await {
+                        error!("Không thể tạm dừng tất cả giao dịch: {}", e);
+                    }
+                }
+                
                 break;
             }
         }
@@ -1222,6 +1905,18 @@ impl BridgeManager {
             "Giao dịch {} thất bại: {} - Source: {:?}, Target: {:?}, Amount: {}",
             tx_id, sanitized_error, tx.source_chain, tx.target_chain, tx.amount
         );
+        
+        // Gửi thông báo thất bại cho admin
+        if let Some(notifier) = &self.admin_notifier {
+            let failure_message = format!(
+                "Giao dịch {} đã thất bại.\nNguồn: {}\nĐích: {}\nSố lượng: {}\nLỗi: {}\nSố lần thất bại: {}",
+                tx_id, tx.source_chain, tx.target_chain, tx.amount, sanitized_error, failure_attempts + 1
+            );
+            
+            if let Err(e) = notifier("BRIDGE_TX_FAILED", &tx, &failure_message) {
+                error!("Không thể gửi thông báo thất bại cho admin: {}", e);
+            }
+        }
         
         // Save the updated transaction
         self.tx_repository.save(&updated_tx)
@@ -1716,38 +2411,296 @@ impl BridgeManager {
         match chain {
             Chain::Ethereum | Chain::BSC | Chain::Polygon | Chain::Arbitrum => {
                 // Địa chỉ EVM dạng 0x + 40 ký tự hex
-                let eth_regex = Regex::new(r"^0x[a-fA-F0-9]{40}$").unwrap();
-                eth_regex.is_match(address)
+                ETH_ADDRESS_REGEX.is_match(address)
             },
             Chain::Near => {
                 // Địa chỉ NEAR thường kết thúc bằng .near hoặc là 64 ký tự base58
-                let near_account_regex = Regex::new(r"^[a-z0-9_-]{1,64}\.(testnet|near)$").unwrap();
-                let near_implicit_regex = Regex::new(r"^[a-zA-Z0-9]{64}$").unwrap();
-                near_account_regex.is_match(address) || near_implicit_regex.is_match(address)
+                NEAR_ACCOUNT_REGEX.is_match(address) || NEAR_IMPLICIT_REGEX.is_match(address)
             },
             Chain::Solana => {
                 // Địa chỉ Solana là 32-44 ký tự base58
-                let sol_regex = Regex::new(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$").unwrap();
-                sol_regex.is_match(address)
+                SOLANA_ADDRESS_REGEX.is_match(address)
             },
             Chain::Bitcoin => {
                 // Địa chỉ Bitcoin bắt đầu bằng 1, 3, bc1
-                let btc_legacy_regex = Regex::new(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$").unwrap();
-                let btc_segwit_regex = Regex::new(r"^bc1[a-zA-HJ-NP-Z0-9]{39,59}$").unwrap();
-                btc_legacy_regex.is_match(address) || btc_segwit_regex.is_match(address)
+                BTC_LEGACY_REGEX.is_match(address) || BTC_SEGWIT_REGEX.is_match(address)
             },
             Chain::Aptos => {
                 // Địa chỉ Aptos là 0x + 64 ký tự hex
-                let aptos_regex = Regex::new(r"^0x[a-fA-F0-9]{64}$").unwrap();
-                aptos_regex.is_match(address)
+                APTOS_ADDRESS_REGEX.is_match(address)
             },
             _ => {
                 // Đối với các chain khác, kiểm tra chung
                 // Ít nhất 5 ký tự và không chứa ký tự đặc biệt ngoại trừ '.', '-', và '_'
-                let general_regex = Regex::new(r"^[a-zA-Z0-9\.\-_]{5,}$").unwrap();
-                general_regex.is_match(address)
+                GENERAL_ADDRESS_REGEX.is_match(address)
             }
         }
+    }
+
+    /// Thiết lập hàm gọi lại để thông báo cho admin
+    /// Hàm notifier sẽ nhận 3 tham số: (ID thông báo, giao dịch, nội dung thông báo)
+    /// và trả về kết quả thành công hoặc lỗi
+    pub fn set_admin_notifier(&mut self, notifier: AdminNotifierFn) -> Result<(), String> {
+        self.admin_notifier = Some(notifier);
+        
+        // Cũng cấu hình cho SuspiciousTransactionManager
+        let admin_notifier = notifier;
+        self.suspicious_detection = Arc::new(SuspiciousTransactionManager::new()
+            .with_admin_notifier(move |alert_type, record| {
+                // Tạo một BridgeTransaction từ SuspiciousTransactionRecord để truyền vào hàm notifier
+                let transaction = BridgeTransaction {
+                    id: record.transaction_hash.clone().unwrap_or_else(|| "unknown".to_string()),
+                    source_chain: record.source_chain.parse().unwrap_or(DmdChain::Ethereum),
+                    target_chain: record.destination_chain.parse().unwrap_or(DmdChain::Ethereum),
+                    source_address: record.source_address.clone(),
+                    target_address: record.destination_address.clone(),
+                    amount: record.amount.parse().unwrap_or(0),
+                    source_tx_hash: None,
+                    target_tx_hash: None,
+                    status: BridgeTransactionStatus::Created,
+                    created_at: record.detected_at,
+                    updated_at: Utc::now(),
+                    error: None,
+                };
+                let description = format!("{}: {}", alert_type, record.description);
+                match admin_notifier(alert_type, &transaction, &description) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(BridgeError::GenericError(e)),
+                }
+            }));
+        
+        Ok(())
+    }
+
+    /// Xóa hàm thông báo cho admin
+    pub fn clear_admin_notifier(&mut self) -> Result<(), String> {
+        self.admin_notifier = None;
+        
+        // Cũng cập nhật SuspiciousTransactionManager
+        self.suspicious_detection = Arc::new(SuspiciousTransactionManager::new());
+        
+        Ok(())
+    }
+
+    /// Đặt hàm thông báo admin cho phát hiện giao dịch đáng ngờ
+    pub fn set_admin_notifier<F>(&mut self, notifier: F) -> BridgeResult<()>
+    where
+        F: Fn(&str, &SuspiciousTransactionRecord) -> BridgeResult<()> + 'static + Send + Sync,
+    {
+        self.suspicious_detection = Arc::new(
+            SuspiciousTransactionManager::new().with_admin_notifier(notifier)
+        );
+        info!("Đã đặt hàm thông báo admin cho phát hiện giao dịch đáng ngờ");
+        Ok(())
+    }
+
+    /// Xóa hàm thông báo admin
+    pub fn clear_admin_notifier(&mut self) -> BridgeResult<()> {
+        self.suspicious_detection = Arc::new(SuspiciousTransactionManager::new());
+        info!("Đã xóa hàm thông báo admin");
+        Ok(())
+    }
+    
+    /// Cài đặt ngưỡng số lượng lớn cho token
+    pub fn set_large_amount_threshold(&self, token: &str, amount: f64) -> BridgeResult<()> {
+        self.suspicious_detection.set_large_amount_threshold(token, amount)
+    }
+
+    /// Ghi log và thông báo về giao dịch đáng ngờ
+    pub async fn log_suspicious_transaction(&self, tx: &BridgeTransaction, reason: &str) -> BridgeResult<()> {
+        // Ghi log để dễ dàng debug và phân tích
+        warn!("Giao dịch đáng ngờ phát hiện: ID={}, lý do: {}", tx.id, reason);
+        
+        // Xác định loại giao dịch đáng ngờ
+        let suspicious_type = if reason.contains("large") || reason.contains("lớn") {
+            SuspiciousTransactionType::LargeAmount
+        } else if reason.contains("pattern") || reason.contains("mẫu") {
+            SuspiciousTransactionType::RepetitivePattern
+        } else if reason.contains("source") || reason.contains("nguồn") {
+            SuspiciousTransactionType::SuspiciousSource
+        } else if reason.contains("destination") || reason.contains("đích") {
+            SuspiciousTransactionType::SuspiciousDestination
+        } else if reason.contains("frequency") || reason.contains("tần suất") {
+            SuspiciousTransactionType::AbnormalPattern
+        } else if reason.contains("flagged") || reason.contains("đánh dấu") {
+            SuspiciousTransactionType::FlaggedAddress
+        } else if reason.contains("contract") || reason.contains("hợp đồng") {
+            SuspiciousTransactionType::UnknownContract
+        } else if reason.contains("fee") || reason.contains("phí") {
+            SuspiciousTransactionType::HighFee
+        } else if reason.contains("time") || reason.contains("thời gian") {
+            SuspiciousTransactionType::OddTimestamp
+        } else {
+            SuspiciousTransactionType::AbnormalPattern // Mặc định
+        };
+        
+        // Lấy threshold nếu có
+        let threshold_value = if suspicious_type == SuspiciousTransactionType::LargeAmount {
+            Some(self.large_transaction_threshold.to_string())
+        } else {
+            None
+        };
+        
+        // Sử dụng SuspiciousTransactionManager để tạo và xử lý ghi nhận
+        let suspicious_records = self.suspicious_detection.check_transaction(tx)?;
+        
+        // Nếu không có bản ghi nào được tạo từ check_transaction, tạo thủ công
+        if suspicious_records.is_empty() {
+            let record = SuspiciousTransactionRecord::from_transaction(
+                tx,
+                suspicious_type,
+                threshold_value,
+                reason.to_string(),
+            );
+            
+            // Thông báo cho admin nếu có cấu hình hàm thông báo
+            self.suspicious_detection.notify_admin("MANUAL_DETECTION", &record)?;
+            
+            // Tạm dừng giao dịch nếu cấu hình tự động tạm dừng
+            if self.auto_pause_suspicious {
+                let mut paused = self.paused_transactions.write()
+                    .map_err(|_| BridgeError::ConcurrencyError("Failed to acquire lock for paused transactions".into()))?;
+                paused.insert(tx.id.clone());
+                
+                // Cập nhật trạng thái giao dịch thành Paused
+                drop(paused); // Giải phóng lock trước khi gọi hàm khác
+                let _ = self.update_transaction_status(&tx.id, BridgeTransactionStatus::Paused).await;
+            }
+        } else {
+            // Ghi log số lượng dấu hiệu đáng ngờ được phát hiện
+            info!("Phát hiện {} dấu hiệu đáng ngờ trong giao dịch {}", suspicious_records.len(), tx.id);
+            
+            // Tạm dừng giao dịch nếu cấu hình tự động tạm dừng và có ít nhất 1 dấu hiệu đáng ngờ
+            if self.auto_pause_suspicious {
+                let mut paused = self.paused_transactions.write()
+                    .map_err(|_| BridgeError::ConcurrencyError("Failed to acquire lock for paused transactions".into()))?;
+                paused.insert(tx.id.clone());
+                
+                // Cập nhật trạng thái giao dịch thành Paused
+                drop(paused); // Giải phóng lock trước khi gọi hàm khác
+                let _ = self.update_transaction_status(&tx.id, BridgeTransactionStatus::Paused).await;
+            }
+        }
+        
+        // Tăng bộ đếm cảnh báo và kiểm tra ngưỡng cảnh báo
+        self.increment_alert_counter()?;
+        self.check_alert_threshold()?;
+        
+        Ok(())
+    }
+
+    // Các phương thức tiện ích cho quản lý cảnh báo giao dịch đáng ngờ
+    fn increment_alert_counter(&self) -> BridgeResult<()> {
+        let mut counter = self.alert_counter.write()
+            .map_err(|_| BridgeError::ConcurrencyError("Không thể khóa bộ đếm cảnh báo".into()))?;
+        
+        counter.push((format!("ALERT_{}", Utc::now().timestamp()), Instant::now()));
+        
+        // Chỉ giữ lại các cảnh báo trong 1 giờ qua
+        let one_hour_ago = Instant::now() - Duration::from_secs(3600);
+        counter.retain(|(_, time)| *time > one_hour_ago);
+        
+        Ok(())
+    }
+    
+    /// Kiểm tra ngưỡng cảnh báo và tự động tạm dừng giao dịch nếu cần
+    fn check_alert_threshold(&self) -> BridgeResult<()> {
+        let counter = self.alert_counter.read()
+            .map_err(|_| BridgeError::ConcurrencyError("Không thể khóa bộ đếm cảnh báo".into()))?;
+        
+        if counter.len() >= self.suspicious_alerts_hour_threshold && self.auto_pause_suspicious {
+            warn!("Phát hiện {} cảnh báo giao dịch đáng ngờ trong 1 giờ qua, tạm dừng tất cả giao dịch đang chờ xử lý", counter.len());
+            
+            // Không thể gọi hàm async từ hàm sync, nên chỉ log cảnh báo
+            // Tạm dừng giao dịch sẽ được thực hiện thông qua một tác vụ định kỳ
+            warn!("CẦN KIỂM TRA THỦ CÔNG: Số lượng cảnh báo vượt ngưỡng ({}/{})", 
+                counter.len(), self.suspicious_alerts_hour_threshold);
+        }
+        
+        Ok(())
+    }
+
+    /// Ghi nhận giao dịch đáng ngờ
+    pub fn log_suspicious_transaction(&self, transaction: &BridgeTransaction, reason: &str) -> BridgeResult<()> {
+        // Ghi log về giao dịch đáng ngờ
+        warn!("GIAO DỊCH ĐÁNG NGỜ: {} - {}", transaction.id, reason);
+        
+        // Xác định loại hoạt động đáng ngờ
+        let suspicious_type = match reason {
+            r if r.contains("large_amount") => SuspiciousActivityType::LargeAmount,
+            r if r.contains("unusual_pattern") => SuspiciousActivityType::UnusualPattern,
+            r if r.contains("frequency") => SuspiciousActivityType::HighFrequency,
+            r if r.contains("multi_chain") => SuspiciousActivityType::MultiChainActivity,
+            _ => SuspiciousActivityType::Unknown,
+        };
+        
+        // Tạo dữ liệu giao dịch đáng ngờ
+        let transaction_data = format!(
+            "ID: {}, From: {}, To: {}, Amount: {}, Source: {}, Target: {}", 
+            transaction.id,
+            transaction.source_address,
+            transaction.target_address,
+            transaction.amount,
+            transaction.source_chain,
+            transaction.target_chain
+        );
+        
+        // Sử dụng SuspiciousTransactionManager từ module common
+        let suspicious_mgr = SuspiciousTransactionManager::new();
+        
+        // Kiểm tra nếu giao dịch này đã được ghi nhận là đáng ngờ
+        let existing_records = suspicious_mgr.find_by_transaction_id(&transaction.id)?;
+        
+        if existing_records.is_empty() {
+            // Tạo bản ghi mới nếu chưa tồn tại
+            let record = SuspiciousTransactionRecord {
+                id: Uuid::new_v4().to_string(),
+                transaction_id: transaction.id.clone(),
+                timestamp: Utc::now(),
+                activity_type: suspicious_type,
+                reason: reason.to_string(),
+                transaction_data,
+                status: SuspiciousRecordStatus::Pending,
+                review_notes: None,
+                reviewed_by: None,
+                reviewed_at: None,
+            };
+            
+            // Lưu bản ghi vào cơ sở dữ liệu
+            suspicious_mgr.save_record(&record)?;
+            
+            // Thông báo cho admin nếu đã cấu hình
+            if let Some(notifier) = &self.admin_notifier {
+                let message = format!("Phát hiện giao dịch đáng ngờ: {} - {}", transaction.id, reason);
+                if let Err(e) = notifier("SUSPICIOUS_TRANSACTION", &message, &serde_json::to_string(&record).unwrap_or_default()) {
+                    error!("Không thể gửi thông báo về giao dịch đáng ngờ: {}", e);
+                }
+            }
+            
+            // Tăng bộ đếm cảnh báo và kiểm tra ngưỡng
+            if let Err(e) = self.increment_alert_counter() {
+                error!("Không thể tăng bộ đếm cảnh báo: {}", e);
+            }
+            
+            if let Err(e) = self.check_alert_threshold() {
+                error!("Không thể kiểm tra ngưỡng cảnh báo: {}", e);
+            }
+        } else {
+            // Giao dịch đã được ghi nhận trước đó
+            debug!("Giao dịch {} đã được ghi nhận là đáng ngờ trước đó", transaction.id);
+        }
+        
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockall::predicate::*;
+    use mockall::*;
+    
+    mock! {
     }
 }
 

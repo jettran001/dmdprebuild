@@ -8,83 +8,84 @@
     ├── Cargo.toml                  -> Cấu hình dependencies
     ├── manifest.rs                 -> Tài liệu tham chiếu module path [liên quan: tất cả các module, BẮT BUỘC đọc đầu tiên]
     ├── lib.rs                      -> Khai báo module cấp cao, re-export [liên quan: tất cả module khác, điểm import cho crate]
-    ├── src/docker/                 -> Quản lý các thiết lập cho Docker
-    │   ├── mod.rs                  -> Khai báo submodule docker [liên quan: tất cả file trong docker]
-    │   ├── compose.rs              -> Quản lý Docker Compose [liên quan: nodes]
-    │   ├── containers.rs           -> Quản lý container lifecycle [liên quan: protocols, messaging]
-    │   ├── network.rs              -> Cấu hình mạng cho Docker [liên quan: nodes, protocols]
-    ├── src/nodes/                  -> Quản lý các node depin, master-slave
-    │   ├── mod.rs                  -> Khai báo submodule nodes [liên quan: tất cả file trong nodes]
-    │   ├── depin.rs                -> Quản lý node DePIN [liên quan: protocols, edge]
-    │   ├── master.rs               -> Quản lý master node [liên quan: protocols]
-    │   ├── discovery.rs            -> Phát hiện và kết nối node [liên quan: protocols]
-    │   ├── health.rs               -> Giám sát sức khỏe node [liên quan: protocols, messaging]
-    ├── src/protocols/              -> Quản lý các giao thức mạng
-    │   ├── mod.rs                  -> Khai báo submodule protocols [liên quan: tất cả file trong protocols]
-    │   ├── ipfs.rs                 -> Tương tác với IPFS [liên quan: edge, nodes]
-    │   ├── quic.rs                 -> Cài đặt giao thức QUIC [liên quan: nodes, messaging]
-    │   ├── grpc.rs                 -> Cài đặt giao thức gRPC [liên quan: nodes, messaging]
-    │   ├── websocket.rs            -> Cài đặt WebSocket [liên quan: nodes, messaging, frontend]
-    │   ├── redis.rs                -> Tương tác với Redis [liên quan: messaging, docker]
-    │   ├── libp2p.rs               -> Tương tác với Libp2p [liên quan: nodes, edge]
-    │   ├── webrtc.rs               -> Cài đặt WebRTC [liên quan: nodes, messaging]
-    │   ├── nginx.rs                -> Cài đặt và quản lý Nginx [liên quan: docker, messaging]
-    ├── src/messaging/              -> Quản lý hệ thống messaging
-    │   ├── mod.rs                  -> Khai báo submodule messaging [liên quan: tất cả file trong messaging]
-    │   ├── mosquitto.rs            -> Tích hợp Mosquitto/Aedes [liên quan: protocols, nodes]
-    │   ├── kafka.rs                -> Tích hợp Kafka [liên quan: protocols, docker]
-    │   ├── messagepack.rs          -> Định dạng MessagePack [liên quan: protocols, wasm]
-    │   ├── broker.rs               -> Message broker chung [liên quan: tất cả các messaging khác]
-    ├── src/edge/                   -> Edge computing
-    │   ├── mod.rs                  -> Khai báo submodule edge [liên quan: tất cả file trong edge]
-    │   ├── compute.rs              -> Edge computing logic [liên quan: nodes, protocols]
-    │   ├── sync.rs                 -> Đồng bộ dữ liệu edge [liên quan: protocols, messaging]
-    │   ├── deployment.rs           -> Triển khai ứng dụng edge [liên quan: docker, wasm]
-    ├── src/wasm/                   -> Web Assembly
-    │   ├── mod.rs                  -> Khai báo submodule wasm [liên quan: tất cả file trong wasm]
-    │   ├── runtime.rs              -> WASM runtime [liên quan: edge, nodes]
-    │   ├── modules.rs              -> Quản lý WASM modules [liên quan: edge, protocols]
-    │   ├── interop.rs              -> Tương tác giữa WASM và native [liên quan: messaging, protocols]
-    ├── src/database/               -> Cơ sở dữ liệu và lưu trữ
-    │   ├── mongodb.rs              -> Tích hợp với MongoDB [liên quan: docker, nodes]
-    │   ├── filecoin.rs             -> Tích hợp với Filecoin [liên quan: protocols, edge]
-
-    Mối liên kết:
-    - docker là cơ sở hạ tầng để triển khai các thành phần mạng
-    - docker/compose.rs quản lý cấu hình Docker Compose cho triển khai mạng
-    - docker/containers.rs quản lý vòng đời container cho protocols và messaging
-    - docker/network.rs cấu hình mạng Docker cho nodes và protocols
-    - nodes/mod.rs là cổng vào cho tất cả quản lý node
-    - nodes/depin.rs quản lý các node DePIN tương tác với protocols và edge
-    - nodes/master.rs quản lý cấu trúc master node
-    - nodes/discovery.rs phát hiện và kết nối các node mới
-    - nodes/health.rs giám sát trạng thái các node
-    - protocols/mod.rs là cổng vào cho tất cả giao thức mạng
-    - protocols/ipfs.rs tương tác với IPFS cho lưu trữ phân tán
-    - protocols/quic.rs, grpc.rs, websocket.rs cài đặt các giao thức tương ứng
-    - protocols/redis.rs tích hợp Redis cho caching
-    - protocols/libp2p.rs tích hợp Libp2p cho mạng P2P
-    - protocols/webrtc.rs cài đặt WebRTC cho kết nối trực tiếp
-    - protocols/nginx.rs tích hợp Nginx làm reverse proxy và load balancer
-    - messaging/mod.rs là cổng vào cho tất cả hệ thống nhắn tin
-    - messaging/mosquitto.rs tích hợp Mosquitto/Aedes MQTT
-    - messaging/kafka.rs tích hợp Kafka cho xử lý tin nhắn quy mô lớn
-    - messaging/messagepack.rs định dạng MessagePack hiệu quả
-    - messaging/broker.rs tầng trừu tượng chung cho các hệ thống nhắn tin
-    - edge/mod.rs là cổng vào cho tất cả edge computing
-    - edge/compute.rs logic xử lý edge computing
-    - edge/sync.rs đồng bộ dữ liệu giữa edge và core
-    - edge/deployment.rs triển khai ứng dụng tới edge
-    - wasm/mod.rs là cổng vào cho tất cả WebAssembly
-    - wasm/runtime.rs quản lý môi trường thực thi WASM
-    - wasm/modules.rs quản lý các module WASM
-    - wasm/interop.rs tương tác giữa WASM và native code
-    - database/mongodb.rs tích hợp với MongoDB
-    - database/filecoin.rs tích hợp lưu trữ phi tập trung với Filecoin
-    - network tương tác với wallet để xác thực và ký giao dịch
-    - network cung cấp API cho snipebot để thực hiện giao dịch mạng
-    - network tương tác với blockchain để theo dõi và xác minh trạng thái
+    ├── src/
+    │   ├── protocols/
+    │   │   ├── mod.rs
+    │   │   ├── nginx.rs
+    │   │   ├── webrtc.rs
+    │   │   ├── libp2p.rs
+    │   │   ├── redis.rs
+    │   │   ├── grpc.rs
+    │   │   ├── quic.rs
+    │   │   ├── ipfs.rs
+    │   │   ├── websocket.rs
+    │   ├── messaging/
+    │   │   ├── mod.rs
+    │   │   ├── broker.rs
+    │   │   ├── messagepack.rs
+    │   │   ├── kafka.rs
+    │   │   ├── mosquitto.rs
+    │   ├── database/
+    │   │   ├── filecoin.rs
+    │   │   ├── mongodb.rs
+    │   ├── docker/
+    │   │   ├── mod.rs
+    │   │   ├── network.rs
+    │   │   ├── containers.rs
+    │   │   ├── compose.rs
+    │   ├── nodes/
+    │   │   ├── mod.rs
+    │   │   ├── depin.rs
+    │   │   ├── master.rs
+    │   │   ├── health.rs
+    │   │   ├── discovery.rs
+    │   ├── edge/
+    │   │   ├── mod.rs
+    │   │   ├── deployment.rs
+    │   │   ├── sync.rs
+    │   │   ├── compute.rs
+    │   ├── wasm/
+    │   │   ├── mod.rs
+    │   │   ├── runtime.rs
+    │   │   ├── modules.rs
+    │   │   ├── interop.rs
 */
+
+// Mối liên kết:
+// - docker là cơ sở hạ tầng để triển khai các thành phần mạng
+// - docker/compose.rs quản lý cấu hình Docker Compose cho triển khai mạng
+// - docker/containers.rs quản lý vòng đời container cho protocols và messaging
+// - docker/network.rs cấu hình mạng Docker cho nodes và protocols
+// - nodes/mod.rs là cổng vào cho tất cả quản lý node
+// - nodes/depin.rs quản lý các node DePIN tương tác với protocols và edge
+// - nodes/master.rs quản lý cấu trúc master node
+// - nodes/discovery.rs phát hiện và kết nối các node mới
+// - nodes/health.rs giám sát trạng thái các node
+// - protocols/mod.rs là cổng vào cho tất cả giao thức mạng
+// - protocols/ipfs.rs tương tác với IPFS cho lưu trữ phân tán
+// - protocols/quic.rs, grpc.rs, websocket.rs cài đặt các giao thức tương ứng
+// - protocols/redis.rs tích hợp Redis cho caching
+// - protocols/libp2p.rs tích hợp Libp2p cho mạng P2P
+// - protocols/webrtc.rs cài đặt WebRTC cho kết nối trực tiếp
+// - protocols/nginx.rs tích hợp Nginx làm reverse proxy và load balancer
+// - messaging/mod.rs là cổng vào cho tất cả hệ thống nhắn tin
+// - messaging/mosquitto.rs tích hợp Mosquitto/Aedes MQTT
+// - messaging/kafka.rs tích hợp Kafka cho xử lý tin nhắn quy mô lớn
+// - messaging/messagepack.rs định dạng MessagePack hiệu quả
+// - messaging/broker.rs tầng trừu tượng chung cho các hệ thống nhắn tin
+// - edge/mod.rs là cổng vào cho tất cả edge computing
+// - edge/compute.rs logic xử lý edge computing
+// - edge/sync.rs đồng bộ dữ liệu giữa edge và core
+// - edge/deployment.rs triển khai ứng dụng tới edge
+// - wasm/mod.rs là cổng vào cho tất cả WebAssembly
+// - wasm/runtime.rs quản lý môi trường thực thi WASM
+// - wasm/modules.rs quản lý các module WASM
+// - wasm/interop.rs tương tác giữa WASM và native code
+// - database/mongodb.rs tích hợp với MongoDB
+// - database/filecoin.rs tích hợp lưu trữ phi tập trung với Filecoin
+// - network tương tác với wallet để xác thực và ký giao dịch
+// - network cung cấp API cho snipebot để thực hiện giao dịch mạng
+// - network tương tác với blockchain để theo dõi và xác minh trạng thái
 
 // Module structure của dự án network
 pub mod docker;    // Quản lý các thiết lập cho Docker

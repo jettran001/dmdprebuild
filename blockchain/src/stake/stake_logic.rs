@@ -192,44 +192,148 @@ impl StakeManager {
         if needs_refresh {
             debug!("Refreshing cache for pool: {:?}", pool_address);
             
+            // Lưu giữ bản sao cache hiện tại để khôi phục nếu cần
+            let previous_pool_data = self.cache.get_pool(pool_address).await;
+            
             // Thực hiện cập nhật dữ liệu từ blockchain
-            let pool_data = match self.router.get_pool_config(pool_address).await {
+            match self.router.get_pool_config(pool_address).await {
                 Ok(data) => {
                     // Validate dữ liệu từ blockchain trước khi cập nhật vào cache
                     if data.min_lock_time < *MIN_LOCK_TIME {
-                        warn!("Received invalid min_lock_time from blockchain for pool: {:?}", pool_address);
+                        let error_msg = format!("Received invalid min_lock_time from blockchain for pool: {:?}", pool_address);
+                        error!("{}", error_msg);
+                        
+                        // Gửi cảnh báo hệ thống về dữ liệu không hợp lệ
+                        self.notify_admin_invalid_data(pool_address, "min_lock_time", &error_msg).await;
+                        
+                        // Khôi phục cache trước đó nếu có
+                        if let Some(previous_data) = previous_pool_data {
+                            info!("Rolling back to previous cache data for pool: {:?}", pool_address);
+                            self.cache.add_pool(previous_data).await;
+                        }
+                        
                         return Err(StakeError::InvalidPoolData(format!("min_lock_time too low: {} < {}", data.min_lock_time, *MIN_LOCK_TIME)));
                     }
                     
                     if data.max_validators < *MIN_VALIDATORS || data.max_validators > *MAX_VALIDATORS {
-                        warn!("Received invalid max_validators from blockchain for pool: {:?}", pool_address);
+                        let error_msg = format!("Received invalid max_validators from blockchain for pool: {:?}", pool_address);
+                        error!("{}", error_msg);
+                        
+                        // Gửi cảnh báo hệ thống về dữ liệu không hợp lệ
+                        self.notify_admin_invalid_data(pool_address, "max_validators", &error_msg).await;
+                        
+                        // Khôi phục cache trước đó nếu có
+                        if let Some(previous_data) = previous_pool_data {
+                            info!("Rolling back to previous cache data for pool: {:?}", pool_address);
+                            self.cache.add_pool(previous_data).await;
+                        }
+                        
                         return Err(StakeError::InvalidPoolData(format!("max_validators out of range: {} not in range [{}, {}]", 
                             data.max_validators, *MIN_VALIDATORS, *MAX_VALIDATORS)));
+                    }
+                    
+                    // Validate các trường dữ liệu khác
+                    if let Err(validation_error) = self.validate_pool_data(&data) {
+                        let error_msg = format!("Pool data validation failed for pool: {:?}, error: {}", pool_address, validation_error);
+                        error!("{}", error_msg);
+                        
+                        // Gửi cảnh báo hệ thống về dữ liệu không hợp lệ
+                        self.notify_admin_invalid_data(pool_address, "validation", &error_msg).await;
+                        
+                        // Khôi phục cache trước đó nếu có
+                        if let Some(previous_data) = previous_pool_data {
+                            info!("Rolling back to previous cache data for pool: {:?}", pool_address);
+                            self.cache.add_pool(previous_data).await;
+                        }
+                        
+                        return Err(StakeError::InvalidPoolData(format!("Validation failed: {}", validation_error)));
                     }
                     
                     // Cập nhật cache với dữ liệu đã validate
                     self.cache.add_pool(data).await;
                     
-                    true
+                    // Cập nhật timestamp
+                    let mut last_updates = self.last_cache_update.write().await;
+                    last_updates.insert(pool_address, current_time);
+                    info!("Cache updated for pool: {:?}", pool_address);
+                    
+                    Ok(true)
                 },
                 Err(e) => {
-                    warn!("Failed to fetch pool data from blockchain: {:?}", e);
-                    return Err(StakeError::BlockchainError(e.to_string()));
+                    let error_msg = format!("Failed to fetch pool data from blockchain: {:?}", e);
+                    error!("{}", error_msg);
+                    
+                    // Gửi cảnh báo hệ thống về lỗi kết nối blockchain
+                    self.notify_admin_blockchain_error(pool_address, &error_msg).await;
+                    
+                    // Không cập nhật timestamp để thử lại sau
+                    // Nếu đã có cache trước đó, giữ nguyên cache cũ
+                    
+                    Err(StakeError::BlockchainError(e.to_string()))
                 }
-            };
-            
-            // Chỉ cập nhật timestamp nếu lấy dữ liệu thành công
-            if pool_data {
-                let mut last_updates = self.last_cache_update.write().await;
-                last_updates.insert(pool_address, current_time);
-                info!("Cache updated for pool: {:?}", pool_address);
             }
-            
-            Ok(true)
         } else {
             trace!("Using cached data for pool: {:?}", pool_address);
             Ok(false)
         }
+    }
+    
+    /// Validate dữ liệu pool
+    async fn validate_pool_data(&self, pool_data: &StakePoolConfig) -> Result<(), String> {
+        // Kiểm tra địa chỉ
+        if pool_data.address == Address::zero() {
+            return Err("Pool address is zero address".to_string());
+        }
+        
+        // Kiểm tra các giá trị hợp lệ
+        if pool_data.rewards_per_block.is_zero() {
+            return Err("Rewards per block cannot be zero".to_string());
+        }
+        
+        if pool_data.total_validators == 0 {
+            return Err("Total validators cannot be zero".to_string());
+        }
+        
+        // Kiểm tra trạng thái hợp lệ
+        if !pool_data.active {
+            warn!("Pool {:?} is not active", pool_data.address);
+        }
+        
+        Ok(())
+    }
+
+    /// Gửi thông báo cho admin về dữ liệu không hợp lệ
+    async fn notify_admin_invalid_data(&self, pool_address: Address, field: &str, error_msg: &str) {
+        error!(
+            "ADMIN ALERT - Invalid pool data: Pool: {:?}, Field: {}, Error: {}",
+            pool_address, field, error_msg
+        );
+        
+        // TODO: Thêm cơ chế thông báo như email, webhook, monitoring system, v.v.
+        // Ví dụ:
+        // if let Some(notifier) = &self.admin_notifier {
+        //     notifier.send_alert(
+        //         "STAKE_INVALID_DATA",
+        //         &format!("Pool: {:?}, Field: {}, Error: {}", pool_address, field, error_msg)
+        //     ).await;
+        // }
+    }
+
+    /// Gửi thông báo cho admin về lỗi kết nối blockchain
+    async fn notify_admin_blockchain_error(&self, pool_address: Address, error_msg: &str) {
+        error!(
+            "ADMIN ALERT - Blockchain connection error: Pool: {:?}, Error: {}",
+            pool_address, error_msg
+        );
+        
+        // TODO: Thêm cơ chế thông báo như email, webhook, monitoring system, v.v.
+        // Ví dụ:
+        // if let Some(notifier) = &self.admin_notifier {
+        //     notifier.send_alert(
+        //         "STAKE_BLOCKCHAIN_ERROR",
+        //         &format!("Pool: {:?}, Error: {}", pool_address, error_msg)
+        //     ).await;
+        // }
     }
     
     /// Xóa cache cho pool cụ thể

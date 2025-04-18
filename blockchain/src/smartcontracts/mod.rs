@@ -6,14 +6,20 @@ pub mod arb_contract;
 pub mod eth_contract;
 pub mod polygon_contract;
 
+// Modules mới theo mô hình hub-spoke
+pub mod hub;
+pub mod evm;
+pub mod non_evm;
+pub mod dmd_token_facade;
+
 use async_trait::async_trait;
 use anyhow::Result;
 use ethers::types::{U256, H256, Address};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
-// Tái export các module và interface quan trọng
-pub use near_contract::smartcontract::DmdChain;
+// Cập nhật để sử dụng DmdChain từ common
+pub use crate::common::chain_types::DmdChain;
 pub use eth_contract::EthContractProvider;
 pub use bsc_contract::BscContractProvider;
 pub use arb_contract::ArbContractProvider;
@@ -22,6 +28,15 @@ pub use polygon_contract::PolygonContractProvider;
 
 // Tái export enum TransactionStatus từ eth_contract để đồng nhất cách xử lý
 pub use eth_contract::TransactionStatus;
+
+// Re-export Hub cho dễ sử dụng
+pub use hub::TokenHub;
+pub use hub::DmdTokenHub;
+pub use hub::TokenDistribution;
+pub use hub::MultiChainSupply;
+
+// Re-export DmdToken từ facade để tương thích với code cũ
+pub use dmd_token_facade::DmdToken;
 
 /// Interface chung cho tất cả các token
 #[async_trait]

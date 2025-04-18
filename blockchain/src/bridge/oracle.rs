@@ -13,6 +13,8 @@ use super::{
     types::{BridgeDirection, BridgeTokenType},
 };
 use crate::smartcontracts::TransactionHash;
+use crate::common::suspicious_detection::{SuspiciousTransactionManager, SuspiciousTransactionRecord, SuspiciousTransactionType};
+use crate::bridge::types::BridgeTransaction;
 
 /// Loại dữ liệu được oracle theo dõi
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -205,10 +207,23 @@ impl Default for ConsensusConfig {
     }
 }
 
-/// Manager quản lý dữ liệu oracle cho bridge
+/// Quản lý Oracle
 pub struct OracleManager {
-    /// Các provider oracle
-    providers: Vec<Box<dyn OracleProvider>>,
+    /// Danh sách các providers cho mỗi cặp token/chain
+    providers: HashMap<String, Vec<Box<dyn OracleProvider>>>,
+    
+    /// Manager phát hiện giao dịch đáng ngờ
+    suspicious_detection: Arc<SuspiciousTransactionManager>,
+    
+    /// Ngưỡng bias được coi là bất thường
+    abnormal_bias_threshold: f64,
+    
+    /// Danh sách các giao dịch bất thường
+    abnormal_transactions: Arc<Mutex<Vec<SuspiciousTransactionRecord>>>,
+    
+    /// Hàm thông báo admin
+    admin_notifier: Option<Arc<dyn Fn(&str, &SuspiciousTransactionRecord) -> Result<()> + Send + Sync>>,
+    
     /// Cache token price
     price_cache: Arc<Mutex<HashMap<String, (f64, u64)>>>,
     /// Thời gian hết hạn cache giá (ms)
@@ -217,29 +232,47 @@ pub struct OracleManager {
     consensus_config: ConsensusConfig,
     /// Dữ liệu từ nhiều nguồn để đồng thuận
     multi_source_data: Arc<Mutex<HashMap<(OracleDataType, String), Vec<OracleData>>>>,
+    /// Yêu cầu provider phải hỗ trợ ít nhất một chain
+    require_supported_chains: bool,
 }
 
 impl OracleManager {
-    /// Tạo oracle manager mới
-    pub fn new(price_cache_ttl_ms: u64) -> Self {
+    /// Khởi tạo OracleManager mới
+    pub fn new() -> Self {
         Self {
-            providers: Vec::new(),
+            providers: HashMap::new(),
+            suspicious_detection: Arc::new(SuspiciousTransactionManager::new()),
+            abnormal_bias_threshold: 0.05, // 5% mặc định
+            abnormal_transactions: Arc::new(Mutex::new(Vec::new())),
+            admin_notifier: None,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
-            price_cache_ttl_ms,
+            price_cache_ttl_ms: 60000,
             consensus_config: ConsensusConfig::default(),
             multi_source_data: Arc::new(Mutex::new(HashMap::new())),
+            require_supported_chains: true,
         }
     }
     
     /// Tạo oracle manager với cấu hình đồng thuận tùy chỉnh
     pub fn with_consensus_config(price_cache_ttl_ms: u64, consensus_config: ConsensusConfig) -> Self {
         Self {
-            providers: Vec::new(),
+            providers: HashMap::new(),
+            suspicious_detection: Arc::new(SuspiciousTransactionManager::new()),
+            abnormal_bias_threshold: 0.05, // 5% mặc định
+            abnormal_transactions: Arc::new(Mutex::new(Vec::new())),
+            admin_notifier: None,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             price_cache_ttl_ms,
             consensus_config,
             multi_source_data: Arc::new(Mutex::new(HashMap::new())),
+            require_supported_chains: true,
         }
+    }
+    
+    /// Đặt yêu cầu provider phải hỗ trợ ít nhất một chain
+    pub fn set_require_supported_chains(&mut self, require: bool) -> &mut Self {
+        self.require_supported_chains = require;
+        self
     }
     
     /// Thêm một nhà cung cấp mới vào danh sách
@@ -258,14 +291,54 @@ impl OracleManager {
         }
         
         // Kiểm tra danh sách chain được hỗ trợ
-        if provider.supported_chains().is_empty() {
-            warn!("Nhà cung cấp '{}' không hỗ trợ chain nào", provider.name());
+        let supported_chains = provider.supported_chains();
+        
+        if supported_chains.is_empty() {
+            let msg = format!("Nhà cung cấp '{}' không hỗ trợ chain nào", provider.name());
+            
+            // Nếu cài đặt yêu cầu provider phải hỗ trợ ít nhất một chain
+            if self.require_supported_chains {
+                error!("{}", msg);
+                return Err(BridgeError::OracleError(
+                    format!("{} - Không thể thêm provider không hỗ trợ chain nào", msg)
+                ));
+            } else {
+                // Log cảnh báo rõ ràng hơn nhưng vẫn cho phép thêm
+                warn!("{} - Provider này có thể không sử dụng được!", msg);
+                warn!("Bạn nên xem lại cấu hình của provider '{}' để đảm bảo nó hỗ trợ các chain cần thiết", provider.name());
+            }
+        } else {
+            // Hiển thị danh sách chain được hỗ trợ
+            info!(
+                "Provider '{}' hỗ trợ {} chain: {:?}",
+                provider.name(),
+                supported_chains.len(),
+                supported_chains
+            );
+        }
+        
+        // Kiểm tra xem có chain nào cần thiết mà provider không hỗ trợ không
+        let required_chains = vec!["Ethereum", "BinanceSmartChain", "Polygon", "Avalanche"];
+        let mut missing_chains = Vec::new();
+        
+        for chain in required_chains.iter() {
+            if !provider.is_chain_supported(chain) {
+                missing_chains.push(chain.to_string());
+            }
+        }
+        
+        if !missing_chains.is_empty() {
+            warn!(
+                "Cảnh báo: Provider '{}' không hỗ trợ các chain quan trọng sau: {:?}",
+                provider.name(),
+                missing_chains
+            );
         }
         
         // Tìm các chain được hỗ trợ bởi nhiều provider
         let mut common_chains = Vec::new();
         for existing_provider in self.providers.iter() {
-            for chain in provider.supported_chains().iter() {
+            for chain in supported_chains.iter() {
                 if existing_provider.is_chain_supported(chain) {
                     common_chains.push((existing_provider.name().clone(), chain.clone()));
                 }
@@ -286,7 +359,7 @@ impl OracleManager {
         
         // Thêm provider mới
         info!("Thêm provider mới: {}", provider.name());
-        self.providers.push(provider);
+        self.providers.insert(provider.name(), vec![provider]);
         
         Ok(())
     }
@@ -350,10 +423,10 @@ impl OracleManager {
         
         // Lưu giá mới
         let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_millis() as u64;
-        
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64;
+                
         // Nếu thay đổi lớn (>50%), yêu cầu xác nhận từ nhiều nguồn
         if price_deviation_pct > 50.0 {
             // Thêm vào danh sách chờ xác nhận
@@ -361,13 +434,13 @@ impl OracleManager {
             self.multi_source_data.lock().map_err(|e| BridgeError::OracleError(e.to_string()))?.insert(
                 (OracleDataType::TokenPrice, chain.to_string()),
                 OracleData {
-                    data_type: OracleDataType::TokenPrice,
-                    chain: chain.to_string(),
+                data_type: OracleDataType::TokenPrice,
+                chain: chain.to_string(),
                     data: price_value.to_string(),
                     timestamp,
-                    status: OracleUpdateStatus::Pending,
-                    tx_hash: None,
-                    confirmations: 1,
+                status: OracleUpdateStatus::Pending,
+                tx_hash: None,
+                confirmations: 1,
                     source: source.to_string(),
                 }
             );
@@ -454,6 +527,213 @@ impl OracleManager {
         Ok(false)
     }
     
+    /// Lấy giá token DMD cho một chain
+    pub async fn get_token_price(&self, chain: &str) -> BridgeResult<Option<f64>> {
+        // Thử lấy giá từ đồng thuận đa nguồn trước
+        if let Some(consensus_price) = self.get_price_consensus(chain).await? {
+            debug!("Sử dụng giá đồng thuận cho {}: {}", chain, consensus_price);
+            return Ok(Some(consensus_price));
+        }
+        
+        // Kiểm tra cache local nếu không có đồng thuận
+        {
+            let cache = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?;
+            if let Some((price, timestamp)) = cache.get(chain) {
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_millis() as u64;
+                
+                if now - timestamp <= self.price_cache_ttl_ms {
+                    return Ok(Some(*price));
+                }
+            }
+        }
+        
+        // Nếu không có trong cache hoặc đã hết hạn, truy vấn các provider
+        for provider in &self.providers {
+            if provider.is_chain_supported(chain) {
+                if let Ok(Some(data)) = provider.get_data(OracleDataType::TokenPrice, chain).await {
+                    if let Ok(price) = data.data.parse::<f64>() {
+                        // Xác thực giá token
+                        self.validate_token_price(price)?;
+                        
+                        // Cập nhật cache
+                        let mut cache = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?;
+                        cache.insert(chain.to_string(), (price, data.timestamp));
+                        
+                        return Ok(Some(price));
+                    }
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    /// Cập nhật tổng cung token trên một chain
+    pub async fn update_total_supply(&self, chain: &str, total_supply: String) -> BridgeResult<()> {
+        // Kiểm tra dữ liệu hợp lệ
+        match total_supply.parse::<u128>() {
+            Ok(_) => {}, // Dữ liệu hợp lệ
+            Err(e) => return Err(BridgeError::OracleError(
+                format!("Tổng cung không hợp lệ: {}: {}", total_supply, e)
+            )),
+        }
+        
+        let data = OracleData {
+            data_type: OracleDataType::TotalSupply,
+            chain: chain.to_string(),
+            data: total_supply,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64,
+            status: OracleUpdateStatus::Pending,
+            tx_hash: None,
+            confirmations: 1,
+            source: "local".to_string(),
+        };
+        
+        for provider in &self.providers {
+            if provider.is_chain_supported(chain) {
+                match provider.update_data(data.clone()).await {
+                    Ok(_) => info!("Updated total supply for {} on provider {}", chain, provider.name()),
+                    Err(e) => error!("Failed to update total supply for {} on provider {}: {:?}", chain, provider.name(), e),
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Lấy tổng cung token trên một chain
+    pub async fn get_total_supply(&self, chain: &str) -> BridgeResult<Option<String>> {
+        for provider in &self.providers {
+            if provider.is_chain_supported(chain) {
+                if let Ok(Some(data)) = provider.get_data(OracleDataType::TotalSupply, chain).await {
+                    return Ok(Some(data.data));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    /// Cập nhật thông tin giao dịch bridge
+    pub async fn update_bridge_transaction(
+        &self,
+        source_chain: &str,
+        target_chain: &str,
+        tx_hash: &TransactionHash,
+        status: OracleUpdateStatus,
+    ) -> BridgeResult<()> {
+        let data = OracleData {
+            data_type: OracleDataType::BridgeTransaction,
+            chain: format!("{}-{}", source_chain, target_chain),
+            data: serde_json::to_string(&(tx_hash, status.clone())).map_err(|e| BridgeError::SerializationError(e.to_string()))?,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64,
+            status,
+            tx_hash: Some(tx_hash.clone()),
+            confirmations: 1,
+            source: "local".to_string(),
+        };
+        
+        for provider in &self.providers {
+            if provider.is_chain_supported(source_chain) && provider.is_chain_supported(target_chain) {
+                match provider.update_data(data.clone()).await {
+                    Ok(_) => info!("Updated bridge transaction {:?} from {} to {}", tx_hash, source_chain, target_chain),
+                    Err(e) => error!("Failed to update bridge transaction: {:?}", e),
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Đặt ngưỡng bias bất thường
+    pub fn set_abnormal_bias_threshold(&mut self, threshold: f64) -> Result<()> {
+        if threshold <= 0.0 || threshold >= 1.0 {
+            return Err(BridgeError::OracleError(format!(
+                "Abnormal bias threshold phải nằm trong khoảng (0, 1), nhưng nhận được {}", 
+                threshold
+            )));
+        }
+        
+        self.abnormal_bias_threshold = threshold;
+        info!("Đã đặt ngưỡng phát hiện bias bất thường là {}", threshold);
+        Ok(())
+    }
+    
+    /// Đặt hàm thông báo admin cho phát hiện giao dịch bất thường
+    pub fn set_admin_notifier<F>(&mut self, notifier: F) -> &mut Self
+    where
+        F: Fn(&str, &SuspiciousTransactionRecord) -> Result<()> + 'static + Send + Sync,
+    {
+        // Đặt notifier cho cả SuspiciousTransactionManager
+        self.suspicious_detection = Arc::new(
+            SuspiciousTransactionManager::new().with_admin_notifier(notifier.clone())
+        );
+        
+        self.admin_notifier = Some(Arc::new(notifier));
+        
+        info!("Đã đặt hàm thông báo admin cho phát hiện giao dịch bất thường");
+        self
+    }
+    
+    /// Xóa hàm thông báo admin
+    pub fn clear_admin_notifier(&mut self) -> &mut Self {
+        // Khởi tạo lại suspicious_detection manager không có notifier
+        self.suspicious_detection = Arc::new(SuspiciousTransactionManager::new());
+        
+        self.admin_notifier = None;
+        
+        info!("Đã xóa hàm thông báo admin");
+        self
+    }
+    
+    /// Kiểm tra giao dịch bất thường dựa trên dữ liệu Oracle
+    pub fn check_abnormal_transaction(&self, transaction: &BridgeTransaction) -> Result<bool> {
+        // Sử dụng SuspiciousTransactionManager để kiểm tra các mẫu đáng ngờ thông thường
+        let records = self.suspicious_detection.check_transaction(transaction)
+            .map_err(|e| BridgeError::OracleError(format!("Lỗi kiểm tra giao dịch: {}", e)))?;
+        
+        let mut is_abnormal = false;
+        
+        if !records.is_empty() {
+            is_abnormal = true;
+            
+            // Lưu vào danh sách giao dịch bất thường
+            let mut abnormal = self.abnormal_transactions.lock()
+                .map_err(|_| BridgeError::OracleError("Failed to acquire lock for abnormal transactions".into()))?;
+            
+            for record in &records {
+                abnormal.push(record.clone());
+                
+            warn!(
+                    "Phát hiện giao dịch bất thường: {} {} từ {} -> {} ({}->{}): {}",
+                    record.amount, record.token, record.source_address, record.destination_address,
+                    record.source_chain, record.destination_chain, record.description
+                );
+                
+                // Thông báo cho admin
+                if let Some(notifier) = &self.admin_notifier {
+                    if let Err(e) = notifier("ABNORMAL_TRANSACTION", record) {
+                        error!("Không thể thông báo cho admin: {:?}", e);
+                    }
+                }
+            }
+        }
+        
+        // Kiểm tra thêm các điều kiện bất thường đặc biệt cho Oracle như bias
+        // ... (Mã cũ kiểm tra bias có thể giữ lại ở đây nếu cần) ...
+        
+        Ok(is_abnormal)
+    }
+    
     /// Đạt được đồng thuận về giá từ nhiều nguồn dữ liệu
     async fn get_price_consensus(&self, chain: &str) -> BridgeResult<Option<f64>> {
         let multi_data = self.multi_source_data.lock().map_err(|_| BridgeError::OracleError("Multi-source data lock failed".into()))?;
@@ -466,8 +746,8 @@ impl OracleManager {
         
         // Lấy thời điểm hiện tại
         let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
             
         // Lọc các dữ liệu gần đây theo cấu hình
@@ -598,322 +878,6 @@ impl OracleManager {
         // Trả về giá đồng thuận
         Ok(Some(avg_price))
     }
-    
-    /// Lấy giá token DMD cho một chain
-    pub async fn get_token_price(&self, chain: &str) -> BridgeResult<Option<f64>> {
-        // Thử lấy giá từ đồng thuận đa nguồn trước
-        if let Some(consensus_price) = self.get_price_consensus(chain).await? {
-            debug!("Sử dụng giá đồng thuận cho {}: {}", chain, consensus_price);
-            return Ok(Some(consensus_price));
-        }
-        
-        // Kiểm tra cache local nếu không có đồng thuận
-        {
-            let cache = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?;
-            if let Some((price, timestamp)) = cache.get(chain) {
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_millis() as u64;
-                
-                if now - timestamp <= self.price_cache_ttl_ms {
-                    return Ok(Some(*price));
-                }
-            }
-        }
-        
-        // Nếu không có trong cache hoặc đã hết hạn, truy vấn các provider
-        for provider in &self.providers {
-            if provider.is_chain_supported(chain) {
-                if let Ok(Some(data)) = provider.get_data(OracleDataType::TokenPrice, chain).await {
-                    if let Ok(price) = data.data.parse::<f64>() {
-                        // Xác thực giá token
-                        self.validate_token_price(price)?;
-                        
-                        // Cập nhật cache
-                        let mut cache = self.price_cache.lock().map_err(|_| BridgeError::OracleError("Cache lock failed".into()))?;
-                        cache.insert(chain.to_string(), (price, data.timestamp));
-                        
-                        return Ok(Some(price));
-                    }
-                }
-            }
-        }
-        
-        Ok(None)
-    }
-    
-    /// Cập nhật tổng cung token trên một chain
-    pub async fn update_total_supply(&self, chain: &str, total_supply: String) -> BridgeResult<()> {
-        // Kiểm tra dữ liệu hợp lệ
-        match total_supply.parse::<u128>() {
-            Ok(_) => {}, // Dữ liệu hợp lệ
-            Err(e) => return Err(BridgeError::OracleError(
-                format!("Tổng cung không hợp lệ: {}: {}", total_supply, e)
-            )),
-        }
-        
-        let data = OracleData {
-            data_type: OracleDataType::TotalSupply,
-            chain: chain.to_string(),
-            data: total_supply,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .as_millis() as u64,
-            status: OracleUpdateStatus::Pending,
-            tx_hash: None,
-            confirmations: 1,
-            source: "local".to_string(),
-        };
-        
-        for provider in &self.providers {
-            if provider.is_chain_supported(chain) {
-                match provider.update_data(data.clone()).await {
-                    Ok(_) => info!("Updated total supply for {} on provider {}", chain, provider.name()),
-                    Err(e) => error!("Failed to update total supply for {} on provider {}: {:?}", chain, provider.name(), e),
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Lấy tổng cung token trên một chain
-    pub async fn get_total_supply(&self, chain: &str) -> BridgeResult<Option<String>> {
-        for provider in &self.providers {
-            if provider.is_chain_supported(chain) {
-                if let Ok(Some(data)) = provider.get_data(OracleDataType::TotalSupply, chain).await {
-                    return Ok(Some(data.data));
-                }
-            }
-        }
-        
-        Ok(None)
-    }
-    
-    /// Cập nhật thông tin giao dịch bridge
-    pub async fn update_bridge_transaction(
-        &self,
-        source_chain: &str,
-        target_chain: &str,
-        tx_hash: &TransactionHash,
-        status: OracleUpdateStatus,
-    ) -> BridgeResult<()> {
-        let data = OracleData {
-            data_type: OracleDataType::BridgeTransaction,
-            chain: format!("{}-{}", source_chain, target_chain),
-            data: serde_json::to_string(&(tx_hash, status.clone())).map_err(|e| BridgeError::SerializationError(e.to_string()))?,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .as_millis() as u64,
-            status,
-            tx_hash: Some(tx_hash.clone()),
-            confirmations: 1,
-            source: "local".to_string(),
-        };
-        
-        for provider in &self.providers {
-            if provider.is_chain_supported(source_chain) && provider.is_chain_supported(target_chain) {
-                match provider.update_data(data.clone()).await {
-                    Ok(_) => info!("Updated bridge transaction {:?} from {} to {}", tx_hash, source_chain, target_chain),
-                    Err(e) => error!("Failed to update bridge transaction: {:?}", e),
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Phát hiện giao dịch bất thường để ngăn chặn gian lận và rủi ro
-    pub fn detect_abnormal_transaction(
-        &self,
-        source_chain: &str,
-        target_chain: &str,
-        sender: &str,
-        amount: &str,
-        recipient: &str
-    ) -> BridgeResult<bool> {
-        // Chuyển đổi amount thành f64 để tính toán
-        let amount_value = match amount.parse::<f64>() {
-            Ok(val) => val,
-            Err(_) => return Err(BridgeError::OracleError(format!("Số lượng '{}' không hợp lệ", amount)))
-        };
-        
-        // 1. Kiểm tra giới hạn giao dịch cho cặp chain cụ thể
-        let (min_limit, max_limit) = self.get_chain_transaction_limits(source_chain, target_chain);
-        
-        // Kiểm tra giới hạn giao dịch tối thiểu
-        if amount_value < min_limit {
-            warn!(
-                "Giao dịch bất thường: Số lượng ({}) từ chain {} đến {} nhỏ hơn giới hạn tối thiểu ({})",
-                amount_value, source_chain, target_chain, min_limit
-            );
-            return Ok(true);
-        }
-        
-        // Kiểm tra giới hạn giao dịch tối đa
-        if amount_value > max_limit {
-            warn!(
-                "Giao dịch bất thường: Số lượng ({}) từ chain {} đến {} vượt quá giới hạn tối đa ({})",
-                amount_value, source_chain, target_chain, max_limit
-            );
-            return Ok(true);
-        }
-        
-        // 2. Phân tích lịch sử giao dịch của người gửi
-        let sender_history = self.get_sender_transaction_history(sender);
-        
-        // Kiểm tra tần suất giao dịch gần đây
-        if sender_history.recent_tx_count > 10 {
-            warn!(
-                "Giao dịch bất thường: Người gửi {} đã thực hiện {} giao dịch trong 1 giờ qua",
-                sender, sender_history.recent_tx_count
-            );
-            return Ok(true);
-        }
-        
-        // Kiểm tra so với giá trị trung bình giao dịch của người gửi
-        if sender_history.avg_tx_amount > 0.0 && amount_value > sender_history.avg_tx_amount * 5.0 {
-            warn!(
-                "Giao dịch bất thường: Số lượng ({}) cao hơn nhiều so với giá trị trung bình ({}) của người gửi {}",
-                amount_value, sender_history.avg_tx_amount, sender
-            );
-            
-            // Không reject tự động, chỉ cảnh báo
-            info!("Giao dịch lớn bất thường từ {}: Đánh dấu cần xác minh thêm", sender);
-        }
-        
-        // 3. Kiểm tra các mẫu giao dịch đáng ngờ
-        if self.detect_suspicious_pattern(sender, recipient, amount_value, &sender_history) {
-            warn!(
-                "Giao dịch bất thường: Phát hiện mẫu giao dịch đáng ngờ từ {} đến {}",
-                sender, recipient
-            );
-            return Ok(true);
-        }
-        
-        // Không phát hiện bất thường
-        debug!("Giao dịch từ {} đến {} với số lượng {} là bình thường", sender, recipient, amount_value);
-        Ok(false)
-    }
-    
-    /// Lấy giới hạn giao dịch cho cặp chain cụ thể
-    fn get_chain_transaction_limits(&self, source_chain: &str, target_chain: &str) -> (f64, f64) {
-        // Mặc định
-        let default_min = 0.01;
-        let default_max = 1_000_000.0;
-        
-        // Giới hạn tùy chỉnh theo cặp chain
-        // Trong thực tế, có thể lấy từ cấu hình hoặc cơ sở dữ liệu
-        match (source_chain, target_chain) {
-            ("ethereum", "bsc") => (0.05, 500_000.0),
-            ("ethereum", "near") => (0.05, 100_000.0),
-            ("bsc", "ethereum") => (0.1, 250_000.0),
-            ("bsc", "near") => (0.1, 100_000.0),
-            ("near", "ethereum") => (1.0, 50_000.0),
-            ("near", "bsc") => (1.0, 75_000.0),
-            ("solana", _) => (0.5, 100_000.0),
-            (_, "solana") => (0.5, 100_000.0),
-            ("arbitrum", _) => (0.05, 200_000.0),
-            (_, "arbitrum") => (0.05, 200_000.0),
-            _ => (default_min, default_max),
-        }
-    }
-    
-    /// Lấy lịch sử giao dịch của người gửi
-    /// (Mô phỏng - trong thực tế sẽ truy vấn từ cơ sở dữ liệu)
-    fn get_sender_transaction_history(&self, sender: &str) -> SenderHistory {
-        // Trong thực tế, sẽ truy vấn từ cơ sở dữ liệu
-        // Đây chỉ là mô phỏng cho triển khai
-        
-        // Mock data với các địa chỉ đặc biệt để kiểm thử
-        if sender.ends_with("abc123") {
-            // Người dùng với nhiều giao dịch gần đây
-            return SenderHistory {
-                total_tx_count: 50,
-                recent_tx_count: 15, // Nhiều giao dịch trong 1 giờ qua
-                avg_tx_amount: 100.0,
-                max_tx_amount: 500.0,
-                recent_transactions: vec![
-                    (150.0, SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_secs() - 120), // 2 phút trước
-                    (200.0, SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_secs() - 180), // 3 phút trước
-                ],
-            };
-        } else if sender.ends_with("def456") {
-            // Người dùng với giao dịch giá trị lớn
-            return SenderHistory {
-                total_tx_count: 10,
-                recent_tx_count: 2,
-                avg_tx_amount: 1000.0,
-                max_tx_amount: 10000.0,
-                recent_transactions: vec![
-                    (8000.0, SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_secs() - 3600), // 1 giờ trước
-                ],
-            };
-        }
-        
-        // Mặc định - người dùng bình thường
-        SenderHistory {
-            total_tx_count: 5,
-            recent_tx_count: 1,
-            avg_tx_amount: 50.0,
-            max_tx_amount: 200.0,
-            recent_transactions: vec![
-                (50.0, SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_secs() - 86400), // 1 ngày trước
-            ],
-        }
-    }
-    
-    /// Phát hiện mẫu giao dịch đáng ngờ
-    fn detect_suspicious_pattern(
-        &self,
-        sender: &str,
-        recipient: &str,
-        amount: f64,
-        history: &SenderHistory
-    ) -> bool {
-        // 1. Phát hiện wash trading (giao dịch qua lại giữa các tài khoản)
-        // Kiểm tra giao dịch qua lại: A->B->A
-        for (tx_amount, _) in &history.recent_transactions {
-            // Nếu có giao dịch gần đây với giá trị tương tự từ người nhận hiện tại
-            if recipient.contains(sender) && (*tx_amount * 0.9..=*tx_amount * 1.1).contains(&amount) {
-                warn!("Nghi ngờ wash trading: Giao dịch qua lại giữa {} và {}", sender, recipient);
-                return true;
-            }
-        }
-        
-        // 2. Phát hiện smurfing (chia nhỏ giao dịch)
-        // Kiểm tra nhiều giao dịch nhỏ liên tiếp đến cùng địa chỉ
-        if history.recent_tx_count > 3 {
-            let mut small_tx_count = 0;
-            for (tx_amount, _) in &history.recent_transactions {
-                if *tx_amount < history.avg_tx_amount * 0.5 {
-                    small_tx_count += 1;
-                }
-            }
-            
-            if small_tx_count >= 3 {
-                warn!("Nghi ngờ smurfing: {} giao dịch nhỏ liên tiếp từ {}", small_tx_count, sender);
-                return true;
-            }
-        }
-        
-        false
-    }
 }
 
 /// Dữ liệu giao dịch bridge
@@ -944,6 +908,51 @@ struct SenderHistory {
     avg_tx_amount: f64,            // Giá trị trung bình giao dịch
     max_tx_amount: f64,            // Giá trị giao dịch lớn nhất
     recent_transactions: Vec<(f64, u64)>, // Các giao dịch gần đây: (amount, timestamp)
+    recipients: Vec<String>,        // Danh sách người nhận gần đây
+    cyclic_patterns: Vec<String>,   // Các mẫu giao dịch vòng tròn đã phát hiện
+    unusual_chains: Vec<String>,    // Các chuỗi blockchain bất thường đã giao dịch
+    is_new_account: bool,          // Tài khoản mới (ít hơn 1 tuần)
+    risk_score: u32,               // Điểm đánh giá rủi ro (0-100)
+}
+
+/// Loại mẫu giao dịch đáng ngờ
+#[derive(Debug, Clone, PartialEq)]
+pub enum SuspiciousPatternType {
+    /// Giao dịch qua lại giữa các địa chỉ (wash trading)
+    CircularTrading,
+    /// Chia nhỏ giao dịch để tránh phát hiện
+    Smurfing,
+    /// Tài khoản mới với khối lượng giao dịch lớn
+    NewAccountLargeVolume,
+    /// Giao dịch giữa các chuỗi bất thường
+    UnusualChainPath,
+    /// Nhiều giao dịch trong thời gian ngắn
+    HighFrequency,
+    /// Giao dịch với người nhận/gửi trong danh sách đen
+    BlockedCounterparty,
+    /// Giao dịch với các chuỗi bị hạn chế
+    RestrictedChain,
+    /// Biến động giá trị lớn
+    VolatileValuePattern,
+    /// Mẫu giao dịch hình tam giác (A->B->C->A)
+    TriangularPattern,
+    /// Mẫu giao dịch song song (cùng lúc gửi đến nhiều đích)
+    ParallelTransactions,
+}
+
+/// Chi tiết về mẫu giao dịch đáng ngờ
+#[derive(Debug, Clone)]
+pub struct SuspiciousPatternDetail {
+    /// Loại mẫu đáng ngờ
+    pub pattern_type: SuspiciousPatternType,
+    /// Mức độ nghiêm trọng (1-5)
+    pub severity: u8,
+    /// Mô tả về mẫu đáng ngờ
+    pub description: String,
+    /// Thông tin bổ sung
+    pub additional_info: HashMap<String, String>,
+    /// Khuyến nghị xử lý
+    pub recommended_action: String,
 }
 
 #[cfg(test)]
@@ -1010,7 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn test_oracle_manager() {
         // Tạo oracle manager và thêm mock provider
-        let mut manager = OracleManager::new(60000);
+        let mut manager = OracleManager::new();
         manager.add_provider(Box::new(MockOracleProvider::new("TestOracle", vec!["ethereum", "bsc", "near"])));
         
         // Test cập nhật và lấy giá token

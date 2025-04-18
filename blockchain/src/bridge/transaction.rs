@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ethers::types::U256;
 use std::str::FromStr;
+use log::{warn, debug};
 
 /// Trạng thái của giao dịch bridge
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,14 +84,59 @@ mod u256_string_serializer {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
+        if s.is_empty() {
+            warn!("Chuỗi rỗng được chuyển vào deserialize U256, trả về giá trị 0");
+            return Ok(U256::zero());
+        }
+
         let s = s.trim();
+        if s.is_empty() {
+            warn!("Chuỗi chỉ chứa khoảng trắng được chuyển vào deserialize U256, trả về giá trị 0");
+            return Ok(U256::zero());
+        }
         
-        // Hỗ trợ cả định dạng 0x-prefixed và không prefixed
-        if s.starts_with("0x") {
-            U256::from_str(s).map_err(serde::de::Error::custom)
+        // Xử lý chuỗi theo định dạng
+        if s.starts_with("0x") || s.starts_with("0X") {
+            // Định dạng hex
+            match U256::from_str(s) {
+                Ok(value) => {
+                    debug!("Chuyển đổi thành công chuỗi hex '{}' thành U256", s);
+                    Ok(value)
+                },
+                Err(e) => {
+                    // Xử lý khi chuỗi hex không hợp lệ
+                    warn!("Lỗi chuyển đổi chuỗi hex '{}' thành U256: {}", s, e);
+                    Err(serde::de::Error::custom(format!(
+                        "Chuỗi hex không hợp lệ: '{}', lỗi: {}", s, e
+                    )))
+                }
+            }
         } else {
             // Thử chuyển đổi như một số thập phân
-            U256::from_dec_str(s).map_err(serde::de::Error::custom)
+            match U256::from_dec_str(s) {
+                Ok(value) => {
+                    debug!("Chuyển đổi thành công chuỗi thập phân '{}' thành U256", s);
+                    Ok(value)
+                },
+                Err(e) => {
+                    // Thử xử lý trường hợp số có dấu phẩy hoặc dấu chấm phân cách
+                    if s.contains(',') || s.contains('.') {
+                        let cleaned = s.replace([',', '.'], "");
+                        match U256::from_dec_str(&cleaned) {
+                            Ok(value) => {
+                                debug!("Chuyển đổi thành công chuỗi có dấu phân cách '{}' thành U256", s);
+                                return Ok(value);
+                            },
+                            Err(_) => {} // Bỏ qua và tiếp tục với lỗi ban đầu
+                        }
+                    }
+                    
+                    warn!("Lỗi chuyển đổi chuỗi thập phân '{}' thành U256: {}", s, e);
+                    Err(serde::de::Error::custom(format!(
+                        "Chuỗi thập phân không hợp lệ: '{}', lỗi: {}", s, e
+                    )))
+                }
+            }
         }
     }
 }
@@ -301,6 +347,33 @@ pub trait BridgeTransactionRepository {
     /// Lấy danh sách giao dịch theo trạng thái
     fn find_by_status(&self, status: &BridgeTransactionStatus) -> Result<Vec<BridgeTransaction>, String>;
     
+    /// Lấy danh sách giao dịch thất bại được cập nhật trước thời điểm chỉ định
+    fn find_failed_transactions_before(&self, timestamp: u64) -> Result<Vec<BridgeTransaction>, String> {
+        // Triển khai mặc định - các lớp con nên ghi đè phương thức này để tối ưu hiệu suất
+        let all_txs = self.get_all_transactions()?;
+        let mut failed_txs = Vec::new();
+        
+        for tx in all_txs {
+            if let BridgeTransactionStatus::Failed(_) = tx.status {
+                if tx.updated_at < timestamp {
+                    failed_txs.push(tx);
+                }
+            }
+        }
+        
+        Ok(failed_txs)
+    }
+    
+    /// Lấy danh sách giao dịch đã hoàn thành được cập nhật trước thời điểm chỉ định
+    fn find_completed_transactions_before(&self, timestamp: u64) -> Result<Vec<BridgeTransaction>, String> {
+        // Triển khai mặc định - các lớp con nên ghi đè phương thức này để tối ưu hiệu suất
+        let completed_txs = self.find_by_status(&BridgeTransactionStatus::Completed)?;
+        
+        Ok(completed_txs.into_iter()
+            .filter(|tx| tx.updated_at < timestamp)
+            .collect())
+    }
+    
     /// Xóa giao dịch theo ID
     fn delete_by_id(&self, id: &str) -> Result<bool, String>;
     
@@ -309,35 +382,24 @@ pub trait BridgeTransactionRepository {
     
     /// Xóa các giao dịch đã hoàn thành hoặc thất bại cũ hơn thời gian cung cấp
     fn cleanup_completed_transactions(&self, older_than_timestamp: u64) -> Result<usize, String> {
-        let completed_txs = self.find_by_status(&BridgeTransactionStatus::Completed)?;
-        let mut failed_txs = vec![];
+        // Tìm kiếm các giao dịch đã hoàn thành trước timestamp
+        let old_completed_txs = self.find_completed_transactions_before(older_than_timestamp)?;
         
-        // Tìm các giao dịch thất bại
-        // Phải dùng cách tiếp cận này vì Failed có thêm thông tin lỗi
-        let all_statuses = self.get_all_transactions()?;
-        for tx in all_statuses {
-            if let BridgeTransactionStatus::Failed(_) = tx.status {
-                if tx.updated_at < older_than_timestamp {
-                    failed_txs.push(tx);
-                }
+        // Tìm kiếm các giao dịch thất bại trước timestamp
+        let failed_txs = self.find_failed_transactions_before(older_than_timestamp)?;
+        
+        // Kết hợp danh sách giao dịch cần xóa
+        let mut deleted_count = 0;
+        
+        // Xóa các giao dịch hoàn thành
+        for tx in old_completed_txs {
+            if self.delete_by_id(&tx.id)? {
+                deleted_count += 1;
             }
         }
         
-        // Lọc các giao dịch đã hoàn thành cũ hơn timestamp
-        let old_completed_txs: Vec<_> = completed_txs
-            .into_iter()
-            .filter(|tx| tx.updated_at < older_than_timestamp)
-            .collect();
-        
-        // Kết hợp các danh sách
-        let old_txs: Vec<_> = old_completed_txs
-            .into_iter()
-            .chain(failed_txs.into_iter())
-            .collect();
-        
-        // Xóa các giao dịch
-        let mut deleted_count = 0;
-        for tx in old_txs {
+        // Xóa các giao dịch thất bại
+        for tx in failed_txs {
             if self.delete_by_id(&tx.id)? {
                 deleted_count += 1;
             }
@@ -356,5 +418,91 @@ pub trait BridgeTransactionRepository {
     fn count_transactions(&self) -> Result<usize, String> {
         let all_txs = self.get_all_transactions()?;
         Ok(all_txs.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Serialize, Deserialize};
+    use ethers::types::U256;
+
+    // Định nghĩa struct đơn giản để test
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct TestStruct {
+        #[serde(with = "u256_string_serializer")]
+        value: U256,
+    }
+
+    #[test]
+    fn test_serialize_deserialize_valid() {
+        // Tạo một struct test với giá trị U256
+        let test_struct = TestStruct {
+            value: U256::from(12345u64),
+        };
+
+        // Serialize
+        let serialized = serde_json::to_string(&test_struct).unwrap();
+        assert_eq!(serialized, r#"{"value":"0x3039"}"#);
+
+        // Deserialize
+        let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, test_struct);
+    }
+
+    #[test]
+    fn test_deserialize_decimal_string() {
+        // Test với chuỗi thập phân
+        let json = r#"{"value":"12345"}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::from(12345u64));
+    }
+
+    #[test]
+    fn test_deserialize_hex_string() {
+        // Test với chuỗi hex
+        let json = r#"{"value":"0x3039"}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::from(12345u64));
+    }
+
+    #[test]
+    fn test_deserialize_empty_string() {
+        // Test với chuỗi rỗng
+        let json = r#"{"value":""}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::zero());
+    }
+
+    #[test]
+    fn test_deserialize_whitespace_string() {
+        // Test với chuỗi chỉ có khoảng trắng
+        let json = r#"{"value":"  "}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::zero());
+    }
+
+    #[test]
+    fn test_deserialize_formatted_number() {
+        // Test với số có dấu phân cách
+        let json = r#"{"value":"1,234,567"}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::from(1234567u64));
+
+        let json = r#"{"value":"1.234.567"}"#;
+        let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.value, U256::from(1234567u64));
+    }
+
+    #[test]
+    fn test_deserialize_invalid_format() {
+        // Test với chuỗi không hợp lệ
+        let json = r#"{"value":"abc"}"#;
+        let result = serde_json::from_str::<TestStruct>(json);
+        assert!(result.is_err());
+
+        let json = r#"{"value":"0xG"}"#;
+        let result = serde_json::from_str::<TestStruct>(json);
+        assert!(result.is_err());
     }
 } 

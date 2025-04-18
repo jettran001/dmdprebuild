@@ -176,15 +176,17 @@ pub static BRIDGE_ORACLE: once_cell::sync::Lazy<tokio::sync::RwLock<Option<std::
     once_cell::sync::Lazy::new(|| tokio::sync::RwLock::new(None));
 
 /// Thiết lập cấu hình mặc định cho Bridge
-pub fn set_bridge_config(config: BridgeDefaultConfig) {
-    let mut bridge_config = BRIDGE_CONFIG.write().unwrap();
-    *bridge_config = config;
+pub fn set_bridge_config(config: BridgeDefaultConfig) -> Result<(), String> {
+    BRIDGE_CONFIG.write()
+        .map_err(|e| format!("Không thể lấy quyền ghi cho cấu hình bridge: {}", e))
+        .map(|mut guard| *guard = config)
 }
 
 /// Lấy cấu hình mặc định cho Bridge
-pub fn get_bridge_config() -> BridgeDefaultConfig {
-    let bridge_config = BRIDGE_CONFIG.read().unwrap();
-    bridge_config.clone()
+pub fn get_bridge_config() -> Result<BridgeDefaultConfig, String> {
+    BRIDGE_CONFIG.read()
+        .map_err(|e| format!("Không thể lấy quyền đọc cho cấu hình bridge: {}", e))
+        .map(|guard| guard.clone())
 }
 
 /// Thiết lập Oracle cho Bridge
@@ -201,10 +203,14 @@ pub async fn get_bridge_oracle() -> Option<std::sync::Arc<crate::oracle::DmdOrac
 
 /// Khởi tạo và trả về repository lưu trữ giao dịch bridge
 pub fn create_transaction_repository() -> anyhow::Result<Arc<dyn BridgeTransactionRepository + Send + Sync>> {
-    let config = get_bridge_config();
-    let repo = JsonBridgeTransactionRepository::new(&config.transaction_storage_path)?
-        .start_async_worker();
-    Ok(Arc::new(repo))
+    match get_bridge_config() {
+        Ok(config) => {
+            let repo = JsonBridgeTransactionRepository::new(&config.transaction_storage_path)?
+                .start_async_worker();
+            Ok(Arc::new(repo))
+        },
+        Err(e) => Err(anyhow::anyhow!("Không thể lấy cấu hình bridge: {}", e))
+    }
 }
 
 /// Xác thực dữ liệu bridge trước khi xử lý

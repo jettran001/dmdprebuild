@@ -9,95 +9,98 @@
     ├── manifest.rs                 -> Tài liệu tham chiếu module path [liên quan: tất cả các module, BẮT BUỘC đọc đầu tiên]
     ├── lib.rs                      -> Khai báo module cấp cao, re-export [liên quan: tất cả module khác, điểm import cho crate]
     ├── tests.rs                    -> Unit tests cho toàn bộ module blockchain [liên quan: tất cả module]
-    ├── src/smartcontracts/         -> Tương tác với các smart contract
-    │   ├── mod.rs                  -> Khai báo submodule smartcontracts, định nghĩa TokenInterface và BridgeInterface [liên quan: tất cả file trong smartcontracts]
-    │   ├── dmd_token.rs            -> Tương tác với DMD Token (ERC-1155), quản lý tier và token allowlist [liên quan: stake, exchange]
-    │   ├── dmd_bsc_bridge.rs       -> Bridge DMD token giữa BSC và các chain khác [liên quan: bsc_contract, near_contract]
-    │   ├── bsc_contract/           -> Tương tác với DMD token trên BSC (ERC-1155)
-    │   │   ├── mod.rs              -> Cung cấp BscContractProvider và thông tin về contract DMD token [liên quan: crate::smartcontracts::TokenInterface]
-    │   │   ├── contract.rs         -> Mã nguồn của contract DMD token trên BSC [liên quan: mod.rs]
-    │   │   ├── dmd_bsc_contract.sol -> Solidity code cho DMD token trên BSC [liên quan: contract.rs]
-    │   │   ├── abi.json            -> ABI của contract DMD token trên BSC [liên quan: mod.rs]
-    │   ├── near_contract/          -> Tương tác với DMD token trên NEAR
-    │   │   ├── mod.rs              -> Cung cấp NearContractProvider [liên quan: crate::smartcontracts::TokenInterface]
-    │   │   ├── smartcontract.rs    -> Cung cấp kiểu DmdChain và các hàm liên quan [liên quan: mod.rs]
-    │   ├── solana_contract/        -> Tương tác với DMD token trên Solana
-    │   │   ├── mod.rs              -> Cung cấp SolanaContractProvider [liên quan: crate::smartcontracts::TokenInterface]
-    │   │   ├── smartcontract.rs    -> Định nghĩa các hàm tương tác với Solana [liên quan: mod.rs]
-    │   ├── eth_contract/           -> Tương tác với DMD token trên Ethereum
-    │   │   ├── mod.rs              -> Cung cấp EthContractProvider và thông tin về contract DMD token [liên quan: crate::smartcontracts::TokenInterface]
-    │   │   ├── dmd_eth_contract.sol -> Solidity code cho DMD token trên Ethereum [liên quan: mod.rs]
-    │   ├── arb_contract/           -> Tương tác với DMD token trên Arbitrum
-    │   │   ├── mod.rs              -> Cung cấp ArbContractProvider và thông tin về contract DMD token [liên quan: crate::smartcontracts::TokenInterface]
-    │   │   ├── DiamondTokenARB.sol -> Solidity code cho DMD token trên Arbitrum [liên quan: mod.rs]
-    │   │   ├── external/           -> Thư viện và dependencies bên ngoài cho Arbitrum [liên quan: DiamondTokenARB.sol]
-    │   ├── base_contract/          -> Tương tác với DMD token trên Base L2
-    │   │   ├── DiamondTokenETH.sol -> Solidity code cho DMD token trên Base [liên quan: mod.rs]
-    │   │   ├── dmd_eth_contract.sol -> Solidity code cho DMD token trên Ethereum [liên quan: DiamondTokenETH.sol]
-    │   │   ├── dmd_base_contract.sol -> Solidity code cho DMD token trên Base [liên quan: mod.rs]
-    │   │   ├── external/           -> Thư viện và dependencies bên ngoài cho Base [liên quan: dmd_base_contract.sol]
-    │   ├── polygon_contract/       -> Tương tác với DMD token trên Polygon
-    │   │   ├── mod.rs              -> Cung cấp PolygonContractProvider [liên quan: crate::smartcontracts::TokenInterface]
-    ├── src/stake/                  -> Logic staking
-    │   ├── mod.rs                  -> Khai báo submodule stake, re-export StakeManager và FarmManager [liên quan: tất cả file trong stake]
-    │   ├── stake_logic.rs          -> Logic staking chính, định nghĩa StakeManager [liên quan: smartcontracts, dmd_token]
-    │   ├── farm_logic.rs           -> Logic farm liên quan đến staking, định nghĩa FarmManager [liên quan: farm, smartcontracts]
-    │   ├── constants.rs            -> Các hằng số cho staking [liên quan: stake_logic, farm_logic]
-    │   ├── validator.rs            -> Validator cho proof-of-stake [liên quan: smartcontracts] (đang triển khai)
-    │   ├── rewards.rs              -> Tính toán và phân phối phần thưởng [liên quan: smartcontracts, dmd_token] (đang triển khai)
-    │   ├── routers.rs              -> Routers cho các pool staking [liên quan: smartcontracts] (đang triển khai)
-    ├── src/exchange/               -> Tương tác với DEX
-    │   ├── pairs.rs                -> Quản lý token pairs và liquidity pools [liên quan: smartcontracts] (đang triển khai)
-    ├── src/farm/                   -> Yield farming
-    │   ├── mod.rs                  -> Khai báo submodule farm [liên quan: tất cả file trong farm]
-    │   ├── farm_logic.rs           -> Logic farming chính [liên quan: stake, smartcontracts]
-    │   ├── factorry.rs             -> Factory cho các farm mới [liên quan: smartcontracts, exchange] (đang triển khai)
-    ├── src/bridge/                 -> Bridge giữa các blockchain
-    │   ├── mod.rs                  -> Khai báo submodule bridge, re-export các thành phần chính [liên quan: tất cả file trong bridge]
-    │   ├── bridge.rs               -> Thực hiện chính cho bridge [liên quan: smartcontracts, oracle]
-    │   ├── manager.rs              -> Quản lý các giao dịch bridge [liên quan: transaction, oracle]
-    │   ├── near_hub.rs             -> Logic bridge với NEAR làm trung tâm [liên quan: bridge, evm_spoke]
-    │   ├── evm_spoke.rs            -> Logic bridge từ/đến các EVM chains [liên quan: bridge, near_hub]
-    │   ├── transaction.rs          -> Quản lý thông tin giao dịch bridge [liên quan: types, error]
-    │   ├── types.rs                -> Các kiểu dữ liệu chung cho module bridge [liên quan: error]
-    │   ├── error.rs                -> Custom error types cho module bridge [liên quan: types]
-    │   ├── traits.rs               -> Các trait chính định nghĩa giao diện bridge [liên quan: types, error]
-    │   ├── oracle.rs               -> Theo dõi và đồng bộ dữ liệu giữa các blockchain [liên quan: oracle module]
-    ├── src/oracle/                 -> Oracle cho lấy dữ liệu từ các nguồn bên ngoài
-    │   ├── mod.rs                  -> Khai báo submodule oracle, re-export các thành phần chính [liên quan: tất cả file trong oracle]
-    │   ├── onchain.rs              -> Oracle lấy dữ liệu từ onchain [liên quan: types, error]
-    │   ├── chainlink.rs            -> Tích hợp với Chainlink [liên quan: provider, types]
-    │   ├── provider.rs             -> Provider interface cho oracle [liên quan: types]
-    │   ├── types.rs                -> Các kiểu dữ liệu cho oracle [liên quan: error]
-    │   ├── error.rs                -> Custom error types cho module oracle [liên quan: types]
-
-    Mối liên kết:
-    - smartcontracts là trung tâm tương tác với blockchain
-    - smartcontracts/mod.rs định nghĩa các trait chính: TokenInterface và BridgeInterface
-    - smartcontracts/dmd_token.rs quản lý tương tác với DMD token (ERC-1155), hệ thống tier và danh sách token được phép
-    - smartcontracts/dmd_bsc_bridge.rs quản lý bridge DMD token giữa BSC và các blockchain khác
-    - smartcontracts/bsc_contract/ quản lý tương tác với DMD token trên BSC
-    - smartcontracts/near_contract/ quản lý tương tác với DMD token trên NEAR
-    - smartcontracts/solana_contract/ quản lý tương tác với DMD token trên Solana
-    - smartcontracts/eth_contract/ quản lý tương tác với DMD token trên Ethereum
-    - smartcontracts/arb_contract/ quản lý tương tác với DMD token trên Arbitrum
-    - smartcontracts/base_contract/ quản lý tương tác với DMD token trên Base L2
-    - smartcontracts/polygon_contract/ quản lý tương tác với DMD token trên Polygon
-    - stake/mod.rs là cổng vào cho tất cả chức năng staking
-    - stake/stake_logic.rs chứa logic staking chính
-    - stake/farm_logic.rs chứa logic farm liên quan đến staking
-    - stake/constants.rs chứa các hằng số cho staking
-    - farm/mod.rs là cổng vào cho tất cả chức năng farming
-    - farm/farm_logic.rs chứa logic farming chính
-    - exchange/pairs.rs quản lý token pairs và quản lý liquidity pools (đang triển khai)
-    - bridge/mod.rs là cổng vào cho tất cả chức năng bridge giữa các blockchain
-    - bridge/ triển khai mô hình hub and spoke với NEAR Protocol làm trung tâm
-    - oracle/mod.rs cung cấp các dịch vụ oracle để lấy dữ liệu từ các nguồn bên ngoài
-    - oracle/chainlink.rs tích hợp với Chainlink để lấy dữ liệu đáng tin cậy
-    - blockchain tương tác với wallet để thực hiện giao dịch
-    - blockchain cung cấp API cho snipebot để thực hiện giao dịch
-    - smartcontracts định nghĩa các trait quan trọng như TokenInterface và BridgeInterface
+    ├── src/
+    │   ├── lib.rs                  -> Entry point cho crate library
+    │   ├── bridge/
+    │   │   ├── mod.rs
+    │   │   ├── bridge.rs
+    │   │   ├── sol_hub.rs
+    │   │   ├── oracle.rs
+    │   │   ├── evm_spoke.rs
+    │   │   ├── config.rs
+    │   │   ├── persistent_repository.rs
+    │   │   ├── transaction.rs
+    │   │   ├── near_hub.rs
+    │   │   ├── manager.rs
+    │   │   ├── error.rs
+    │   │   ├── traits.rs
+    │   │   ├── types.rs
+    │   ├── smartcontracts/
+    │   │   ├── mod.rs
+    │   │   ├── dmd_token.rs
+    │   │   ├── dmd_bsc_bridge.rs
+    │   │   ├── arb_contract/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── DiamondTokenARB.sol
+    │   │   │   ├── external/
+    │   │   ├── base_contract/
+    │   │   │   ├── DiamondTokenETH.sol
+    │   │   │   ├── dmd_eth_contract.sol
+    │   │   │   ├── dmd_base_contract.sol
+    │   │   │   ├── external/
+    │   │   ├── eth_contract/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── dmd_eth_contract.sol
+    │   │   ├── polygon_contract/
+    │   │   │   ├── mod.rs
+    │   │   ├── solana_contract/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── smartcontract.rs
+    │   │   ├── bsc_contract/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── dmd_bsc_contract.sol
+    │   │   ├── near_contract/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── smartcontract.rs
+    │   │   ├── stake/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── stake_logic.rs
+    │   │   │   ├── farm_logic.rs
+    │   │   │   ├── constants.rs
+    │   │   │   ├── validator.rs
+    │   │   │   ├── rewards.rs
+    │   │   │   ├── routers.rs
+    │   │   ├── farm/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── farm_logic.rs
+    │   │   │   ├── factorry.rs
+    │   │   ├── exchange/
+    │   │   │   ├── pairs.rs
+    │   │   ├── oracle/
+    │   │   │   ├── mod.rs
+    │   │   │   ├── onchain.rs
+    │   │   │   ├── chainlink.rs
+    │   │   │   ├── provider.rs
+    │   │   │   ├── types.rs
+    │   │   │   ├── error.rs
 */
+
+// Mối liên kết:
+// - smartcontracts là trung tâm tương tác với blockchain
+// - smartcontracts/mod.rs định nghĩa các trait chính: TokenInterface và BridgeInterface
+// - smartcontracts/dmd_token.rs quản lý tương tác với DMD token (ERC-1155), hệ thống tier và danh sách token được phép
+// - smartcontracts/dmd_bsc_bridge.rs quản lý bridge DMD token giữa BSC và các blockchain khác
+// - smartcontracts/bsc_contract/ quản lý tương tác với DMD token trên BSC
+// - smartcontracts/near_contract/ quản lý tương tác với DMD token trên NEAR
+// - smartcontracts/solana_contract/ quản lý tương tác với DMD token trên Solana
+// - smartcontracts/eth_contract/ quản lý tương tác với DMD token trên Ethereum
+// - smartcontracts/arb_contract/ quản lý tương tác với DMD token trên Arbitrum
+// - smartcontracts/base_contract/ quản lý tương tác với DMD token trên Base L2
+// - smartcontracts/polygon_contract/ quản lý tương tác với DMD token trên Polygon
+// - stake/mod.rs là cổng vào cho tất cả chức năng staking
+// - stake/stake_logic.rs chứa logic staking chính
+// - stake/farm_logic.rs chứa logic farm liên quan đến staking
+// - stake/constants.rs chứa các hằng số cho staking
+// - farm/mod.rs là cổng vào cho tất cả chức năng farming
+// - farm/farm_logic.rs chứa logic farming chính
+// - exchange/pairs.rs quản lý token pairs và quản lý liquidity pools (đang triển khai)
+// - bridge/mod.rs là cổng vào cho tất cả chức năng bridge giữa các blockchain
+// - bridge/ triển khai mô hình hub and spoke với NEAR Protocol làm trung tâm
+// - oracle/mod.rs cung cấp các dịch vụ oracle để lấy dữ liệu từ các nguồn bên ngoài
+// - oracle/chainlink.rs tích hợp với Chainlink để lấy dữ liệu đáng tin cậy
+// - blockchain tương tác với wallet để thực hiện giao dịch
+// - blockchain cung cấp API cho snipebot để thực hiện giao dịch
+// - smartcontracts định nghĩa các trait quan trọng như TokenInterface và BridgeInterface
 
 // Module structure của dự án blockchain
 pub mod smartcontracts;  // Tương tác với các smart contract
@@ -447,3 +450,449 @@ pub mod oracle;          // Oracle cho lấy dữ liệu từ các nguồn bên 
  *    - Diamond manager sử dụng bridge::BridgeManager để theo dõi và quản lý bridge transaction
  *    - Diamond manager sử dụng bridge::oracle để phát hiện và ngăn chặn giao dịch bridge bất thường
  */
+
+/// Mô tả các thành phần của hệ thống - Được hợp nhất từ blockchain/src/manifest.rs
+pub mod components {
+    /// Module Bridge - Quản lý chuyển token giữa các blockchain khác nhau
+    pub mod bridge {
+        /// Phiên bản hiện tại của module bridge
+        pub const VERSION: &str = "0.3.5"; // Tăng phiên bản từ 0.3.4 lên 0.3.5
+        
+        /// Mô tả: Bridge module cho phép chuyển token giữa các blockchain khác nhau,
+        /// sử dụng mô hình hub-and-spoke với NEAR Protocol làm hub trung tâm.
+        /// Module được thiết kế để hỗ trợ nhiều blockchain khác nhau thông qua các adapter.
+        /// 
+        /// Cập nhật mới:
+        /// - Thêm persistent storage cho Bridge Transactions để đảm bảo dữ liệu không bị mất sau khi ứng dụng khởi động lại
+        /// - Cải thiện bảo mật cho private keys trong BridgeConfig với mã hóa và quản lý khóa an toàn hơn
+        /// - Thêm validation cho tất cả các giao dịch bridge trước khi thực hiện
+        /// - Thêm kiểm tra số dư trước khi gửi tokens để tránh giao dịch thất bại
+        /// - Tối ưu hóa phương thức find_adapter để tăng hiệu suất
+        /// - Cải thiện quản lý bộ nhớ cache với các cơ chế dọn dẹp tự động
+        /// - Refactor adapter code để dễ dàng mở rộng và hỗ trợ thêm blockchain mới
+        /// - Thêm cơ chế cross-validation giữa các giao dịch bridge
+        /// - Cải thiện logging để dễ dàng debug hơn
+        /// - Thêm concurrency control để tránh race condition
+        /// - Thêm is_valid_address để xác thực định dạng địa chỉ ví cho các blockchain
+        /// - Cải thiện hệ thống kiểm soát và phát hiện giao dịch đáng ngờ
+        /// - Tăng cường xác thực trong phương thức complete_transaction và fail_transaction
+        /// - Thêm các chức năng theo dõi và xử lý giao dịch bất thường
+        pub struct BridgeManifest;
+        
+        /// Các tính năng chính của Bridge module
+        pub mod features {
+            /// Chuyển token từ EVM chain đến NEAR (hub)
+            pub const BRIDGE_EVM_TO_NEAR: &str = "bridge_evm_to_near";
+            
+            /// Chuyển token từ NEAR (hub) đến EVM chain
+            pub const BRIDGE_NEAR_TO_EVM: &str = "bridge_near_to_evm";
+            
+            /// Xem trạng thái giao dịch bridge
+            pub const CHECK_TRANSACTION_STATUS: &str = "check_transaction_status";
+            
+            /// Quản lý bridge adapters 
+            pub const MANAGE_ADAPTERS: &str = "manage_adapters";
+            
+            /// Lưu trữ liên tục cho bridge transactions
+            pub const PERSISTENT_STORAGE: &str = "persistent_storage";
+            
+            /// Validation xác thực chéo giữa các giao dịch
+            pub const CROSS_TRANSACTION_VALIDATION: &str = "cross_transaction_validation";
+            
+            /// Phát hiện giao dịch bất thường
+            pub const ANOMALY_DETECTION: &str = "anomaly_detection";
+            
+            /// Quản lý bộ nhớ cache tự động
+            pub const AUTO_CACHE_MANAGEMENT: &str = "auto_cache_management";
+            
+            /// Kiểm tra số dư trước khi thực hiện giao dịch
+            pub const BALANCE_VERIFICATION: &str = "balance_verification";
+            
+            /// Xác thực định dạng địa chỉ ví
+            pub const ADDRESS_VALIDATION: &str = "address_validation";
+            
+            /// Hệ thống phát hiện và xử lý giao dịch đáng ngờ
+            pub const SUSPICIOUS_TRANSACTION_DETECTION: &str = "suspicious_transaction_detection";
+            
+            /// Xử lý batch cho các giao dịch bridge
+            pub const BATCH_TRANSACTION_PROCESSING: &str = "batch_transaction_processing";
+            
+            /// Giới hạn giao dịch đồng thời
+            pub const CONCURRENT_TRANSACTION_LIMITING: &str = "concurrent_transaction_limiting";
+        }
+    }
+    
+    /// Module Oracle - Cung cấp dữ liệu giá và thông tin từ các nguồn tin cậy
+    pub mod oracle {
+        /// Phiên bản hiện tại của module oracle
+        pub const VERSION: &str = "0.2.8"; // Tăng phiên bản từ 0.2.7 lên 0.2.8
+        
+        /// Mô tả: Oracle module cung cấp dữ liệu giá token và thông tin
+        /// từ nhiều nguồn đáng tin cậy. Module này đảm bảo tính chính xác 
+        /// của dữ liệu thông qua cơ chế đồng thuận và phát hiện dữ liệu bất thường.
+        /// 
+        /// Cập nhật mới:
+        /// - Thêm cơ chế đồng thuận (consensus) cho multiple data providers
+        /// - Triển khai phương thức xử lý ngoại lệ (outlier) cho dữ liệu giá
+        /// - Thêm validation cho token price để đảm bảo giá không âm, không quá lớn hoặc quá nhỏ
+        /// - Thêm phương thức detect_abnormal_transaction để nhận diện giao dịch bất thường
+        /// - Thêm cross-validation logic cho các bridge transaction
+        /// - Thêm các phương thức kiểm tra transaction validity, sender reputation, và suspicious relationships
+        /// - Cải thiện các phương thức phát hiện mối quan hệ đáng ngờ giữa người gửi và người nhận
+        /// - Thêm các phương thức kiểm tra giới hạn giao dịch theo cặp blockchain
+        /// - Cải thiện kiểm tra validation cho các giao dịch xuyên chuỗi
+        /// - Tăng cường tính bảo mật với việc phát hiện các mô hình giao dịch đáng ngờ (smurfing)
+        pub struct OracleManifest;
+        
+        /// Các tính năng chính của Oracle module
+        pub mod features {
+            /// Cập nhật giá token từ nhiều nguồn
+            pub const UPDATE_TOKEN_PRICE: &str = "update_token_price";
+            
+            /// Kiểm tra giá consensus dựa trên nhiều nguồn dữ liệu
+            pub const VERIFY_PRICE_CONSENSUS: &str = "verify_price_consensus";
+            
+            /// Quản lý các provider dữ liệu
+            pub const MANAGE_PROVIDERS: &str = "manage_providers";
+            
+            /// Phát hiện và xử lý dữ liệu ngoại lệ
+            pub const HANDLE_OUTLIERS: &str = "handle_outliers";
+            
+            /// Phát hiện giao dịch bất thường
+            pub const DETECT_ABNORMAL_TRANSACTION: &str = "detect_abnormal_transaction";
+            
+            /// Xác thực chéo các giao dịch bridge
+            pub const CROSS_VALIDATE_TRANSACTIONS: &str = "cross_validate_transactions";
+            
+            /// Kiểm tra uy tín của người gửi
+            pub const CHECK_SENDER_REPUTATION: &str = "check_sender_reputation";
+            
+            /// Phát hiện các mối quan hệ đáng ngờ
+            pub const DETECT_SUSPICIOUS_RELATIONSHIPS: &str = "detect_suspicious_relationships";
+            
+            /// Kiểm tra giới hạn giao dịch theo cặp blockchain
+            pub const CHECK_CHAIN_TRANSACTION_LIMITS: &str = "check_chain_transaction_limits";
+            
+            /// Phân tích lịch sử giao dịch của người gửi
+            pub const ANALYZE_SENDER_HISTORY: &str = "analyze_sender_history";
+            
+            /// Theo dõi và phát hiện giao dịch đáng ngờ (smurfing)
+            pub const DETECT_SUSPICIOUS_PATTERN: &str = "detect_suspicious_pattern";
+            
+            /// Kiểm tra hợp lệ của token price
+            pub const VALIDATE_TOKEN_PRICE: &str = "validate_token_price";
+        }
+    }
+    
+    /// Module Wallet - Quản lý ví và tương tác với blockchain
+    pub mod wallet {
+        /// Version hiện tại của Wallet module
+        pub const VERSION: &str = "0.4.1";
+        
+        /// Mô tả: Wallet module quản lý tất cả các tương tác với blockchain,
+        /// bao gồm tạo và quản lý ví, ký giao dịch, và tương tác với smart contracts.
+        /// Module này kết nối chặt chẽ với bridge để hỗ trợ giao dịch xuyên chuỗi an toàn.
+        pub struct WalletManifest;
+        
+        /// Các tính năng chính của Wallet module
+        pub mod features {
+            /// Tạo ví mới
+            pub const CREATE_WALLET: &str = "create_wallet";
+            
+            /// Khôi phục ví từ seed phrase
+            pub const RESTORE_WALLET: &str = "restore_wallet";
+            
+            /// Ký giao dịch
+            pub const SIGN_TRANSACTION: &str = "sign_transaction";
+            
+            /// Tương tác với smart contracts
+            pub const INTERACT_WITH_CONTRACTS: &str = "interact_with_contracts";
+            
+            /// Lấy số dư ví
+            pub const GET_BALANCE: &str = "get_balance";
+            
+            /// Lấy lịch sử giao dịch
+            pub const GET_TRANSACTION_HISTORY: &str = "get_transaction_history";
+        }
+    }
+    
+    /// Module Exchange - Quản lý hoạt động trao đổi token
+    pub mod exchange {
+        /// Version hiện tại của Exchange module
+        pub const VERSION: &str = "0.3.0";
+        
+        /// Mô tả: Exchange module quản lý tất cả các hoạt động trao đổi token,
+        /// bao gồm swap, cung cấp thanh khoản, và quản lý các cặp token.
+        pub struct ExchangeManifest;
+        
+        /// Các tính năng chính của Exchange module
+        pub mod features {
+            /// Swap token
+            pub const SWAP_TOKENS: &str = "swap_tokens";
+            
+            /// Cung cấp thanh khoản
+            pub const PROVIDE_LIQUIDITY: &str = "provide_liquidity";
+            
+            /// Rút thanh khoản
+            pub const WITHDRAW_LIQUIDITY: &str = "withdraw_liquidity";
+            
+            /// Tính giá token
+            pub const CALCULATE_PRICE: &str = "calculate_price";
+            
+            /// Tính slippage
+            pub const CALCULATE_SLIPPAGE: &str = "calculate_slippage";
+            
+            /// Quản lý cặp token
+            pub const MANAGE_PAIRS: &str = "manage_pairs";
+        }
+    }
+    
+    /// Module SmartContracts - Tương tác với các smart contract và ví
+    pub mod smart_contracts {
+        /// Version hiện tại của SmartContracts module
+        pub const VERSION: &str = "0.2.5";
+        
+        /// Mô tả: SmartContracts module quản lý tất cả các tương tác với smart contracts và các thao tác liên quan đến ví (wallet): tạo ví từ private key, ký giao dịch, kiểm tra số dư, chuyển token, bridge token... Các module farm/stake cần tích hợp qua tầng service hoặc gọi provider từ smartcontracts khi cần thao tác với ví. 
+        /// 
+        /// **Chỉ mục liên kết:**
+        /// - Các hàm thao tác ví (tạo ví, ký giao dịch, kiểm tra số dư, chuyển token, bridge...) được định nghĩa tại smartcontracts và liên kết trực tiếp đến wallet/src. Khi cần tra cứu hoặc mở rộng các thao tác ví, hãy tham khảo wallet/src để đảm bảo đồng bộ và bảo mật.
+        pub struct SmartContractsManifest;
+        
+        /// Các tính năng chính của SmartContracts module
+        pub mod features {
+            /// Deploy smart contract
+            pub const DEPLOY_CONTRACT: &str = "deploy_contract";
+            
+            /// Gọi phương thức contract
+            pub const CALL_CONTRACT_METHOD: &str = "call_contract_method";
+            
+            /// Quản lý trạng thái contract
+            pub const MANAGE_CONTRACT_STATE: &str = "manage_contract_state";
+            
+            /// Tương tác với TokenInterface
+            pub const INTERACT_WITH_TOKEN_INTERFACE: &str = "interact_with_token_interface";
+            
+            /// Tương tác với BridgeInterface
+            pub const INTERACT_WITH_BRIDGE_INTERFACE: &str = "interact_with_bridge_interface";
+        }
+    }
+    
+    // Thêm module common
+    pub mod common {
+        /// Phiên bản hiện tại của module common
+        pub const VERSION: &str = "0.2.0";
+        
+        /// Thông tin về module common
+        pub const DESCRIPTION: &str = "Module chứa các thành phần dùng chung cho các module khác";
+        
+        /// Manifest cho common module
+        pub struct CommonManifest;
+        
+        /// Tính năng của common module
+        pub mod features {
+            /// Phát hiện giao dịch đáng ngờ
+            pub const SUSPICIOUS_DETECTION: &str = "suspicious_detection";
+            
+            /// Quản lý cache
+            pub const CACHE_MANAGEMENT: &str = "cache_management";
+            
+            /// Bridge utilities
+            pub const BRIDGE_UTILS: &str = "bridge_utils";
+            
+            /// Farm base
+            pub const FARM_BASE: &str = "farm_base";
+            
+            /// Chain types
+            pub const CHAIN_TYPES: &str = "chain_types";
+        }
+    }
+}
+
+/// Mô tả các dịch vụ của hệ thống
+pub mod services {
+    /// Dịch vụ Transaction - Quản lý giao dịch blockchain
+    pub mod transaction {
+        /// Version hiện tại của Transaction service
+        pub const VERSION: &str = "0.2.0";
+        
+        /// Mô tả: Transaction service quản lý tất cả các giao dịch blockchain,
+        /// bao gồm tạo, ký, và gửi giao dịch đến các blockchain khác nhau.
+        pub struct TransactionManifest;
+    }
+    
+    /// Dịch vụ Security - Quản lý bảo mật
+    pub mod security {
+        /// Version hiện tại của Security service
+        pub const VERSION: &str = "0.3.1";
+        
+        /// Mô tả: Security service quản lý bảo mật cho hệ thống,
+        /// bao gồm mã hóa, xác thực, và phát hiện gian lận.
+        pub struct SecurityManifest;
+    }
+    
+    /// Dịch vụ Persistence - Quản lý dữ liệu
+    pub mod persistence {
+        /// Version hiện tại của Persistence service
+        pub const VERSION: &str = "0.2.5";
+        
+        /// Mô tả: Persistence service quản lý dữ liệu cho hệ thống,
+        /// bao gồm lưu trữ, truy vấn, và đồng bộ hóa dữ liệu.
+        pub struct PersistenceManifest;
+    }
+    
+    /// Dịch vụ Analytics - Phân tích dữ liệu
+    pub mod analytics {
+        /// Version hiện tại của Analytics service
+        pub const VERSION: &str = "0.1.5";
+        
+        /// Mô tả: Analytics service phân tích dữ liệu của hệ thống,
+        /// bao gồm phân tích giao dịch, phát hiện gian lận, và báo cáo.
+        pub struct AnalyticsManifest;
+    }
+}
+
+/// Version chung cho toàn bộ blockchain module
+pub const VERSION: &str = "0.5.3"; // Tăng phiên bản từ 0.5.2 lên 0.5.3
+
+/// Mô tả các dependencies của blockchain module
+pub mod dependencies {
+    /// Thư viện mã hóa
+    pub const CRYPTO: &str = "ring:0.16.20";
+    
+    /// Thư viện serialization/deserialization
+    pub const SERDE: &str = "serde:1.0.152";
+    
+    /// Thư viện tương tác với Web3
+    pub const WEB3: &str = "web3:0.18.0";
+    
+    /// SDK cho NEAR Protocol
+    pub const NEAR_SDK: &str = "near-sdk:4.1.1";
+    
+    /// Thư viện logging
+    pub const LOG: &str = "log:0.4.17";
+    
+    /// Thư viện async runtime
+    pub const TOKIO: &str = "tokio:1.25.0";
+    
+    /// Thư viện error handling
+    pub const ANYHOW: &str = "anyhow:1.0.69";
+    
+    /// Thư viện JSON
+    pub const SERDE_JSON: &str = "serde_json:1.0.93";
+}
+
+/// Mô tả các tính năng được lên kế hoạch
+pub mod planned_features {
+    /// Tính năng dự kiến cho Bridge module
+    pub mod bridge {
+        /// Hỗ trợ blockchain mới
+        pub const NEW_BLOCKCHAIN_SUPPORT: &str = "planned:0.6.0";
+        
+        /// Hệ thống giám sát
+        pub const MONITORING_SYSTEM: &str = "planned:0.6.0";
+        
+        /// Hỗ trợ tiêu chuẩn token mới
+        pub const NEW_TOKEN_STANDARDS: &str = "planned:0.7.0";
+        
+        /// Cải thiện phát hiện giao dịch đáng ngờ
+        pub const ENHANCED_SUSPICIOUS_DETECTION: &str = "completed:0.3.5";
+    }
+    
+    /// Tính năng dự kiến cho Oracle module
+    pub mod oracle {
+        /// Dashboard cho Oracle
+        pub const ORACLE_DASHBOARD: &str = "planned:0.6.0";
+        
+        /// Backup và recovery
+        pub const BACKUP_RECOVERY: &str = "planned:0.6.0";
+        
+        /// Dự đoán giá
+        pub const PRICE_PREDICTION: &str = "planned:0.7.0";
+        
+        /// Cải thiện phát hiện giao dịch bất thường
+        pub const ENHANCED_ABNORMAL_DETECTION: &str = "completed:0.2.8";
+    }
+    
+    /// Tính năng dự kiến cho Exchange module
+    pub mod exchange {
+        /// Lưu trữ persistent cho cặp token
+        pub const PERSISTENT_PAIRS: &str = "planned:0.5.0";
+        
+        /// Cải thiện phí giao dịch
+        pub const IMPROVED_FEES: &str = "planned:0.5.0";
+        
+        /// Bảo vệ khỏi thao túng giá
+        pub const PRICE_MANIPULATION_PROTECTION: &str = "planned:0.6.0";
+    }
+    
+    pub mod common {
+        /// Module phát hiện giao dịch đáng ngờ chung
+        pub const SUSPICIOUS_DETECTION_MODULE: &str = "completed:0.2.0";
+        
+        /// Cải thiện cache management
+        pub const ENHANCED_CACHE_MANAGEMENT: &str = "planned:0.2.5";
+    }
+}
+
+/// Mô tả các API của blockchain module
+pub mod apis {
+    /// API cho Bridge module
+    pub mod bridge_api {
+        /// Version hiện tại của Bridge API
+        pub const VERSION: &str = "0.3.0";
+        
+        /// Path cơ sở cho Bridge API
+        pub const BASE_PATH: &str = "/api/v1/bridge";
+        
+        /// Các endpoint của Bridge API
+        pub mod endpoints {
+            /// Tạo giao dịch bridge
+            pub const CREATE_TRANSACTION: &str = "/transaction";
+            
+            /// Lấy trạng thái giao dịch bridge
+            pub const GET_TRANSACTION_STATUS: &str = "/transaction/:id/status";
+            
+            /// Liệt kê các giao dịch bridge
+            pub const LIST_TRANSACTIONS: &str = "/transactions";
+            
+            /// Lấy danh sách adapter được hỗ trợ
+            pub const GET_SUPPORTED_ADAPTERS: &str = "/adapters";
+            
+            /// Xác thực giao dịch bridge
+            pub const VALIDATE_TRANSACTION: &str = "/transaction/validate";
+            
+            /// Kiểm tra giao dịch bất thường
+            pub const CHECK_ABNORMAL_TRANSACTION: &str = "/transaction/check-abnormal";
+        }
+    }
+    
+    /// API cho Oracle module
+    pub mod oracle_api {
+        /// Version hiện tại của Oracle API
+        pub const VERSION: &str = "0.2.0";
+        
+        /// Path cơ sở cho Oracle API
+        pub const BASE_PATH: &str = "/api/v1/oracle";
+        
+        /// Các endpoint của Oracle API
+        pub mod endpoints {
+            /// Lấy giá token
+            pub const GET_TOKEN_PRICE: &str = "/price/:token";
+            
+            /// Liệt kê các provider dữ liệu
+            pub const LIST_PROVIDERS: &str = "/providers";
+            
+            /// Thêm provider dữ liệu
+            pub const ADD_PROVIDER: &str = "/provider";
+            
+            /// Xác thực giá token
+            pub const VERIFY_PRICE: &str = "/price/verify";
+            
+            /// Phát hiện giao dịch bất thường
+            pub const DETECT_ABNORMAL: &str = "/transaction/detect-abnormal";
+            
+            /// Xác thực chéo giao dịch
+            pub const CROSS_VALIDATE: &str = "/transaction/cross-validate";
+        }
+    }
+}

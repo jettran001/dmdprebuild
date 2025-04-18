@@ -9,11 +9,63 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use thiserror::Error;
 
 /// Số lần tối đa cho phép truy cập khóa riêng tư
 const MAX_KEY_ACCESS_COUNT: usize = 5;
 /// Thời gian hết hạn của khóa riêng tư sau khi load (tính bằng giây)
 const KEY_EXPIRY_SECONDS: u64 = 300; // 5 phút
+
+/// Các mã lỗi liên quan đến khóa
+#[derive(Debug, thiserror::Error)]
+pub enum KeyError {
+    /// Vault chưa được khởi tạo
+    #[error("Key vault chưa được khởi tạo")]
+    VaultNotInitialized,
+    
+    /// Không tìm thấy khóa
+    #[error("Không tìm thấy khóa: {0}")]
+    KeyNotFound(String),
+    
+    /// Khóa đã hết hạn
+    #[error("Khóa đã hết hạn: {0}")]
+    KeyExpired(String),
+    
+    /// Vượt quá số lần truy cập khóa
+    #[error("Vượt quá số lần truy cập khóa: {0}")]
+    MaxAccessExceeded(String),
+    
+    /// Lỗi khi truy cập vault
+    #[error("Lỗi truy cập vault: {0}")]
+    VaultAccessError(String),
+    
+    /// Ghi đè khóa
+    #[error("Khóa đã tồn tại: {0}")]
+    KeyAlreadyExists(String),
+    
+    /// Lỗi xóa khóa
+    #[error("Lỗi xóa khóa: {0}")]
+    KeyDeleteError(String),
+    
+    /// Lỗi khác
+    #[error("Lỗi khác: {0}")]
+    Other(String),
+}
+
+impl From<String> for KeyError {
+    fn from(msg: String) -> Self {
+        KeyError::Other(msg)
+    }
+}
+
+impl From<&str> for KeyError {
+    fn from(msg: &str) -> Self {
+        KeyError::Other(msg.to_string())
+    }
+}
+
+// Định nghĩa Result cho các hàm liên quan đến khóa
+pub type KeyResult<T> = Result<T, KeyError>;
 
 /// Cấu trúc bọc khóa riêng tư với khả năng tự động xóa khi bị hủy
 /// và tính năng theo dõi sử dụng
@@ -22,6 +74,8 @@ const KEY_EXPIRY_SECONDS: u64 = 300; // 5 phút
 pub struct SecurePrivateKey {
     /// Khóa riêng tư được mã hóa
     key: SecretString,
+    /// ID của khóa để theo dõi
+    key_id: String,
     /// Số lần đã truy cập khóa
     access_count: usize,
     /// Thời điểm khóa sẽ hết hạn
@@ -30,9 +84,10 @@ pub struct SecurePrivateKey {
 
 impl SecurePrivateKey {
     /// Tạo một khóa riêng tư bảo mật mới
-    pub fn new(key: &str) -> Self {
+    pub fn new(key_id: &str, key: &str) -> Self {
         Self {
             key: SecretString::new(key.to_string()),
+            key_id: key_id.to_string(),
             access_count: 0,
             expiry: Instant::now() + Duration::from_secs(KEY_EXPIRY_SECONDS),
         }
@@ -44,24 +99,25 @@ impl SecurePrivateKey {
     /// Hàm này làm lộ khóa riêng tư và chỉ nên được sử dụng trong
     /// ngữ cảnh ký giao dịch. Hàm này theo dõi số lần sử dụng và
     /// thời gian hết hạn để tăng bảo mật.
-    pub fn expose_for_signing(&mut self) -> Result<&str, String> {
+    pub fn expose_for_signing(&mut self) -> KeyResult<&str> {
         // Kiểm tra số lần truy cập
         if self.access_count >= MAX_KEY_ACCESS_COUNT {
-            return Err("Vượt quá số lần truy cập khóa cho phép".to_string());
+            return Err(KeyError::MaxAccessExceeded(self.key_id.clone()));
         }
         
         // Kiểm tra thời gian hết hạn
         if Instant::now() > self.expiry {
             // Xóa khóa và trả về lỗi
             self.zeroize();
-            return Err("Khóa đã hết hạn".to_string());
+            return Err(KeyError::KeyExpired(self.key_id.clone()));
         }
         
         // Tăng số lần truy cập
         self.access_count += 1;
         
         // Ghi log về việc sử dụng khóa (không bao gồm khóa!)
-        warn!("Khóa riêng tư đã được truy cập {} / {} lần", self.access_count, MAX_KEY_ACCESS_COUNT);
+        warn!("Khóa riêng tư '{}' đã được truy cập {} / {} lần", 
+            self.key_id, self.access_count, MAX_KEY_ACCESS_COUNT);
         
         Ok(self.key.expose_secret())
     }
@@ -74,13 +130,33 @@ impl SecurePrivateKey {
     /// Gia hạn khóa, thiết lập lại thời gian hết hạn
     pub fn renew(&mut self) {
         self.expiry = Instant::now() + Duration::from_secs(KEY_EXPIRY_SECONDS);
-        debug!("Khóa riêng tư đã được gia hạn thêm {} giây", KEY_EXPIRY_SECONDS);
+        debug!("Khóa riêng tư '{}' đã được gia hạn thêm {} giây", 
+            self.key_id, KEY_EXPIRY_SECONDS);
     }
     
     /// Xóa khóa khỏi bộ nhớ ngay lập tức
     pub fn clear(&mut self) {
         self.zeroize();
-        debug!("Khóa riêng tư đã được xóa khỏi bộ nhớ");
+        debug!("Khóa riêng tư '{}' đã được xóa khỏi bộ nhớ", self.key_id);
+    }
+    
+    /// Lấy ID của khóa
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    
+    /// Lấy số lần đã truy cập khóa
+    pub fn access_count(&self) -> usize {
+        self.access_count
+    }
+    
+    /// Lấy thời gian còn lại trước khi khóa hết hạn (giây)
+    pub fn remaining_time(&self) -> i64 {
+        let now = Instant::now();
+        if now > self.expiry {
+            return 0;
+        }
+        (self.expiry - now).as_secs() as i64
     }
 }
 
@@ -88,22 +164,59 @@ impl SecurePrivateKey {
 #[async_trait::async_trait]
 pub trait KeyVault: Send + Sync + 'static {
     /// Lấy khóa từ vault
-    async fn get_key(&self, key_id: &str) -> Result<SecurePrivateKey, String>;
+    async fn get_key(&self, key_id: &str) -> KeyResult<SecurePrivateKey>;
     
     /// Lưu khóa vào vault
-    async fn store_key(&self, key_id: &str, key: &str) -> Result<(), String>;
+    async fn store_key(&self, key_id: &str, key: &str) -> KeyResult<()>;
     
     /// Xóa khóa khỏi vault
-    async fn delete_key(&self, key_id: &str) -> Result<(), String>;
+    async fn delete_key(&self, key_id: &str) -> KeyResult<()>;
     
     /// Kiểm tra xem khóa có tồn tại trong vault không
-    async fn has_key(&self, key_id: &str) -> Result<bool, String>;
+    async fn has_key(&self, key_id: &str) -> KeyResult<bool>;
+    
+    /// Liệt kê tất cả ID khóa (không bao gồm khóa)
+    async fn list_keys(&self) -> KeyResult<Vec<String>>;
+    
+    /// Gia hạn khóa
+    async fn renew_key(&self, key_id: &str) -> KeyResult<()>;
+    
+    /// Lấy thông tin trạng thái của vault
+    async fn status(&self) -> KeyResult<KeyVaultStatus>;
+}
+
+/// Thông tin trạng thái của vault
+#[derive(Debug, Clone)]
+pub struct KeyVaultStatus {
+    /// Số lượng khóa trong vault
+    pub key_count: usize,
+    /// Vault có hoạt động bình thường không
+    pub is_healthy: bool,
+    /// Thông tin lỗi nếu có
+    pub error_info: Option<String>,
 }
 
 /// Cài đặt mặc định cho vault
 pub struct MemoryKeyVault {
     /// Lưu trữ khóa trong bộ nhớ (trong thực tế nên sử dụng giải pháp an toàn hơn)
     keys: RwLock<HashMap<String, SecurePrivateKey>>,
+    /// Thời điểm khởi tạo vault
+    created_at: Instant,
+    /// Lịch sử truy cập khóa
+    access_log: RwLock<Vec<KeyAccessLog>>,
+}
+
+/// Thông tin log truy cập khóa
+#[derive(Debug, Clone)]
+struct KeyAccessLog {
+    /// ID của khóa
+    key_id: String,
+    /// Loại thao tác (get, store, delete)
+    operation: String,
+    /// Thời điểm
+    timestamp: Instant,
+    /// Kết quả (success/error)
+    result: String,
 }
 
 impl MemoryKeyVault {
@@ -111,36 +224,146 @@ impl MemoryKeyVault {
     pub fn new() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
+            created_at: Instant::now(),
+            access_log: RwLock::new(Vec::new()),
         }
+    }
+    
+    /// Ghi log truy cập khóa
+    async fn log_access(&self, key_id: &str, operation: &str, result: &str) {
+        let log_entry = KeyAccessLog {
+            key_id: key_id.to_string(),
+            operation: operation.to_string(),
+            timestamp: Instant::now(),
+            result: result.to_string(),
+        };
+        
+        let mut log = self.access_log.write().await;
+        log.push(log_entry);
+        
+        // Chỉ giữ tối đa 1000 log gần nhất
+        if log.len() > 1000 {
+            log.remove(0);
+        }
+    }
+    
+    /// Dọn dẹp các khóa hết hạn
+    async fn cleanup_expired_keys(&self) -> usize {
+        let mut keys = self.keys.write().await;
+        let before = keys.len();
+        
+        // Lọc ra các khóa còn hiệu lực
+        keys.retain(|_, key| key.is_valid());
+        
+        let removed = before - keys.len();
+        if removed > 0 {
+            debug!("Đã dọn dẹp {} khóa hết hạn", removed);
+        }
+        
+        removed
     }
 }
 
 #[async_trait::async_trait]
 impl KeyVault for MemoryKeyVault {
-    async fn get_key(&self, key_id: &str) -> Result<SecurePrivateKey, String> {
+    async fn get_key(&self, key_id: &str) -> KeyResult<SecurePrivateKey> {
+        // Dọn dẹp các khóa hết hạn
+        self.cleanup_expired_keys().await;
+        
         let keys = self.keys.read().await;
-        keys.get(key_id)
-            .cloned()
-            .ok_or_else(|| format!("Không tìm thấy khóa {}", key_id))
+        match keys.get(key_id) {
+            Some(key) => {
+                // Kiểm tra tính hợp lệ
+                if !key.is_valid() {
+                    self.log_access(key_id, "get", "error:expired").await;
+                    return Err(KeyError::KeyExpired(key_id.to_string()));
+                }
+                
+                self.log_access(key_id, "get", "success").await;
+                Ok(key.clone())
+            },
+            None => {
+                self.log_access(key_id, "get", "error:not_found").await;
+                Err(KeyError::KeyNotFound(key_id.to_string()))
+            }
+        }
     }
     
-    async fn store_key(&self, key_id: &str, key: &str) -> Result<(), String> {
+    async fn store_key(&self, key_id: &str, key: &str) -> KeyResult<()> {
+        // Dọn dẹp các khóa hết hạn
+        self.cleanup_expired_keys().await;
+        
         let mut keys = self.keys.write().await;
-        keys.insert(key_id.to_string(), SecurePrivateKey::new(key));
+        
+        // Kiểm tra xem khóa đã tồn tại chưa
+        if keys.contains_key(key_id) {
+            self.log_access(key_id, "store", "error:already_exists").await;
+            return Err(KeyError::KeyAlreadyExists(key_id.to_string()));
+        }
+        
+        keys.insert(key_id.to_string(), SecurePrivateKey::new(key_id, key));
+        self.log_access(key_id, "store", "success").await;
         Ok(())
     }
     
-    async fn delete_key(&self, key_id: &str) -> Result<(), String> {
+    async fn delete_key(&self, key_id: &str) -> KeyResult<()> {
         let mut keys = self.keys.write().await;
         if keys.remove(key_id).is_none() {
-            return Err(format!("Không tìm thấy khóa {}", key_id));
+            self.log_access(key_id, "delete", "error:not_found").await;
+            return Err(KeyError::KeyNotFound(key_id.to_string()));
         }
+        
+        self.log_access(key_id, "delete", "success").await;
         Ok(())
     }
     
-    async fn has_key(&self, key_id: &str) -> Result<bool, String> {
+    async fn has_key(&self, key_id: &str) -> KeyResult<bool> {
+        // Dọn dẹp các khóa hết hạn
+        self.cleanup_expired_keys().await;
+        
         let keys = self.keys.read().await;
-        Ok(keys.contains_key(key_id))
+        let has_key = keys.contains_key(key_id);
+        
+        self.log_access(key_id, "check", if has_key { "exists" } else { "not_found" }).await;
+        Ok(has_key)
+    }
+    
+    async fn list_keys(&self) -> KeyResult<Vec<String>> {
+        // Dọn dẹp các khóa hết hạn
+        self.cleanup_expired_keys().await;
+        
+        let keys = self.keys.read().await;
+        let key_ids: Vec<String> = keys.keys().cloned().collect();
+        
+        self.log_access("all", "list", &format!("count:{}", key_ids.len())).await;
+        Ok(key_ids)
+    }
+    
+    async fn renew_key(&self, key_id: &str) -> KeyResult<()> {
+        let mut keys = self.keys.write().await;
+        
+        if let Some(key) = keys.get_mut(key_id) {
+            key.renew();
+            self.log_access(key_id, "renew", "success").await;
+            Ok(())
+        } else {
+            self.log_access(key_id, "renew", "error:not_found").await;
+            Err(KeyError::KeyNotFound(key_id.to_string()))
+        }
+    }
+    
+    async fn status(&self) -> KeyResult<KeyVaultStatus> {
+        // Dọn dẹp các khóa hết hạn
+        self.cleanup_expired_keys().await;
+        
+        let keys = self.keys.read().await;
+        let status = KeyVaultStatus {
+            key_count: keys.len(),
+            is_healthy: true,
+            error_info: None,
+        };
+        
+        Ok(status)
     }
 }
 
@@ -214,17 +437,63 @@ impl BridgeConfig {
     }
     
     /// Sử dụng khóa riêng tư để ký giao dịch, với các biện pháp bảo mật
-    pub async fn get_operator_key_for_signing(&self) -> Result<SecurePrivateKey, String> {
+    pub async fn get_operator_key_for_signing(&self) -> KeyResult<SecurePrivateKey> {
         // Kiểm tra xem có ID của khóa không
         let key_id = self.operator_key_id.as_ref()
-            .ok_or_else(|| "Không có ID khóa riêng tư".to_string())?;
+            .ok_or_else(|| KeyError::KeyNotFound("Không có ID khóa riêng tư".to_string()))?;
             
         // Kiểm tra xem có vault không
         let vault = self.key_vault.as_ref()
-            .ok_or_else(|| "Chưa thiết lập key vault".to_string())?;
+            .ok_or_else(|| KeyError::VaultNotInitialized)?;
+        
+        // Kiểm tra trạng thái vault trước khi truy cập khóa
+        match vault.status().await {
+            Ok(status) if !status.is_healthy => {
+                let error_msg = status.error_info.unwrap_or_else(|| "Unknown error".to_string());
+                error!("Key vault không khả dụng: {}", error_msg);
+                return Err(KeyError::VaultAccessError(error_msg));
+            },
+            Err(e) => {
+                error!("Không thể kiểm tra trạng thái vault: {}", e);
+                return Err(KeyError::VaultAccessError(e.to_string()));
+            },
+            _ => {} // Vault hoạt động bình thường
+        }
             
         // Lấy khóa từ vault
-        vault.get_key(key_id).await
+        match vault.get_key(key_id).await {
+            Ok(key) => {
+                if !key.is_valid() {
+                    error!("Khóa hết hạn hoặc vượt quá số lần truy cập: {}", key_id);
+                    return Err(KeyError::KeyExpired(key_id.clone()));
+                }
+                Ok(key)
+            },
+            Err(e) => {
+                error!("Không thể lấy khóa {}: {}", key_id, e);
+                Err(e)
+            }
+        }
+    }
+    
+    /// Cố gắng gia hạn khóa hiện tại của operator
+    pub async fn try_renew_operator_key(&self) -> KeyResult<bool> {
+        if let Some(key_id) = &self.operator_key_id {
+            if let Some(vault) = &self.key_vault {
+                match vault.renew_key(key_id).await {
+                    Ok(_) => {
+                        info!("Đã gia hạn khóa operator thành công: {}", key_id);
+                        return Ok(true);
+                    },
+                    Err(e) => {
+                        warn!("Không thể gia hạn khóa operator {}: {}", key_id, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        
+        Ok(false) // Không có khóa để gia hạn
     }
     
     /// Thiết lập ID khóa riêng tư mới
@@ -233,32 +502,70 @@ impl BridgeConfig {
     }
     
     /// Lưu khóa riêng tư vào vault
-    pub async fn store_operator_key(&self, private_key: &str) -> Result<String, String> {
+    pub async fn store_operator_key(&self, private_key: &str) -> KeyResult<String> {
         // Kiểm tra xem có vault không
         let vault = self.key_vault.as_ref()
-            .ok_or_else(|| "Chưa thiết lập key vault".to_string())?;
+            .ok_or_else(|| KeyError::VaultNotInitialized)?;
+            
+        // Kiểm tra trạng thái vault trước khi lưu khóa
+        match vault.status().await {
+            Ok(status) if !status.is_healthy => {
+                let error_msg = status.error_info.unwrap_or_else(|| "Unknown error".to_string());
+                error!("Key vault không khả dụng: {}", error_msg);
+                return Err(KeyError::VaultAccessError(error_msg));
+            },
+            Err(e) => {
+                error!("Không thể kiểm tra trạng thái vault: {}", e);
+                return Err(KeyError::VaultAccessError(e.to_string()));
+            },
+            _ => {} // Vault hoạt động bình thường
+        }
             
         // Tạo ID mới cho khóa
         let key_id = format!("operator_key_{}", uuid::Uuid::new_v4());
         
         // Lưu khóa vào vault
-        vault.store_key(&key_id, private_key).await?;
-        
-        Ok(key_id)
+        match vault.store_key(&key_id, private_key).await {
+            Ok(_) => {
+                info!("Đã lưu khóa operator mới: {}", key_id);
+                Ok(key_id)
+            },
+            Err(e) => {
+                error!("Không thể lưu khóa operator: {}", e);
+                Err(e)
+            }
+        }
     }
     
     /// Xóa khóa riêng tư khỏi vault
-    pub async fn remove_operator_key(&self) -> Result<(), String> {
+    pub async fn remove_operator_key(&self) -> KeyResult<()> {
         // Kiểm tra xem có ID của khóa không
         let key_id = self.operator_key_id.as_ref()
-            .ok_or_else(|| "Không có ID khóa riêng tư".to_string())?;
+            .ok_or_else(|| KeyError::KeyNotFound("Không có ID khóa riêng tư".to_string()))?;
             
         // Kiểm tra xem có vault không
         let vault = self.key_vault.as_ref()
-            .ok_or_else(|| "Chưa thiết lập key vault".to_string())?;
+            .ok_or_else(|| KeyError::VaultNotInitialized)?;
             
         // Xóa khóa từ vault
-        vault.delete_key(key_id).await
+        match vault.delete_key(key_id).await {
+            Ok(_) => {
+                info!("Đã xóa khóa operator: {}", key_id);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Không thể xóa khóa operator {}: {}", key_id, e);
+                Err(e)
+            }
+        }
+    }
+    
+    /// Kiểm tra trạng thái vault
+    pub async fn check_vault_status(&self) -> KeyResult<KeyVaultStatus> {
+        let vault = self.key_vault.as_ref()
+            .ok_or_else(|| KeyError::VaultNotInitialized)?;
+            
+        vault.status().await
     }
 }
 

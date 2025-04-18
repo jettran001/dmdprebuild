@@ -36,6 +36,10 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use log::{debug, info, warn, error};
 use anyhow;
+use crate::common::farm_base::{
+    FarmError, FarmResult, FarmStatus, BaseFarmPool, FarmingOperations,
+    BlockchainSyncOperations, get_current_timestamp, calculate_rewards, validate_apr
+};
 
 /// Lỗi có thể xảy ra trong quá trình farming
 #[derive(Error, Debug)]
@@ -128,93 +132,41 @@ where
 pub type FarmResult<T> = Result<T, FarmError>;
 
 /// Cấu hình của farming pool
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FarmPoolConfig {
-    /// ID của pool
     pub id: String,
-    
-    /// Tên của pair (VD: DMD-USDT)
-    pub pair_name: String,
-    
-    /// APR hiện tại (dưới dạng phần trăm)
+    pub token_a: String,
+    pub token_b: String,
     pub apr: f64,
-    
-    /// Tổng liquidity trong pool
     pub total_liquidity: f64,
-    
-    /// Thời gian tạo pool
+    pub rewards_per_second: f64,
+    pub status: FarmStatus,
     pub created_at: u64,
-    
-    /// Thời gian cập nhật cuối cùng
     pub updated_at: u64,
 }
 
 /// Thông tin farm của người dùng
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserFarmInfo {
-    /// ID của người dùng
     pub user_id: String,
-    
-    /// ID của pool
     pub pool_id: String,
-    
-    /// Số lượng liquidity đã thêm vào
-    pub liquidity_amount: f64,
-    
-    /// Rewards đã tích lũy nhưng chưa claim
-    pub pending_rewards: f64,
-    
-    /// Thời gian bắt đầu farming
-    pub farm_started_at: u64,
-    
-    /// Thời gian cập nhật cuối cùng (để tính rewards)
-    pub last_reward_calculation: u64,
-
-    /// Trạng thái của farm: active, paused, closed
-    pub status: FarmStatus,
-}
-
-/// Trạng thái của farm
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub enum FarmStatus {
-    /// Đang hoạt động, tích lũy rewards
-    Active,
-    /// Tạm dừng, không tích lũy rewards
-    Paused,
-    /// Đã đóng, không thể thêm liquidity
-    Closed,
-    /// Chờ xử lý (ví dụ: đang chờ xác nhận giao dịch)
-    Pending,
+    pub liquidity: f64,
+    pub rewards: f64,
+    pub last_update: u64,
 }
 
 /// Manager cho hệ thống farming
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FarmManager {
-    /// Map của tất cả farming pools, key là pool ID
     pools: HashMap<String, FarmPoolConfig>,
-    
-    /// Map của tất cả user farms, key là "user_id:pool_id"
-    user_farms: HashMap<String, UserFarmInfo>,
-    
-    /// Tổng số liquidity đã thêm vào toàn bộ hệ thống
-    total_system_liquidity: f64,
-    
-    /// Tổng số rewards đã phân phối
-    total_rewards_distributed: f64,
-    
-    /// Bộ đếm ID pool
-    pool_id_counter: u64,
+    user_farms: HashMap<String, HashMap<String, UserFarmInfo>>,
 }
 
 impl FarmManager {
     /// Tạo một manager farming mới
     pub fn new() -> Self {
-        Self {
+        FarmManager {
             pools: HashMap::new(),
             user_farms: HashMap::new(),
-            total_system_liquidity: 0.0,
-            total_rewards_distributed: 0.0,
-            pool_id_counter: 0,
         }
     }
     
@@ -254,14 +206,16 @@ impl FarmManager {
         }
         
         let now = get_current_timestamp();
-        let id = format!("farm_{}", self.pool_id_counter);
-        self.pool_id_counter += 1;
+        let id = format!("farm_{}", self.pools.len() + 1);
         
         let pool = FarmPoolConfig {
             id: id.clone(),
-            pair_name: pair_name.to_string(),
+            token_a: pair_name.split('-').next().unwrap().to_string(),
+            token_b: pair_name.split('-').last().unwrap().to_string(),
             apr,
             total_liquidity: 0.0,
+            rewards_per_second: 0.0,
+            status: FarmStatus::Active,
             created_at: now,
             updated_at: now,
         };
@@ -288,7 +242,8 @@ impl FarmManager {
         let farm_key = format!("{}:{}", user_id, pool_id);
         
         // Cập nhật hoặc tạo user farm mới
-        if let Some(user_farm) = self.user_farms.get_mut(&farm_key) {
+        if let Some(user_farms) = self.user_farms.get_mut(user_id) {
+            if let Some(user_farm) = user_farms.get_mut(pool_id) {
             // Kiểm tra trạng thái farm
             if user_farm.status == FarmStatus::Closed {
                 return Err(FarmError::InvalidFarmStatus {
@@ -302,35 +257,31 @@ impl FarmManager {
                 .with_farm_context(|| format!("Không thể tính pending rewards cho user {} trong pool {}", user_id, pool_id))?;
             
             // Cập nhật thông tin farm
-            user_farm.liquidity_amount += amount;
-            user_farm.last_reward_calculation = now;
+                user_farm.liquidity += amount;
+                user_farm.last_update = now;
             
             // Kích hoạt farm nếu đang ở trạng thái tạm dừng
             if user_farm.status == FarmStatus::Paused {
                 user_farm.status = FarmStatus::Active;
                 info!("Farm của user {} cho pool {} đã được kích hoạt lại", user_id, pool_id);
+                }
             }
         } else {
             // Tạo farm mới
             let user_farm = UserFarmInfo {
                 user_id: user_id.to_string(),
                 pool_id: pool_id.to_string(),
-                liquidity_amount: amount,
-                pending_rewards: 0.0,
-                farm_started_at: now,
-                last_reward_calculation: now,
-                status: FarmStatus::Active,
+                liquidity: amount,
+                rewards: 0.0,
+                last_update: now,
             };
             
-            self.user_farms.insert(farm_key, user_farm);
+            self.user_farms.entry(user_id.to_string()).or_insert_with(HashMap::new).insert(pool_id.to_string(), user_farm);
         }
         
         // Cập nhật tổng số liquidity trong pool
         pool.total_liquidity += amount;
         pool.updated_at = now;
-        
-        // Cập nhật tổng số liquidity toàn hệ thống
-        self.total_system_liquidity += amount;
         
         info!("User {} đã thêm {} liquidity vào pool {} tại thời điểm {}", 
               user_id, amount, pool_id, now);
@@ -347,13 +298,14 @@ impl FarmManager {
         }
         
         let farm_key = format!("{}:{}", user_id, pool_id);
-        let user_farm = self.user_farms.get_mut(&farm_key)
+        let user_farm = self.user_farms.get_mut(user_id)
+            .and_then(|farms| farms.get_mut(pool_id))
             .ok_or_else(|| FarmError::UserFarmNotFound(farm_key.clone()))?;
             
-        if user_farm.liquidity_amount < amount {
+        if user_farm.liquidity < amount {
             return Err(FarmError::InsufficientLiquidity {
                 required: amount,
-                available: user_farm.liquidity_amount,
+                available: user_farm.liquidity,
             });
         }
         
@@ -364,26 +316,25 @@ impl FarmManager {
         self.calculate_pending_rewards(user_farm, pool)?;
         
         // Xử lý rút liquidity
-        user_farm.liquidity_amount -= amount;
-        user_farm.last_reward_calculation = get_current_timestamp();
+        user_farm.liquidity -= amount;
+        user_farm.last_update = get_current_timestamp();
         
         // Cập nhật tổng số liquidity trong pool
         pool.total_liquidity -= amount;
         pool.updated_at = get_current_timestamp();
         
-        // Cập nhật tổng số liquidity toàn hệ thống
-        self.total_system_liquidity -= amount;
-        
         // Nếu user đã rút toàn bộ liquidity, trả về rewards và xóa thông tin farm
-        if user_farm.liquidity_amount <= 0.0 {
-            let pending_rewards = user_farm.pending_rewards;
-            self.user_farms.remove(&farm_key);
+        if user_farm.liquidity <= 0.0 {
+            let rewards = user_farm.rewards;
+            self.user_farms.get_mut(user_id).and_then(|farms| {
+                farms.remove(pool_id);
+                if farms.is_empty() {
+                    self.user_farms.remove(user_id);
+                }
+            });
             
-            // Cập nhật tổng số rewards đã phân phối
-            self.total_rewards_distributed += pending_rewards;
-            
-            info!("User {} đã rút toàn bộ liquidity từ pool {}, nhận {} rewards", user_id, pool_id, pending_rewards);
-            return Ok(pending_rewards);
+            info!("User {} đã rút toàn bộ liquidity từ pool {}, nhận {} rewards", user_id, pool_id, rewards);
+            return Ok(rewards);
         }
         
         info!("User {} đã rút {} liquidity từ pool {}", user_id, amount, pool_id);
@@ -393,7 +344,8 @@ impl FarmManager {
     /// Thu hoạch rewards từ pool
     pub fn harvest(&mut self, user_id: &str, pool_id: &str) -> FarmResult<f64> {
         let farm_key = format!("{}:{}", user_id, pool_id);
-        let user_farm = self.user_farms.get_mut(&farm_key)
+        let user_farm = self.user_farms.get_mut(user_id)
+            .and_then(|farms| farms.get_mut(pool_id))
             .ok_or_else(|| FarmError::UserFarmNotFound(farm_key))?;
             
         let pool = self.pools.get(pool_id)
@@ -402,12 +354,9 @@ impl FarmManager {
         // Cập nhật rewards tích lũy
         self.calculate_pending_rewards(user_farm, pool)?;
         
-        let rewards = user_farm.pending_rewards;
-        user_farm.pending_rewards = 0.0;
-        user_farm.last_reward_calculation = get_current_timestamp();
-        
-        // Cập nhật tổng số rewards đã phân phối
-        self.total_rewards_distributed += rewards;
+        let rewards = user_farm.rewards;
+        user_farm.rewards = 0.0;
+        user_farm.last_update = get_current_timestamp();
         
         info!("User {} đã harvest {} rewards từ pool {}", user_id, rewards, pool_id);
         Ok(rewards)
@@ -443,113 +392,23 @@ impl FarmManager {
     
     /// Lấy thông tin farm của user
     pub fn get_user_farm(&self, user_id: &str, pool_id: &str) -> FarmResult<&UserFarmInfo> {
-        let farm_key = format!("{}:{}", user_id, pool_id);
-        self.user_farms.get(&farm_key)
-            .ok_or_else(|| FarmError::UserFarmNotFound(farm_key))
+        self.user_farms.get(user_id)
+            .and_then(|farms| farms.get(pool_id))
+            .ok_or_else(|| FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id)))
     }
     
     /// Lấy tất cả farms của user
     pub fn get_user_farms(&self, user_id: &str) -> Vec<&UserFarmInfo> {
-        self.user_farms.values()
-            .filter(|farm| farm.user_id == user_id)
-            .collect()
-    }
-    
-    /// Lấy tổng liquidity trong hệ thống
-    pub fn get_total_system_liquidity(&self) -> f64 {
-        self.total_system_liquidity
-    }
-    
-    /// Lấy tổng rewards đã phân phối
-    pub fn get_total_rewards_distributed(&self) -> f64 {
-        self.total_rewards_distributed
-    }
-    
-    /// Đồng bộ pools từ blockchain
-    pub async fn sync_pools_from_blockchain(&mut self) -> FarmResult<()> {
-        info!("Bắt đầu đồng bộ pools từ blockchain");
-        
-        // Kết nối với blockchain provider
-        let provider = self.get_blockchain_provider().await
-            .with_farm_context(|| "Không thể kết nối với blockchain provider")?;
-        
-        // Lấy danh sách pools từ blockchain
-        let onchain_pools = self.fetch_pools_from_blockchain(&provider).await
-            .with_farm_context(|| "Không thể lấy danh sách pools từ blockchain")?;
-        
-        // Cập nhật pools hiện tại và thêm pools mới
-        for pool_config in onchain_pools {
-            if let Some(existing_pool) = self.pools.get_mut(&pool_config.id) {
-                // Cập nhật thông tin pool
-                info!("Cập nhật pool {}: APR {}% -> {}%, liquidity {} -> {}", 
-                    pool_config.id, existing_pool.apr, pool_config.apr,
-                    existing_pool.total_liquidity, pool_config.total_liquidity);
-                
-                existing_pool.apr = pool_config.apr;
-                existing_pool.total_liquidity = pool_config.total_liquidity;
-                existing_pool.updated_at = get_current_timestamp();
-            } else {
-                // Thêm pool mới
-                info!("Thêm pool mới từ blockchain: {} ({})", pool_config.id, pool_config.pair_name);
-                self.pools.insert(pool_config.id.clone(), pool_config);
-            }
+        match self.user_farms.get(user_id) {
+            Some(farms) => farms.values().collect(),
+            None => vec![],
         }
-        
-        // Đồng bộ thông tin farm của người dùng
-        self.sync_user_farms_from_blockchain(&provider).await
-            .with_farm_context(|| "Không thể đồng bộ thông tin farm của người dùng")?;
-        
-        info!("Đồng bộ pools từ blockchain hoàn tất");
-        Ok(())
-    }
-    
-    /// Lấy blockchain provider
-    async fn get_blockchain_provider(&self) -> Result<String, FarmError> {
-        // Trong triển khai thực tế, đây sẽ trả về provider thích hợp
-        // từ hệ thống của bạn
-        Ok("mock_provider".to_string())
-    }
-    
-    /// Lấy thông tin pools từ blockchain
-    async fn fetch_pools_from_blockchain(&self, provider: &str) -> Result<Vec<FarmPoolConfig>, FarmError> {
-        // Trong triển khai thực tế, đây sẽ gọi các hàm RPC để lấy dữ liệu từ blockchain
-        
-        // Mock data
-        let mock_pools = vec![
-            FarmPoolConfig {
-                id: "farm_1".to_string(),
-                pair_name: "DMD-USDT".to_string(),
-                apr: 15.5,
-                total_liquidity: 100000.0,
-                created_at: get_current_timestamp() - 86400, // 1 ngày trước
-                updated_at: get_current_timestamp(),
-            },
-            FarmPoolConfig {
-                id: "farm_2".to_string(),
-                pair_name: "DMD-ETH".to_string(),
-                apr: 22.5,
-                total_liquidity: 50000.0,
-                created_at: get_current_timestamp() - 172800, // 2 ngày trước
-                updated_at: get_current_timestamp(),
-            },
-        ];
-        
-        Ok(mock_pools)
-    }
-    
-    /// Đồng bộ thông tin farm của người dùng từ blockchain
-    async fn sync_user_farms_from_blockchain(&mut self, provider: &str) -> FarmResult<()> {
-        // Trong triển khai thực tế, đây sẽ lấy thông tin farm của người dùng từ blockchain
-        // và cập nhật vào self.user_farms
-        
-        info!("Đồng bộ thông tin farm của người dùng từ blockchain");
-        Ok(())
     }
     
     /// Tính toán rewards cho một user farm
     fn calculate_pending_rewards(&mut self, user_farm: &mut UserFarmInfo, pool: &FarmPoolConfig) -> FarmResult<()> {
         let now = get_current_timestamp();
-        let time_elapsed = now as i64 - user_farm.last_reward_calculation as i64;
+        let time_elapsed = now as i64 - user_farm.last_update as i64;
         
         if time_elapsed <= 0 {
             return Ok(());
@@ -561,16 +420,245 @@ impl FarmManager {
         let apr_rate_per_second = pool.apr / (100.0 * seconds_in_year as f64);
         
         // Rewards = liquidity_amount * APR_per_second * seconds_elapsed
-        let rewards = user_farm.liquidity_amount * apr_rate_per_second * time_elapsed as f64;
+        let rewards = user_farm.liquidity * apr_rate_per_second * time_elapsed as f64;
         
         // Cộng rewards mới vào pending rewards
-        user_farm.pending_rewards += rewards;
+        user_farm.rewards += rewards;
         
         // Cập nhật thời gian tính toán rewards
-        user_farm.last_reward_calculation = now;
+        user_farm.last_update = now;
         
         debug!("Đã tính toán {} rewards cho user {} trong pool {}", 
                rewards, user_farm.user_id, user_farm.pool_id);
+        
+        Ok(())
+    }
+}
+
+impl BaseFarmPool for FarmManager {
+    type PoolId = String;
+    type PoolConfig = FarmPoolConfig;
+    type UserId = String;
+    type UserInfo = UserFarmInfo;
+    type AmountType = f64;
+    
+    fn get_pool(&self, pool_id: &Self::PoolId) -> FarmResult<&Self::PoolConfig> {
+        self.pools.get(pool_id).ok_or_else(|| FarmError::PoolNotFound(pool_id.clone()))
+    }
+    
+    fn get_all_pools(&self) -> Vec<&Self::PoolConfig> {
+        self.pools.values().collect()
+    }
+    
+    fn get_user_farm(&self, user_id: &Self::UserId, pool_id: &Self::PoolId) -> FarmResult<&Self::UserInfo> {
+        self.user_farms.get(user_id)
+            .and_then(|farms| farms.get(pool_id))
+            .ok_or_else(|| FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id)))
+    }
+    
+    fn get_user_farms(&self, user_id: &Self::UserId) -> Vec<&Self::UserInfo> {
+        match self.user_farms.get(user_id) {
+            Some(farms) => farms.values().collect(),
+            None => vec![],
+        }
+    }
+    
+    fn update_apr(&mut self, pool_id: &Self::PoolId, new_apr: f64) -> FarmResult<()> {
+        // Xác nhận APR hợp lệ
+        validate_apr(new_apr)?;
+        
+        // Cập nhật APR cho pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.apr = new_apr;
+            pool.updated_at = get_current_timestamp();
+            Ok(())
+            } else {
+            Err(FarmError::PoolNotFound(pool_id.clone()))
+        }
+    }
+}
+
+impl FarmingOperations for FarmManager {
+    fn add_liquidity(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId,
+        amount: Self::AmountType
+    ) -> FarmResult<()> {
+        // Xác nhận pool tồn tại
+        let pool = self.get_pool(pool_id)?;
+        
+        // Kiểm tra xem pool có active không
+        if pool.status != FarmStatus::Active {
+            return Err(FarmError::InvalidFarmStatus {
+                current_status: format!("{:?}", pool.status),
+                required_status: format!("{:?}", FarmStatus::Active),
+            });
+        }
+        
+        // Xác nhận số lượng hợp lệ
+        if amount <= 0.0 {
+            return Err(FarmError::InsufficientLiquidity {
+                required: amount,
+                available: 0.0,
+            });
+        }
+        
+        // Cập nhật rewards trước khi thêm liquidity mới
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy hoặc tạo thông tin farm của user
+        let user_farms = self.user_farms.entry(user_id.clone()).or_insert_with(HashMap::new);
+        let now = get_current_timestamp();
+        
+        // Cập nhật hoặc tạo mới thông tin farm
+        let user_farm = user_farms.entry(pool_id.clone()).or_insert(UserFarmInfo {
+            user_id: user_id.clone(),
+            pool_id: pool_id.clone(),
+            liquidity: 0.0,
+            rewards: 0.0,
+            last_update: now,
+        });
+        
+        // Cập nhật liquidity
+        user_farm.liquidity += amount;
+        
+        // Cập nhật tổng liquidity của pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.total_liquidity += amount;
+            pool.updated_at = now;
+        }
+        
+        Ok(())
+    }
+    
+    fn remove_liquidity(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId,
+        amount: Self::AmountType
+    ) -> FarmResult<Self::AmountType> {
+        // Cập nhật rewards trước khi rút liquidity
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy thông tin farm của user
+        let user_farm = match self.user_farms.get_mut(user_id) {
+            Some(farms) => match farms.get_mut(pool_id) {
+                Some(farm) => farm,
+                None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+            },
+            None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+        };
+        
+        // Kiểm tra số lượng
+        if amount > user_farm.liquidity {
+            return Err(FarmError::InsufficientLiquidity {
+                required: amount,
+                available: user_farm.liquidity,
+            });
+        }
+        
+        // Cập nhật liquidity của user
+        user_farm.liquidity -= amount;
+        
+        // Cập nhật tổng liquidity của pool
+        if let Some(pool) = self.pools.get_mut(pool_id) {
+            pool.total_liquidity -= amount;
+            pool.updated_at = get_current_timestamp();
+        }
+        
+        Ok(amount)
+    }
+    
+    fn harvest(
+        &mut self,
+        user_id: &Self::UserId,
+        pool_id: &Self::PoolId
+    ) -> FarmResult<Self::AmountType> {
+        // Cập nhật rewards trước khi thu hoạch
+        let user_id_clone = user_id.clone();
+        let pool_id_clone = pool_id.clone();
+        self.update_user_rewards(&user_id_clone, &pool_id_clone).await?;
+        
+        // Lấy thông tin farm của user
+        let user_farm = match self.user_farms.get_mut(user_id) {
+            Some(farms) => match farms.get_mut(pool_id) {
+                Some(farm) => farm,
+                None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+            },
+            None => return Err(FarmError::UserFarmNotFound(format!("{}:{}", user_id, pool_id))),
+        };
+        
+        // Lấy rewards hiện có
+        let rewards = user_farm.rewards;
+        
+        // Reset rewards
+        user_farm.rewards = 0.0;
+        
+        Ok(rewards)
+    }
+}
+
+impl BlockchainSyncOperations for FarmManager {
+    async fn sync_pools_from_blockchain(&mut self) -> FarmResult<()> {
+        // Đây là nơi để thực hiện đồng bộ hóa dữ liệu pools từ blockchain
+        // Trong một triển khai thực tế, đây sẽ là các gọi API hoặc giao tiếp với smart contracts
+        
+        info!("Đồng bộ hóa pools từ blockchain");
+        
+        // TODO: Thêm logic đồng bộ hóa thực tế
+        
+        Ok(())
+    }
+    
+    async fn sync_user_farms_from_blockchain(&mut self) -> FarmResult<()> {
+        // Đây là nơi để thực hiện đồng bộ hóa dữ liệu farm của người dùng từ blockchain
+        
+        info!("Đồng bộ hóa thông tin farm của người dùng từ blockchain");
+        
+        // TODO: Thêm logic đồng bộ hóa thực tế
+        
+        Ok(())
+    }
+}
+
+impl FarmManager {
+    fn get_key(user_id: &str, pool_id: &str) -> String {
+        format!("{}:{}", user_id, pool_id)
+    }
+
+    async fn update_user_rewards(&mut self, user_id: &str, pool_id: &str) -> FarmResult<()> {
+        let now = get_current_timestamp();
+        
+        // Lấy thông tin pool
+        let pool = self.get_pool(pool_id)?;
+        
+        // Kiểm tra nếu pool không active thì không cập nhật rewards
+        if pool.status != FarmStatus::Active {
+            return Ok(());
+        }
+        
+        // Tìm thông tin farm của user
+        if let Some(user_farms) = self.user_farms.get_mut(user_id) {
+            if let Some(user_farm) = user_farms.get_mut(pool_id) {
+                // Tính toán rewards dựa trên thời gian từ lần update cuối
+                let last_update = user_farm.last_update;
+                let new_rewards = calculate_rewards(
+                    user_farm.liquidity,
+                    pool.apr,
+                    last_update,
+                    now
+                )?;
+                
+                // Cập nhật rewards và thời gian
+                user_farm.rewards += new_rewards;
+                user_farm.last_update = now;
+            }
+        }
         
         Ok(())
     }
@@ -638,7 +726,8 @@ mod tests {
         let pool_id = manager.add_pool("DMD-USDT", 20.0).unwrap();
         assert!(manager.pools.contains_key(&pool_id));
         let pool = manager.pools.get(&pool_id).unwrap();
-        assert_eq!(pool.pair_name, "DMD-USDT");
+        assert_eq!(pool.token_a, "DMD");
+        assert_eq!(pool.token_b, "USDT");
         assert_eq!(pool.apr, 20.0);
         
         // Test case 2: Thêm pool với APR không hợp lệ (âm)
@@ -657,7 +746,8 @@ mod tests {
             
             assert!(manager.pools.contains_key(&pool_id));
             let pool = manager.pools.get(&pool_id).unwrap();
-            assert_eq!(pool.pair_name, pair_name);
+            assert_eq!(pool.token_a, "DMD");
+            assert_eq!(pool.token_b, pair_name.split('-').last().unwrap());
             assert_eq!(pool.apr, apr);
         }
         
@@ -675,7 +765,7 @@ mod tests {
         
         let farm_key = format!("{}:{}", user_id, pool_id);
         let user_farm = manager.user_farms.get(&farm_key).unwrap();
-        assert_eq!(user_farm.liquidity_amount, 100.0);
+        assert_eq!(user_farm.liquidity, 100.0);
         assert_eq!(user_farm.status, FarmStatus::Active);
         
         let pool = manager.pools.get(&pool_id).unwrap();
@@ -685,7 +775,7 @@ mod tests {
         manager.add_liquidity(&user_id, &pool_id, 50.0).unwrap();
         
         let user_farm = manager.user_farms.get(&farm_key).unwrap();
-        assert_eq!(user_farm.liquidity_amount, 150.0);
+        assert_eq!(user_farm.liquidity, 150.0);
         
         let pool = manager.pools.get(&pool_id).unwrap();
         assert_eq!(pool.total_liquidity, 150.0);
@@ -694,7 +784,7 @@ mod tests {
         manager.remove_liquidity(&user_id, &pool_id, 40.0).unwrap();
         
         let user_farm = manager.user_farms.get(&farm_key).unwrap();
-        assert_eq!(user_farm.liquidity_amount, 110.0);
+        assert_eq!(user_farm.liquidity, 110.0);
         
         let pool = manager.pools.get(&pool_id).unwrap();
         assert_eq!(pool.total_liquidity, 110.0);
@@ -766,7 +856,7 @@ mod tests {
         {
             let user_farm = manager.user_farms.get(&farm_key).unwrap();
             assert_eq!(user_farm.status, FarmStatus::Active);
-            assert_eq!(user_farm.liquidity_amount, 150.0);
+            assert_eq!(user_farm.liquidity, 150.0);
         }
         
         // Đặt trạng thái thành Closed
@@ -787,7 +877,7 @@ mod tests {
         {
             let user_farm = manager.user_farms.get(&farm_key).unwrap();
             assert_eq!(user_farm.status, FarmStatus::Closed);
-            assert_eq!(user_farm.liquidity_amount, 150.0);
+            assert_eq!(user_farm.liquidity, 150.0);
         }
     }
     
@@ -855,24 +945,24 @@ mod tests {
     fn harvest_with_mock_time(manager: &mut FarmManager, user_id: &str, pool_id: &str, current_time: u64) -> f64 {
         // Get user farm
         let farm_key = format!("{}:{}", user_id, pool_id);
-        let user_farm = manager.user_farms.get_mut(&farm_key).unwrap();
+        let user_farm = manager.user_farms.get_mut(user_id).unwrap();
         
         // Get pool 
         let pool = manager.pools.get(pool_id).unwrap();
         
         // Manually calculate rewards (đây là bản copy của calculate_pending_rewards)
-        let time_elapsed = current_time as i64 - user_farm.last_reward_calculation as i64;
+        let time_elapsed = current_time as i64 - user_farm.last_update as i64;
         if time_elapsed > 0 {
             let seconds_in_year = 365 * 24 * 60 * 60;
             let apr_rate_per_second = pool.apr / (100.0 * seconds_in_year as f64);
-            let rewards = user_farm.liquidity_amount * apr_rate_per_second * time_elapsed as f64;
-            user_farm.pending_rewards += rewards;
-            user_farm.last_reward_calculation = current_time;
+            let rewards = user_farm.liquidity * apr_rate_per_second * time_elapsed as f64;
+            user_farm.rewards += rewards;
+            user_farm.last_update = current_time;
         }
         
         // Get rewards
-        let rewards = user_farm.pending_rewards;
-        user_farm.pending_rewards = 0.0;
+        let rewards = user_farm.rewards;
+        user_farm.rewards = 0.0;
         
         rewards
     }
