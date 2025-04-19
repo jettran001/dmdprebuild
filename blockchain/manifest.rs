@@ -13,7 +13,7 @@
  * 1. ONCHAIN (blockchain/onchain)
  * --------------------------------------
  * - Mô tả: Nơi tạo các smartcontract, chain adapter, bridge logic qua layerzero
- * - Ngôn ngữ: Solidity cho EVM chains, Rust cho NEAR và Solana
+ * - Ngôn ngữ: Solidity 0.8.20 cho EVM chains, Rust cho NEAR và Solana
  * - Cấu trúc chính:
  *   - onchain/smartcontract/: Smart contracts cho các blockchain
  *   - onchain/brigde/: Logic bridge qua LayerZero
@@ -22,6 +22,9 @@
  *   - Xây dựng chain adapter
  *   - Phát triển bridge logic qua layerzero
  *   - Sau khi tạo xong sẽ được tách riêng ra khỏi hệ thống
+ * - Lưu ý quan trọng:
+ *   - Tất cả smart contract phải sử dụng Solidity phiên bản 0.8.20
+ *   - Sử dụng chuẩn ERC-1155 cho DMD Token và ERC-20 cho Wrapped DMD
  * 
  * 2. SDK (blockchain/src/sdk)
  * --------------------------
@@ -77,12 +80,18 @@
     ├── manifest.rs                 -> Tài liệu tham chiếu module path [liên quan: tất cả các module, BẮT BUỘC đọc đầu tiên]
     ├── onchain/                    -> Nơi phát triển smartcontracts
     │   ├── smartcontract/          -> Smart contracts cho các blockchain
-    │   │   ├── dmd_eth.sol         -> Smart contract DMD trên Ethereum
-    │   │   ├── dmd_bsc_contract.sol -> Smart contract DMD trên BSC
-    │   │   ├── dmd_solana.rs       -> Smart contract DMD trên Solana
-    │   │   ├── dmd_near.rs         -> Smart contract DMD trên NEAR
+    │   │   ├── dmd_bsc_contract.sol -> Smart contract DMD trên BSC (Solidity 0.8.20)
+    │   │   ├── WrappedDMD.sol      -> Wrapped token ERC-20 cho DMD (Solidity 0.8.20)
+    │   │   ├── bridge_token.sol    -> Bridge token chuẩn (Solidity 0.8.20)
+    │   │   ├── solana_contract/    -> Smart contract cho Solana
+    │   │   ├── near_contract/      -> Smart contract cho NEAR
     │   ├── brigde/                 -> Logic bridge qua LayerZero
-    │   │   ├── dmd_bsc_bridge.sol  -> Bridge contract trên BSC
+    │   │   ├── bridge_interface.sol -> Smart contract bridge interface (router) (Solidity 0.8.20)
+    │   │   ├── erc1155_wrapper.sol -> Bộ đóng gói ERC-1155 thành ERC-20 (Solidity 0.8.20)
+    │   │   ├── erc20_wrappeddmd.sol -> ERC-20 đại diện trong quá trình bridge (Solidity 0.8.20)
+    │   │   ├── erc1155_unwrapper_near.rs -> Bộ giải nén trên NEAR
+    │   │   ├── erc1155_bridge_adapter.sol -> Adapter kết nối với bridge protocol (Solidity 0.8.20)
+    │   │   ├── bridge_adapter/     -> Các adapter cho các bridge protocol
     ├── src/                        -> Source code chính của dự án
     │   ├── lib.rs                  -> Entry point cho crate library
     │   ├── mod.rs                  -> Module definitions
@@ -239,6 +248,14 @@ pub mod dependencies {
     pub const ETHERS: &str = "ethers:2.0.7";
     pub const AXUM: &str = "axum:0.6.18";
     pub const REQWEST: &str = "reqwest:0.11.18";
+    
+    // Solidity & Smart Contract Dependencies
+    pub const SOLIDITY: &str = "solidity:0.8.20"; // Solidity compiler version
+    pub const OPENZEPPELIN: &str = "openzeppelin:5.0.0"; // OpenZeppelin contracts version
+    
+    // Bridge và Cross-Chain Messaging
+    pub const LAYERZERO: &str = "layerzero:0.8.0"; // LayerZero cross-chain messaging
+    pub const WORMHOLE: &str = "wormhole:0.9.0"; // Wormhole cross-chain messaging
 }
 
 /**
@@ -313,3 +330,82 @@ pub mod apis {
         }
     }
 }
+
+/// --- BRIDGE MODULES ---
+/// 
+/// 1. erc1155_wrapper.sol — Bộ đóng gói (wrap)
+///    Chain: EVM (BSC, Polygon, Arbitrum...)
+///    - Nhận ERC-1155 từ user
+///    - Lock hoặc burn nó (tuỳ thiết kế)
+///    - Mint ra một ERC-20 wrapped đại diện (ví dụ WrappedDMD)
+///    - Gửi request bridge kèm payload thông tin cần thiết
+///
+/// 2. erc20_wrappeddmd.sol — ERC-20 đại diện
+///    Chain: EVM hoặc NEAR
+///    - Là contract chuẩn ERC-20 đại diện cho DMD khi ở giữa bridge
+///    - Có thể mint/burn
+///    - Được sử dụng như "hàng hóa trung chuyển" trong quá trình bridge
+///
+/// 3. erc1155_unwrapper_near.rs — Bộ giải nén trên NEAR
+///    Chain: NEAR (Rust)
+///    - Nhận payload gửi từ bridge
+///    - Burn WrappedDMD (ERC-20 bản Near)
+///    - Mint lại đúng token ERC-1155 (theo tier, metadata)
+///    - Cập nhật tổng cung
+///
+/// 4. erc1155_bridge_adapter.sol — Adapter trung gian với bridge
+///    Chain: EVM (bsc, eth...)
+///    - Kết nối giữa ERC1155Wrapper và bridge (LayerZero/Wormhole)
+///    - Format payload, gọi đúng hàm gửi của bridge
+///    - Có thể handle fee, retry, routing
+///
+/// 5. bridge_interface.sol — Router trung tâm
+///    Chain: EVM hoặc Cross-chain Coordinator
+///    - Quản lý danh sách các adapter được đăng ký
+///    - Cho phép chọn adapter (LayerZero, Wormhole, Custom...)
+///    - Route các request bridge đến đúng adapter
+///    - Cấu hình được, mở rộng được
+
+/// --- ĐỊNH NGHĨA BỔ SUNG VỀ BRIDGE INTERFACE ---
+///
+/// 1. BridgeInterface.sol là 1 smart contract module riêng biệt.
+/// 2. Các bridge cụ thể (LayerZero, Wormhole, Axelar...) là các adapter được đăng ký vào đó.
+/// 3. Contract trung tâm (DiamondToken, BridgeManager, v.v.) và các sub-module chỉ gọi qua blockchain\onchain\brigde\bridge_interface.sol
+/// 4. User có thể chọn bridge thủ công hoặc hệ thống tự chọn bridge phù hợp.
+/// => Hệ thống như 1 multi-bridge router linh hoạt
+///
+/// Chi tiết từng phần:
+///
+/// 1. BridgeInterface.sol
+/// - Quản lý danh sách bridge đã đăng ký
+/// - Là trung gian để forward request từ DiamondToken đến đúng adapter.
+/// - Code mẫu:
+/// ```
+/// contract BridgeInterface is Ownable {
+///     mapping(string => address) public bridgeAdapters;
+///
+///     function registerBridge(string memory name, address adapter) external onlyOwner {
+///         bridgeAdapters[name] = adapter;
+///     }
+///
+///     function sendMessage(string memory name, uint16 chainId, bytes memory payload) external payable {
+///         require(bridgeAdapters[name] != address(0), "Bridge not found");
+///         IBridgeAdapter(bridgeAdapters[name]).sendMessage{value: msg.value}(chainId, payload);
+///     }
+/// }
+/// ```
+///
+/// 2. Adapter: LayerZeroAdapter.sol, WormholeAdapter.sol 
+///
+/// 3. Các bridge mới được add vào từ ngoài = Qua registerBridge(...)
+///
+/// 4. Smartcontract trung tâm gọi thông qua BridgeInterface = Luôn gọi gián tiếp
+///
+/// 5. Auto router:
+/// ```
+/// function autoBridge(uint16 chainId, bytes memory payload) public payable {
+///     // chọn bridge tuỳ theo phí, độ tin cậy, chain support
+///     string memory bridge = chooseBestBridge(chainId);
+///     bridgeInterface.sendMessage(bridge, chainId, payload);
+/// }
+/// ```

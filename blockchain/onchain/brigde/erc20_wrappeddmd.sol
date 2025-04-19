@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.17;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -8,44 +8,34 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 // Interface cho DiamondToken ERC1155
 interface IDiamondToken {
     function unwrapFromERC20(address to, uint256 amount) external;
-    function bridgedSupply() external view returns (uint256);
-    function DMD_TOKEN_ID() external view returns (uint256);
-}
-
-// Interface cho BridgeERC20Proxy
-interface IBridgeERC20Proxy {
-    function bridgeToNear(address from, bytes calldata nearAddress, uint256 amount) external payable;
-    function estimateBridgeFee(uint16 chainId) external view returns (uint256);
+    function balanceOf(address account, uint256 id) external view returns (uint256);
 }
 
 /**
- * @title ERC20DMD
- * @dev ERC20 wrapper token for Diamond Token (DMD)
- * Acts as an intermediate representation for bridging between ERC1155 and other chains
+ * @title Wrapped DMD Token (wDMD)
+ * @dev ERC20 wrapper token cho DiamondToken (DMD) ERC1155
+ * Được sử dụng làm token trung gian để bridge giữa ERC1155 và NEAR
  */
-contract ERC20DMD is ERC20, Ownable, Pausable {
+contract WrappedDMD is ERC20, Ownable, Pausable {
     // Địa chỉ của DiamondToken ERC1155
     IDiamondToken public dmdToken;
     
     // Địa chỉ của bridge proxy
-    IBridgeERC20Proxy public bridgeProxy;
+    address public bridgeProxy;
     
-    // LayerZero chain ID for NEAR
-    uint16 public constant NEAR_CHAIN_ID = 115;
+    // ID của DMD token trong ERC1155
+    uint256 public constant DMD_TOKEN_ID = 0;
     
     // Events
-    event BridgeToNear(address indexed from, bytes nearAddress, uint256 amount);
     event BridgeProxySet(address indexed proxy);
     event WrappedFromERC1155(address indexed user, uint256 amount);
     event UnwrappedToERC1155(address indexed user, uint256 amount);
     
     /**
-     * @dev Khởi tạo contract
-     * @param name Tên token
-     * @param symbol Symbol token
+     * @dev Khởi tạo contract Wrapped DMD
      * @param _dmdToken Địa chỉ DiamondToken ERC1155
      */
-    constructor(string memory name, string memory symbol, address _dmdToken) ERC20(name, symbol) {
+    constructor(address _dmdToken) ERC20("Wrapped DMD", "wDMD") {
         require(_dmdToken != address(0), "DMD token address cannot be zero");
         dmdToken = IDiamondToken(_dmdToken);
     }
@@ -56,20 +46,19 @@ contract ERC20DMD is ERC20, Ownable, Pausable {
      */
     function setBridgeProxy(address _proxy) external onlyOwner {
         require(_proxy != address(0), "Proxy address cannot be zero");
-        bridgeProxy = IBridgeERC20Proxy(_proxy);
+        bridgeProxy = _proxy;
         emit BridgeProxySet(_proxy);
     }
     
     /**
-     * @dev Mint wrapped tokens (chỉ được gọi từ DiamondToken)
+     * @dev Mint wrapped tokens (chỉ được gọi từ DiamondToken hoặc Bridge Proxy)
      * @param to Địa chỉ nhận token
      * @param amount Số lượng token
      */
     function mintWrapped(address to, uint256 amount) external {
-        // Chỉ DiamondToken hoặc Bridge Proxy mới được phép gọi
         require(
             msg.sender == address(dmdToken) || 
-            msg.sender == address(bridgeProxy), 
+            msg.sender == bridgeProxy, 
             "Unauthorized: only DMD token or bridge proxy"
         );
         
@@ -85,11 +74,35 @@ contract ERC20DMD is ERC20, Ownable, Pausable {
     function burnWrapped(address from, uint256 amount) external {
         require(
             msg.sender == address(dmdToken) || 
-            msg.sender == address(bridgeProxy), 
+            msg.sender == bridgeProxy, 
             "Unauthorized: only DMD token or bridge proxy"
         );
         
-        _burn(from, amount);
+        // Nếu người gọi là bridge proxy, kiểm tra xem 'from' có đủ token không
+        if (msg.sender == bridgeProxy) {
+            require(balanceOf(from) >= amount, "Insufficient balance");
+            _burn(from, amount);
+        } else {
+            _burn(from, amount);
+        }
+    }
+    
+    /**
+     * @dev Wrap ERC1155 thành ERC20
+     * @param amount Số lượng token
+     */
+    function wrapFromERC1155(uint256 amount) external whenNotPaused {
+        // Kiểm tra số dư ERC1155
+        uint256 erc1155Balance = dmdToken.balanceOf(msg.sender, DMD_TOKEN_ID);
+        require(erc1155Balance >= amount, "Insufficient ERC1155 balance");
+        
+        // Chuyển đổi ERC1155 -> ERC20
+        dmdToken.unwrapFromERC20(address(this), amount);
+        
+        // Mint ERC20 wrapper token
+        _mint(msg.sender, amount);
+        
+        emit WrappedFromERC1155(msg.sender, amount);
     }
     
     /**
@@ -109,21 +122,27 @@ contract ERC20DMD is ERC20, Ownable, Pausable {
     }
     
     /**
-     * @dev Bridge token sang NEAR
-     * @param nearAddress Địa chỉ NEAR dạng bytes
+     * @dev Chuyển token sang bridge proxy để bridge sang NEAR
+     * @param nearAddress Địa chỉ người nhận trên NEAR
      * @param amount Số lượng token
      */
     function bridgeToNear(bytes calldata nearAddress, uint256 amount) external payable whenNotPaused {
-        require(address(bridgeProxy) != address(0), "Bridge proxy not set");
+        require(bridgeProxy != address(0), "Bridge proxy not set");
         require(balanceOf(msg.sender) >= amount, "Insufficient balance");
         
-        // Chuyển token vào bridge proxy
-        _transfer(msg.sender, address(bridgeProxy), amount);
+        // Ủy quyền cho bridge proxy burn token
+        _approve(msg.sender, bridgeProxy, amount);
         
         // Gọi bridge proxy để xử lý
-        bridgeProxy.bridgeToNear{value: msg.value}(msg.sender, nearAddress, amount);
-        
-        emit BridgeToNear(msg.sender, nearAddress, amount);
+        (bool success, ) = bridgeProxy.call{value: msg.value}(
+            abi.encodeWithSignature(
+                "bridgeToNear(address,bytes,uint256)",
+                msg.sender,
+                nearAddress,
+                amount
+            )
+        );
+        require(success, "Bridge call failed");
     }
     
     /**
@@ -152,10 +171,11 @@ contract ERC20DMD is ERC20, Ownable, Pausable {
     }
     
     /**
-     * @dev Lấy phí bridge ước tính
+     * @dev Get total DMD (ERC1155 + ERC20) balance for an account
+     * @param account Địa chỉ cần kiểm tra
+     * @return Tổng số dư (ERC1155 + ERC20)
      */
-    function estimateBridgeFee() external view returns (uint256) {
-        require(address(bridgeProxy) != address(0), "Bridge proxy not set");
-        return bridgeProxy.estimateBridgeFee(NEAR_CHAIN_ID);
+    function getTotalBalance(address account) external view returns (uint256) {
+        return dmdToken.balanceOf(account, DMD_TOKEN_ID) + balanceOf(account);
     }
-} 
+}

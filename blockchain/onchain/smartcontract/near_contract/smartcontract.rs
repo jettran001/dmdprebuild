@@ -244,6 +244,13 @@ trait LayerZeroEndpoint {
     ) -> U128;
 }
 
+/// Thêm vào payload để xác định loại token
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+pub enum TokenType {
+    ERC20,
+    ERC1155,
+}
+
 /// Cấu trúc theo dõi token đã lock cho bridge
 #[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
 pub struct LockedTokens {
@@ -423,8 +430,8 @@ impl DmdToken {
         self.admin_control.supported_chains.get(&chain_id).unwrap_or(false)
     }
     
-    /// Wrap token sang chain khác
-    pub fn wrap_to_chain(&mut self, chain_id: u16, to_address: Vec<u8>, amount: U128) -> Promise {
+    /// Wrap token sang chain khác với chỉ định loại token
+    pub fn wrap_to_chain(&mut self, chain_id: u16, to_address: Vec<u8>, amount: U128, token_type: TokenType) -> Promise {
         assert!(!self.admin_control.bridge_paused, "Bridge đang bị tạm dừng");
         assert!(self.is_supported_chain(chain_id), "Chain không được hỗ trợ");
         
@@ -457,13 +464,19 @@ impl DmdToken {
         }
         
         // Log sự kiện
-        log!("Wrap {} DMD từ {} (NEAR) đến {} ({}) chain_id: {}", 
+        log!("Wrap {} DMD từ {} (NEAR) đến {} ({}) chain_id: {} token_type: {:?}", 
              amount_u128, account_id, hex::encode(&to_address), 
-             self.get_chain_name(chain_id), chain_id);
+             self.get_chain_name(chain_id), chain_id, token_type);
+        
+        // Token type cho payload
+        let token_type_str = match token_type {
+            TokenType::ERC20 => "erc20",
+            TokenType::ERC1155 => "erc1155",
+        };
         
         // Gửi message qua LayerZero
-        let payload = format!("{{\"from\":\"{}\",\"to\":\"{}\",\"amount\":{},\"action\":\"wrap\"}}", 
-                     account_id, hex::encode(&to_address), amount_u128).into_bytes();
+        let payload = format!("{{\"from\":\"{}\",\"to\":\"{}\",\"amount\":{},\"action\":\"{}\"}}", 
+                     account_id, hex::encode(&to_address), amount_u128, token_type_str).into_bytes();
         
         ext_layerzero::send(
             chain_id,
@@ -530,34 +543,39 @@ impl DmdToken {
              amount_u128, from_chain_id, to_account);
     }
     
-    /// Bridge token sang BSC (gọi wrap_to_chain với chain_id của BSC)
+    /// Bridge token sang BSC dưới dạng ERC20 (Wrapped DMD)
+    pub fn bridge_to_bsc_erc20(&mut self, bsc_address: Vec<u8>, amount: U128) -> Promise {
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_BSC, bsc_address, amount, TokenType::ERC20)
+    }
+    
+    /// Bridge token sang BSC dưới dạng ERC1155
     pub fn bridge_to_bsc(&mut self, bsc_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_BSC, bsc_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_BSC, bsc_address, amount, TokenType::ERC1155)
     }
 
     /// Bridge token sang Ethereum
     pub fn bridge_to_ethereum(&mut self, eth_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_ETHEREUM, eth_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_ETHEREUM, eth_address, amount, TokenType::ERC20)
     }
-
+    
     /// Bridge token sang Solana
     pub fn bridge_to_solana(&mut self, solana_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_SOLANA, solana_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_SOLANA, solana_address, amount, TokenType::ERC20)
     }
     
     /// Bridge token sang Polygon
     pub fn bridge_to_polygon(&mut self, polygon_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_POLYGON, polygon_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_POLYGON, polygon_address, amount, TokenType::ERC20)
     }
     
     /// Bridge token sang SUI
     pub fn bridge_to_sui(&mut self, sui_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_SUI, sui_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_SUI, sui_address, amount, TokenType::ERC20)
     }
     
     /// Bridge token sang Pi Network
     pub fn bridge_to_pi(&mut self, pi_address: Vec<u8>, amount: U128) -> Promise {
-        self.wrap_to_chain(LAYERZERO_CHAIN_ID_PI, pi_address, amount)
+        self.wrap_to_chain(LAYERZERO_CHAIN_ID_PI, pi_address, amount, TokenType::ERC20)
     }
     
     /// Lấy tên của chain từ chain ID
