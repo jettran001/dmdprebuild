@@ -255,27 +255,6 @@ Ngày: 31/08/2024
 
 ### **LỖI TIỀM ẨN MỚI PHÁT HIỆN (2024-07)**
 
-4. **blockchain/src/smartcontracts/dmd_token.rs**. Phương thức `bridge_tokens` rất dài (245 dòng) và có quá nhiều logic lồng nhau, tạo ra một phương thức phức tạp và khó bảo trì. Cần tái cấu trúc thành các phương thức nhỏ hơn, chuyên biệt cho từng chức năng.
-
-5. **blockchain/src/smartcontracts/dmd_token.rs**. Nhiều phương thức transfer có mã gần như giống nhau (transfer_to_polygon, transfer_to_avalanche, v.v.), gây ra trùng lặp code và khó bảo trì. Cần tái cấu trúc để sử dụng chung mẫu code cho các blockchain tương thích EVM.
-
-6. **blockchain/src/smartcontracts/dmd_token.rs**. Một số nhánh logic trong bridge_tokens xử lý lỗi chưa nhất quán (ví dụ: lỗi xác thực input, lỗi gọi API, lỗi cập nhật trạng thái). Cần chuẩn hóa xử lý lỗi và log cho từng nhánh, đảm bảo trả về lỗi rõ ràng và ghi log đầy đủ.
-
-7. **blockchain/src/smartcontracts/dmd_token.rs**. Một số hàm transfer và bridge vẫn còn logic kiểm tra trạng thái giao dịch chưa đồng nhất giữa các chain (ví dụ: chỉ kiểm tra tx_hash mà không xác thực receipt hoặc trạng thái thành công/thất bại). Cần chuẩn hóa kiểm tra trạng thái giao dịch sau khi gửi trên tất cả các chain.
-
-8. **blockchain/src/smartcontracts/dmd_token.rs**. Các hàm transfer và bridge có thể chưa kiểm tra đủ điều kiện về số dư, phí gas, hoặc trạng thái khóa token trước khi thực hiện giao dịch. Cần bổ sung kiểm tra này để tránh lỗi runtime hoặc mất tài sản.
-
-9. **blockchain/src/common/chain_types.rs, blockchain/src/stake/constants.rs**. Một số hàm test sử dụng unwrap() trên kết quả chuyển đổi enum hoặc parsing, có thể gây panic nếu dữ liệu đầu vào không hợp lệ. Cần thay thế bằng expect với thông báo rõ ràng hoặc kiểm tra kết quả trả về trước khi unwrap.
-
-10. **blockchain/src/farm/factorry.rs, blockchain/src/stake/validator.rs**. Việc clone các struct lớn (như Factory, ValidatorSnapshot) có thể gây tốn bộ nhớ và lỗi logic nếu không đồng bộ dữ liệu giữa các instance. Cần kiểm tra lại các vị trí clone() và cân nhắc dùng Arc hoặc reference thay vì clone toàn bộ struct.
-
-11. **blockchain/src/stake/validator.rs**. Một số hàm chưa implement đầy đủ (ví dụ: stop_auto_snapshot chỉ log cảnh báo chưa implement). Cần bổ sung logic hoàn thiện hoặc đánh dấu rõ ràng TODO để tránh nhầm lẫn khi sử dụng.
-
-12. **blockchain/src/smartcontracts/dmd_token.rs**. Một số hàm transfer và bridge vẫn còn logic kiểm tra trạng thái giao dịch chưa đồng nhất giữa các chain (ví dụ: chỉ kiểm tra tx_hash mà không xác thực receipt hoặc trạng thái thành công/thất bại). Cần chuẩn hóa kiểm tra trạng thái giao dịch sau khi gửi trên tất cả các chain.
-
-13. **blockchain/src/common/bridge_utils.rs**. Một số hàm sử dụng lock() trên Mutex mà không timeout hoặc kiểm tra lỗi, có thể gây deadlock nếu lock bị poison. Nên bổ sung timeout hoặc xử lý lỗi rõ ràng khi không lấy được lock.
-
-14. **blockchain/src/stake/farm_logic.rs, blockchain/src/farm/farm_logic.rs**. Cần kiểm tra lại các hàm remove_liquidity, unstake, execute_remove_liquidity_transaction để đảm bảo không bỏ sót kiểm tra trạng thái pool, quyền user, và trạng thái giao dịch trước khi thực hiện thao tác.
 
 7. [FIXED] **blockchain/src/smartcontracts/dmd_token.rs**. Một số hàm transfer và bridge vẫn còn logic kiểm tra trạng thái giao dịch chưa đồng nhất giữa các chain (ví dụ: chỉ kiểm tra tx_hash mà không xác thực receipt hoặc trạng thái thành công/thất bại). Cần chuẩn hóa kiểm tra trạng thái giao dịch sau khi gửi trên tất cả các chain.
    - Đã sửa: Chuẩn hóa hàm transfer_to_polygon để đợi và kiểm tra receipt, bao gồm trạng thái, và đã thêm cơ chế retry khi giao dịch thất bại hoặc timeout. Thêm kiểm tra số dư token và MATIC đầy đủ trước khi gửi giao dịch.
