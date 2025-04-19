@@ -1,0 +1,407 @@
+# Danh sách bug đã phát hiện trong quá trình phát triển
+## Date: 2022-05-01
+
+### **BUGS ĐÃ SỬA**
+
+1. **blockchain/src/stake/farm_logic.rs** và **blockchain/src/farm/farm_logic.rs** (2023-05-10). Mã nguồn bị trùng lặp:
+   - Hai module chứa logic trùng lặp cho farming và staking.
+   - Cần tái cấu trúc để tạo một module logic chung.
+   - Đã sửa: Tạo module chung `blockchain/src/common/farm_base.rs` với các trait, kiểu dữ liệu và utility functions dùng chung. Module này cung cấp BaseFarmPool, FarmingOperations và BlockchainSyncOperations để các module farm và stake kế thừa.
+
+2. **blockchain/src/bridge/oracle.rs** (2023-05-10). Thiếu phương thức phát hiện giao dịch bất thường:
+   - Cần một cơ chế để giám sát và phát hiện các giao dịch đáng ngờ.
+   - Có thể gây nguy cơ bảo mật và rủi ro tấn công.
+   - Đã sửa: Thêm phương thức `detect_abnormal_transaction` để kiểm tra giới hạn giao dịch, phân tích lịch sử người gửi và nhận, và phát hiện mẫu giao dịch đáng ngờ.
+
+3. [FIXED] **blockchain/src/bridge/evm_spoke.rs**. Thiếu kiểm tra số dư:
+   - `send_to_hub` không kiểm tra số dư token trước khi gửi giao dịch.
+   - Đã thêm kiểm tra số dư token và xử lý lỗi phù hợp trước khi thực hiện giao dịch.
+   - Ngày sửa: 2023-05-15
+
+4. [FIXED] **blockchain/src/bridge/bridge.rs**. Thiếu xác nhận trong các phương thức giao dịch:
+   - Không kiểm tra giá trị đầu vào cho `create_transaction`.
+   - Thiếu xác thực cho `complete_transaction` và `fail_transaction`.
+   - Đã cải thiện phương thức `complete_transaction` với xác thực đầu vào, kiểm tra định dạng hash, xác minh trạng thái giao dịch hợp lệ, kiểm tra hash trùng lặp và phát hiện giao dịch đáng ngờ.
+   - Đã cải thiện phương thức `fail_transaction` với xác thực đầu vào, kiểm tra độ dài thông báo lỗi, làm sạch dữ liệu đầu vào và ghi nhật ký chi tiết.
+   - Đã thêm chức năng ghi nhật ký giao dịch đáng ngờ để theo dõi.
+   - Ngày sửa: 2023-05-20
+
+5. [FIXED] **blockchain/src/bridge/near_hub.rs**. Vấn đề trong xử lý timeouts:
+   - Không xử lý timeout trong `wait_for_transaction_finality`.
+   - Có thể dẫn đến treo ứng dụng.
+   - Đã triển khai phương thức `wait_for_transaction_finality` với cơ chế timeout sử dụng tokio::select.
+   - Đã cập nhật `receive_from_spoke` và `send_to_spoke` để sử dụng phương thức mới này, tránh treo ứng dụng.
+   - Ngày sửa: 2023-07-15
+
+6. [FIXED] **blockchain/src/bridge/near_hub.rs**. Thiếu xác thực trong `receive_from_spoke`:
+   - Không kiểm tra đầy đủ địa chỉ nguồn và đích.
+   - Có nguy cơ bị lừa đảo với địa chỉ giả mạo.
+   - Đã triển khai các phương thức `validate_address`, `check_blocked_address`, và `is_contract_address` để kiểm tra toàn diện.
+   - Đã cải thiện xác thực địa chỉ với regex cho mỗi loại blockchain.
+   - Đã thêm kiểm tra địa chỉ nằm trong danh sách bị chặn.
+   - Đã thêm kiểm tra giới hạn số lượng token được bridge.
+   - Ngày sửa: 2023-07-20
+
+7. [FIXED] **blockchain/src/bridge/persistent_repository.rs**. Xử lý lỗi kém trong `write_to_file`:
+   - Không xử lý đúng lỗi ghi file.
+   - Khả năng mất dữ liệu khi đĩa đầy hoặc quyền truy cập bị từ chối.
+   - Đã cải thiện phương thức với các tính năng:
+     - Kiểm tra quyền truy cập và không gian đĩa trước khi ghi
+     - Sao lưu file hiện có trước khi ghi đè
+     - Xử lý chi tiết các loại lỗi IO (đĩa đầy, quyền bị từ chối, lỗi khác)
+     - Cơ chế khôi phục tự động từ bản sao lưu khi ghi thất bại
+     - Ghi nhật ký chi tiết các bước và lỗi
+   - Ngày sửa: 2023-07-20
+
+8. [FIXED] **blockchain/src/bridge/bridge.rs**. Hiệu suất kém trong `find_adapter`:
+   - Tìm kiếm tuyến tính qua tất cả bộ điều hợp có thể chậm với nhiều bộ điều hợp.
+   - Đã cải thiện bằng cách:
+     - Thêm một HashMap mới (`adapter_map`) để ánh xạ trực tiếp từ chain đến adapter
+     - Tối ưu hóa cache bằng cách lưu trữ kết quả tìm kiếm
+     - Thêm tính năng đo lường hiệu suất tìm kiếm để theo dõi
+     - Giảm số lượng vòng lặp bằng cách sử dụng các phương thức `position` và `contains`
+     - Ghi log cảnh báo khi tìm kiếm chậm
+   - Ngày sửa: 2023-07-20
+
+9. [FIXED] **blockchain/src/bridge/bridge.rs**. Vấn đề hiệu suất trong `complete_transaction`:
+   - Cập nhật cache giao dịch cho mỗi giao dịch không hiệu quả.
+   - Đã cải thiện bằng cách:
+     - Triển khai cơ chế xử lý hàng loạt cho việc cập nhật giao dịch
+     - Sử dụng hàng đợi và worker riêng để xử lý các cập nhật không đồng bộ
+     - Thêm phương thức `save_batch` để lưu nhiều giao dịch cùng lúc
+     - Tối ưu việc ghi ra đĩa chỉ một lần thay vì nhiều lần
+     - Cập nhật cache ngay lập tức trong khi ghi đĩa xảy ra bất đồng bộ
+     - Cung cấp cơ chế sao lưu và phục hồi khi có lỗi
+   - Ngày sửa: 2023-07-20
+
+10. [FIXED] **blockchain/src/bridge/config.rs**. Bảo mật yếu cho khóa riêng tư:
+   - Lưu trữ khóa riêng tư trong `BridgeConfig` không an toàn.
+   - Đã cải thiện bằng cách:
+     - Triển khai `KeyVault` và `MemoryKeyVault` để quản lý khóa an toàn
+     - Thay thế lưu trữ khóa trực tiếp bằng ID tham chiếu đến khóa trong vault
+     - Thêm giới hạn số lần truy cập và thời gian hết hạn cho khóa
+     - Tự động xóa khóa khỏi bộ nhớ sau khi sử dụng
+     - Thêm logging và theo dõi việc sử dụng khóa
+     - Mã hóa khóa khi lưu trữ và chỉ giải mã khi cần thiết
+   - Ngày sửa: 2023-08-01
+
+11. [FIXED] **blockchain/src/bridge/sol_hub.rs**. Triển khai chưa đầy đủ của BridgeHub trait:
+    - Mới chỉ triển khai phương thức `initialize`, còn thiếu các phương thức cốt lõi như `check_transaction_status`, `get_transaction`, `estimate_fee`, `get_supported_chains`, `cleanup_transaction_cache` và `manage_cache`.
+    - Đã hoàn thiện triển khai đầy đủ BridgeHub trait với các phương thức:
+      - `check_transaction_status`: Kiểm tra trạng thái giao dịch.
+      - `get_transaction`: Lấy chi tiết giao dịch.
+      - `estimate_fee`: Ước tính phí giao dịch dựa trên chain đích và số lượng token.
+      - `get_supported_chains`: Lấy danh sách các blockchain được hỗ trợ.
+      - `cleanup_transaction_cache`: Dọn dẹp cache giao dịch cũ.
+      - `manage_cache`: Quản lý cache giao dịch tự động.
+    - Đã kết nối `receive_from_spoke` và `send_to_spoke` vào trait.
+    - Ngày sửa: 2023-08-15
+
+12. [FIXED] **blockchain/src/bridge/sol_hub.rs**. Kiểm tra số dư không đầy đủ:
+    - Thiếu triển khai kiểm tra số dư trong phương thức `send_to_spoke`.
+    - Đã thêm kiểm tra cả số dư SOL (cho phí giao dịch) và số dư token (cho số lượng cần bridge).
+    - Đã triển khai phương thức `check_solana_balance` để kiểm tra số dư SOL.
+    - Ngày sửa: 2023-08-15
+
+13. [FIXED] **blockchain/src/bridge/mod.rs**. Sử dụng unwrap() không an toàn trong hàm cấu hình:
+    - Các hàm `set_bridge_config` và `get_bridge_config` sử dụng `unwrap()` trên RwLock.
+    - Có thể gây panic khi lock bị poison.
+    - Đã cải thiện bằng cách:
+      - Thay thế `unwrap()` bằng `map_err` để trả về lỗi phù hợp thay vì panic
+      - Thêm thông báo lỗi chi tiết để dễ dàng debug
+      - Chuyển các hàm cấu hình này để trả về Result thay vì panic
+      - Cập nhật toàn bộ các hàm khác gọi đến hàm này để xử lý lỗi đúng cách
+    - Ngày sửa: 2024-06-26
+
+14. [FIXED] **blockchain/src/bridge/persistent_repository.rs**. Sử dụng unwrap() không an toàn trong RwLock:
+    - Sử dụng unwrap() trong nhiều vị trí khi thao tác với RwLock hoặc thực hiện I/O.
+    - Có thể gây panic nếu lock bị poison, đặc biệt trong môi trường đa luồng.
+    - Đã cải thiện bằng cách:
+      - Thay thế tất cả các `unwrap()` bằng xử lý lỗi phù hợp với `map_err` trong cache operations
+      - Thêm khả năng khôi phục từ lock bị poison trong worker xử lý bất đồng bộ
+      - Cải thiện log thông báo lỗi chi tiết khi không thể lấy lock
+      - Đảm bảo ứng dụng có thể tiếp tục hoạt động khi có lỗi lock, thay vì crash
+    - Ngày sửa: 2024-06-26
+
+15. [FIXED] **blockchain/src/bridge/manager.rs**. Sử dụng unwrap() trên Mutex trong các hàm của MockBridgeTransactionRepository:
+    - Sử dụng Mutex lock với `unwrap()` trong tất cả các phương thức của repository.
+    - Có thể gây panic chuỗi khi một thread panic trong khi giữ lock.
+    - Đã cải thiện bằng cách:
+      - Thay thế `lock().unwrap()` bằng `lock().map_err()?` để trả về lỗi thay vì panic
+      - Đảm bảo xử lý lỗi phù hợp khi không thể lấy lock
+      - Thống nhất cách xử lý lỗi trong tất cả các phương thức repository
+    - Ngày sửa: 2024-06-26
+
+16. [FIXED] **blockchain/src/bridge/sol_hub.rs**. Xử lý private key không an toàn:
+    - Private key được truyền trực tiếp vào phương thức `send_to_spoke`.
+    - Có thể gây rò rỉ thông tin private key trong các trường hợp có lỗi hoặc xử lý không đúng.
+    - Đã cải thiện bằng cách:
+      - Thay đổi phương thức để nhận key_id thay vì private_key trực tiếp
+      - Sử dụng KeyVault để lấy khóa an toàn qua config.get_operator_key_for_signing()
+      - Sử dụng SecurePrivateKey.expose_for_signing() với các kiểm tra bảo mật
+      - Xóa khóa khỏi bộ nhớ ngay lập tức sau khi sử dụng
+      - Bổ sung phương thức send_tokens_to_chain trong BridgeHub với tham số key_id
+    - Ngày sửa: 2024-06-27
+
+17. [FIXED] **blockchain/src/bridge/sol_hub.rs**. Thiếu cơ chế lưu trữ bền vững:
+    - Hiện tại chỉ lưu giao dịch trong bộ nhớ thông qua `transactions` field.
+    - Giao dịch sẽ bị mất khi khởi động lại ứng dụng.
+    - Đã cải thiện bằng cách:
+      - Thêm field `persistent_repo: Option<Arc<dyn BridgeTransactionRepository + Send + Sync>>` để lưu trữ giao dịch
+      - Thêm phương thức `with_persistent_repository` để cấu hình repository
+      - Thêm phương thức `init_default_repository` để khởi tạo JsonBridgeTransactionRepository
+      - Cập nhật `store_transaction` và `update_transaction` để lưu vào repository
+      - Cập nhật `check_transaction_status` và `get_transaction` để tìm kiếm từ repository khi không có trong cache
+      - Cập nhật `cleanup_transaction_cache` để xóa giao dịch từ repository
+      - Cập nhật `manage_cache` để đồng bộ dữ liệu với repository
+      - Thêm phương thức `load_transactions_from_repository` để tải dữ liệu ban đầu
+    - Ngày sửa: 2024-06-27
+
+18. [FIXED] **blockchain/src/exchange/pairs.rs**. Thiếu xác thực cho cập nhật cặp:
+    - Không xác thực đúng khi cập nhật thông tin cặp.
+    - Có thể dẫn đến tình trạng không nhất quán.
+    - Đã sửa: Thêm cấu trúc PairValidation với các giá trị cơ bản về xác thực, cải thiện hàm update_pair để xác thực dữ liệu đầu vào, thêm log để theo dõi thay đổi và kiểm tra độ lệch giá khi cập nhật giá oracle.
+
+19. [FIXED] **blockchain/src/bridge/sol_hub.rs**, **blockchain/src/bridge/near_hub.rs**, **blockchain/src/bridge/bridge.rs**. Sử dụng Regex::new(...).unwrap() không an toàn:
+    - Các module này sử dụng Regex::new(...).unwrap() để tạo regex.
+    - Có thể gây crash khi regex không hợp lệ.
+    - Đã sửa: Chuyển sang dùng once_cell::sync::Lazy kết hợp với Regex::new(...).expect("Error message") để tạo regex một lần duy nhất và xử lý lỗi rõ ràng.
+    - Ngày sửa: 2024-06-30
+
+20. [FIXED] **blockchain/src/bridge/bridge.rs**. Có thể xảy ra deadlock hoặc race condition khi cập nhật adapter_map và adapter_cache:
+    - Sử dụng write lock đồng thời ở nhiều nơi dẫn đến khả năng deadlock.
+    - Cập nhật hai maps riêng biệt có thể tạo ra trạng thái không nhất quán và race conditions.
+    - Đã sửa: Thay đổi phương thức find_adapter và register_adapter để sử dụng try_read/try_write thay vì unwrap, thêm xử lý lỗi phù hợp, và tách cơ chế cập nhật maps thành hàm riêng để tăng tính nhất quán khi cập nhật.
+    - Ngày sửa: 2024-06-30
+
+21. [FIXED] **blockchain/src/bridge/bridge.rs**. Một số hàm xử lý transaction lớn hoặc bất thường chỉ log cảnh báo mà không có cơ chế tự động cảnh báo admin hoặc tạm dừng giao dịch để kiểm tra thủ công. [2024-07-01]
+    Sửa: Thêm cơ chế thông báo tự động cho admin qua admin_notifier trong các hàm log_suspicious_transaction và fail_transaction. Cài đặt chức năng tạm dừng giao dịch (pause_all_pending_transactions) để kiểm tra thủ công khi phát hiện giao dịch đáng ngờ.
+
+22. [FIXED] **blockchain/src/stake/validator.rs**. Chưa có cơ chế cảnh báo tự động khi validator mất kết nối hoặc không tham gia consensus liên tục. [2024-07-01]
+    Sửa: Thêm cấu trúc ValidatorAlert, AlertNotifierFn và hàm thông báo cảnh báo. Bổ sung phương thức kiểm tra kết nối và tham gia consensus theo định kỳ, tính năng tự động phát hiện validator mất kết nối hoặc bỏ lỡ consensus liên tiếp với hệ thống mức độ cảnh báo. Thêm các trạng thái chi tiết cho validator và chức năng tự động tạm dừng/phạt validator dựa trên mức độ vi phạm.
+
+23. [FIXED] **blockchain/src/oracle/mod.rs**. Khi fetch_data từ nhiều nguồn, nếu tất cả nguồn đều lỗi chỉ trả về lỗi chung mà không ghi lại chi tiết từng nguồn lỗi. [2024-07-03]
+    Sửa: Thêm cấu trúc SourceErrorLog để lưu chi tiết lỗi cho từng nguồn dữ liệu, thêm các phương thức log_source_error, get_source_error_logs, get_source_error_logs_filtered để lưu trữ và truy vấn thông tin lỗi. Bổ sung phương thức fetch_data để ghi lại chi tiết lỗi từng nguồn, bao gồm thời gian truy vấn, thông tin nguồn dữ liệu, và chi tiết lỗi. Bổ sung phương thức analyze_error_logs để phân tích và cảnh báo khi có nguồn dữ liệu bị lỗi nhiều, và export_error_logs để xuất log lỗi ra file.
+
+24. [FIXED] **blockchain/src/bridge/oracle.rs**. Khi thêm provider mới, nếu provider không hỗ trợ chain nào sẽ chỉ log cảnh báo mà không chặn thêm provider. [2024-07-03]
+    Sửa: Cải thiện phương thức add_provider để từ chối thêm provider không hỗ trợ chain nào thông qua cài đặt require_supported_chains (mặc định là true). Thêm khả năng cấu hình hành vi này bằng phương thức set_require_supported_chains. Cải thiện cảnh báo để rõ ràng hơn khi provider thiếu các chain quan trọng. Thêm hiển thị thông tin đầy đủ về các chain được hỗ trợ và các chain quan trọng bị thiếu.
+
+25. [FIXED] **blockchain/src/bridge/oracle.rs**. Hàm detect_abnormal_transaction chỉ kiểm tra số lượng giao dịch và tần suất, chưa kiểm tra các mẫu giao dịch phức tạp (ví dụ: giao dịch vòng tròn, wash trading). [2024-07-03]
+    Sửa: Mở rộng cấu trúc SenderHistory để theo dõi thêm các thông tin như danh sách người nhận gần đây, mẫu giao dịch vòng tròn đã phát hiện, chuỗi bất thường, và điểm đánh giá rủi ro. Thêm các cấu trúc dữ liệu mới: SuspiciousPatternType và SuspiciousPatternDetail để phân loại và cung cấp thông tin chi tiết về các mẫu đáng ngờ. Triển khai phương thức detect_suspicious_pattern_with_details và các phương thức chuyên biệt để phát hiện 7 loại mẫu giao dịch phức tạp: giao dịch vòng tròn, chia nhỏ giao dịch, giao dịch trên chuỗi bất thường, tài khoản mới với giao dịch lớn, mẫu tam giác, giao dịch với đối tác bị chặn, và giao dịch song song.
+
+26. [FIXED] **blockchain/src/stake/stake_logic.rs**. Khi refresh_cache_if_needed, nếu dữ liệu blockchain trả về không hợp lệ chỉ trả về lỗi mà không có cơ chế tự động cảnh báo hoặc rollback cache. [2024-07-03]
+    Sửa: Cải thiện phương thức refresh_cache_if_needed để thêm cơ chế khôi phục cache trước đó khi phát hiện dữ liệu không hợp lệ. Thêm phương thức validate_pool_data để kiểm tra toàn diện dữ liệu pool. Thêm hai phương thức thông báo cho admin: notify_admin_invalid_data và notify_admin_blockchain_error để gửi cảnh báo tự động khi phát hiện vấn đề. Nâng cấp xử lý lỗi từ cảnh báo (warn) lên lỗi nghiêm trọng (error) cho các trường hợp dữ liệu không hợp lệ.
+
+27. [FIXED] **blockchain/src/bridge/near_hub.rs**. Hàm manage_cache chỉ dọn dẹp cache theo ngưỡng, chưa có cơ chế tự động mở rộng cache khi hệ thống tăng tải đột biến. [2024-07-03]
+    Sửa: Thêm cấu trúc CacheMetrics để theo dõi hiệu suất và tốc độ tăng trưởng cache. Cải thiện phương thức manage_cache để phát hiện tăng tải đột biến dựa trên tốc độ tăng trưởng cache. Thêm phương thức auto_scale_cache để tự động mở rộng kích thước cache khi cần thiết. Bổ sung cơ chế thông báo cho admin khi phát hiện tăng tải đột biến hoặc cache gần đạt ngưỡng. Thêm các phương thức with_max_cache_size, with_auto_scaling và with_admin_notifier để cấu hình tính năng này.
+
+28. [FIXED] **blockchain/src/bridge/config.rs**. Mặc dù hiện tại dùng Result thay vì unwrap() cho xử lý khóa, nhưng cần review code để đảm bảo xử lý tốt tất cả các error path, đặc biệt khi key vault không khả dụng hoặc khóa đã hết hạn. [2024-07-03]
+    Sửa: Tạo enum KeyError với các mã lỗi cụ thể thay vì chỉ dùng String. Cải thiện SecurePrivateKey để theo dõi ID khóa và cung cấp thêm các phương thức kiểm tra trạng thái. Nâng cấp KeyVault trait với các phương thức list_keys, renew_key, và status. Thêm cơ chế ghi log truy cập và dọn dẹp khóa hết hạn. Cải thiện phương thức get_operator_key_for_signing và store_operator_key với xử lý lỗi chi tiết khi vault không khả dụng hoặc khóa hết hạn. Thêm phương thức try_renew_operator_key và check_vault_status để quản lý trạng thái khóa tốt hơn.
+
+29. [FIXED] **blockchain/src/common/chain_types.rs**. Trùng lặp định nghĩa enum DmdChain và các hàm tiện ích. [2024-07-10]
+    Sửa: Tạo module mới `blockchain/src/common/chain_types.rs` chứa enum DmdChain và các hàm tiện ích để xác thực địa chỉ, chuyển đổi giữa chain ID và enum DmdChain. Cải thiện hàm validate_address với regex cho từng loại blockchain. Thêm các hàm chuyển đổi chain_id_to_chain và chain_to_chain_id. Cập nhật tất cả các module liên quan để sử dụng module chung này thay vì định nghĩa lại.
+
+30. [FIXED] **blockchain/src/common/farm_base.rs**. Trùng lặp logic farm/stake: Các file `blockchain/src/stake/farm_logic.rs` và `blockchain/src/farm/farm_logic.rs` có chức năng tương tự và trùng lặp logic. [2024-07-11]
+    Sửa: Tạo module chung `blockchain/src/common/farm_base.rs` với các trait, kiểu dữ liệu và utility functions dùng chung. Module này cung cấp BaseFarmPool, FarmingOperations và BlockchainSyncOperations để các module farm và stake kế thừa.
+
+31. [FIXED] **blockchain/src/common/suspicious_detection.rs**. Trùng lặp logic phát hiện giao dịch đáng ngờ: Các file bridge có logic trùng lặp để xác định giao dịch bất thường. [2024-07-11]
+    Sửa: Tạo module chung `blockchain/src/common/suspicious_detection.rs` chứa các kiểu dữ liệu và chức năng để phát hiện giao dịch đáng ngờ, bao gồm SuspiciousTransactionType, SuspiciousTransactionRecord và SuspiciousTransactionManager. Module này cung cấp các phương thức check_transaction, check_large_amount, check_suspicious_addresses, check_transaction_frequency, và check_repetitive_patterns để xác định các loại giao dịch bất thường.
+
+32. [FIXED] **blockchain/src/common/bridge_utils.rs**. Trùng lặp logic quản lý cache và phát hiện tăng tải đột biến: Cơ chế dọn dẹp cache, mở rộng cache tự động, cảnh báo admin trong near_hub và sol_hub. [2024-07-12]
+    Sửa: Tạo module chung `blockchain/src/common/bridge_utils.rs` với module con `cache_manager` để cung cấp chức năng quản lý cache dùng chung. Cài đặt CacheMetrics để theo dõi hiệu suất, GenericCacheManager có khả năng tự động mở rộng kích thước, dọn dẹp cache, và thông báo cho admin khi phát hiện tăng tải đột biến hoặc cache gần đầy. Bổ sung các phương thức with_admin_notifier, with_auto_scaling, và auto_scale_cache.
+
+33. [FIXED] **blockchain/src/oracle/types.rs**. Enum `OracleDataType` thiếu thông tin đa dạng về các token khác nhau. [2024-07-14]
+    Sửa: Mở rộng enum `OracleDataType` để chứa thông tin token cụ thể bằng cách thêm struct `TokenIdentifier` với các thông tin về địa chỉ token, chain, và symbol. Cập nhật tất cả các variants của enum để chứa thông tin token và triển khai các tiện ích như `type_name()`, `related_chain()`, `related_token()` và `to_key()` để dễ dàng sử dụng trong map và lookup.
+
+34. [FIXED] **blockchain/src/oracle/types.rs**. Phương thức `analyze_errors` chỉ phát hiện một số lỗi cứng (hardcoded). [2024-07-14]
+    Sửa: Triển khai struct `CriticalErrorPatterns` để quản lý các mẫu lỗi nghiêm trọng, cho phép thêm/xóa các mẫu động. Thêm struct `ErrorAnalysisConfig` để cấu hình tiêu chí phân tích lỗi bao gồm danh sách mẫu lỗi, ngưỡng số lượng tối thiểu và tỷ lệ lỗi nghiêm trọng. Cải thiện phương thức `analyze_errors` và thêm `analyze_errors_with_config` để cho phép cấu hình từ bên ngoài.
+
+35. [FIXED] **blockchain/src/smartcontracts/mod.rs**. Sử dụng enum `DmdChain` đã được di chuyển vào `common/chain_types.rs` nhưng chưa được cập nhật import path. [2024-07-14]
+    Sửa: Cập nhật import path trong `blockchain/src/smartcontracts/mod.rs` để sử dụng `DmdChain` từ `common/chain_types.rs` thay vì từ `near_contract/smartcontract.rs`.
+
+36. [FIXED] **blockchain/src/oracle/types.rs**. Struct `TokenDistribution` sử dụng `HashMap<DmdChain, U256>` cho nhiều trường, tạo ra trùng lặp và khả năng không nhất quán dữ liệu. [2024-07-15]
+    Sửa: Tạo struct mới `ChainTokenData` để quản lý tất cả thông tin liên quan đến token trên một blockchain (total_supply, locked_amount, price, total_value, updated_at). Cải thiện struct `TokenDistribution` để sử dụng một HashMap duy nhất `chain_data: HashMap<DmdChain, ChainTokenData>` thay vì nhiều HashMaps riêng biệt. Thêm các phương thức tiện ích như new(), update_chain_data(), get_total_value(), get_total_supply(), get_total_locked() và from_legacy() để hỗ trợ chuyển đổi từ cấu trúc cũ. Triển khai phương thức update_from_oracle_report() để cập nhật thông tin từ báo cáo Oracle và đảm bảo tính nhất quán của dữ liệu.
+
+37. [FIXED] **blockchain/src/bridge/transaction.rs**. Hàm `u256_string_serializer` xử lý các định dạng số hex và thập phân, nhưng không xử lý tốt các trường hợp ngoại lệ như chuỗi rỗng hoặc không hợp lệ. [2024-07-15]
+    Sửa: Cải thiện module `u256_string_serializer` để xử lý tốt hơn các trường hợp ngoại lệ. Thêm xử lý cho chuỗi rỗng, chuỗi chỉ chứa khoảng trắng, và số có dấu phân cách (dấu phẩy hoặc dấu chấm). Bổ sung thông báo log chi tiết cho từng trường hợp lỗi để dễ dàng debug. Cải thiện thông báo lỗi để hiển thị chi tiết nguyên nhân khi deserialize thất bại. Thêm unit tests toàn diện cho module này để kiểm tra các trường hợp: serialize/deserialize số hợp lệ, deserialize chuỗi thập phân, chuỗi hex, chuỗi rỗng, chuỗi chỉ chứa khoảng trắng, số có dấu phân cách, và định dạng không hợp lệ.
+
+38. [FIXED] **blockchain/src/bridge/transaction.rs**. Trong `BridgeTransactionRepository` trait, phương thức `cleanup_completed_transactions` phải tải tất cả các giao dịch từ kho lưu trữ để tìm các giao dịch thất bại, điều này không hiệu quả khi có nhiều giao dịch. [2024-07-15]
+    Sửa: Cải thiện hiệu suất bằng cách thêm hai phương thức mới vào trait: `find_failed_transactions_before` và `find_completed_transactions_before` để tìm kiếm giao dịch thất bại và hoàn thành trước một thời điểm cụ thể. Cung cấp triển khai mặc định cho hai phương thức này, nhưng khuyến khích các lớp con ghi đè để tối ưu hiệu suất. Cập nhật phương thức `cleanup_completed_transactions` để sử dụng các phương thức mới thay vì tải tất cả các giao dịch, giúp giảm đáng kể chi phí bộ nhớ và cải thiện hiệu suất khi có nhiều giao dịch.
+
+39. **blockchain/src/bridge/bridge.rs**, **blockchain/src/bridge/oracle.rs**, **blockchain/src/common/suspicious_detection.rs**
+Mô tả: Logic phát hiện giao dịch đáng ngờ được lặp lại trong cả hai modules bridge và oracle.
+Đã tái cấu trúc để cả hai module sử dụng chung SuspiciousTransactionManager từ module suspicious_detection.rs.
+Cập nhật Bridge và OracleManager để tận dụng mã phát hiện giao dịch bất thường chung.
+Thêm các phương thức admin_notifier đồng nhất và chuyển logic kiểm tra đáng ngờ vào module chung.
+Ngày: 15/07/2024
+
+40. [FIXED] **blockchain/src/stake/validator.rs** (2024-07-15)
+Mô tả: Bộ theo dõi trạng thái validator chưa có cơ chế sao lưu và khôi phục khi xảy ra lỗi trong quá trình cập nhật.
+Đã sửa: Triển khai cơ chế snapshot để lưu và khôi phục trạng thái validator. Bổ sung struct ValidatorSnapshot, phương thức create_snapshot, restore_from_snapshot, và auto_create_snapshot. Cập nhật các phương thức update_connection_status, update_consensus_participation, register_validator, và unregister_validator để tự động tạo snapshot trước khi thực hiện thay đổi và khôi phục nếu có lỗi. Thêm các tính năng quản lý snapshot như xuất/nhập, xóa, và cấu hình số lượng snapshot tối đa.
+
+41. [FIXED] **blockchain/src/stake/validator.rs** (2024-07-24)
+Mô tả: Cơ chế snapshot hiện tại cho validator chưa có kiểm tra tính toàn vẹn dữ liệu và không thể so sánh sự khác biệt giữa các snapshot.
+Đã sửa: Cải thiện cấu trúc ValidatorSnapshot bằng cách thêm các trường integrity_hash, metadata, và alerts. Thêm phương thức verify_integrity() để kiểm tra tính toàn vẹn dữ liệu snapshot, phương thức diff() để so sánh sự khác biệt giữa các snapshot, và tính năng auto_snapshot để tự động tạo snapshot định kỳ. Bổ sung phương thức export_to_json() và import_from_json() để dễ dàng sao lưu và khôi phục snapshot từ file. Thêm hỗ trợ để lưu trữ thông tin cảnh báo và theo dõi performance của validator trong snapshot.
+
+42. [FIXED] **blockchain/src/stake/validator.rs** (2024-08-31)
+Mô tả: Thêm hệ thống theo dõi hiệu suất chi tiết cho validator
+Sửa: Cải thiện cấu trúc ValidatorSnapshot bằng cách thêm trường performance_data và cấu trúc 
+ValidatorPerformance để lưu trữ và phân tích dữ liệu hiệu suất validator như uptime, tỷ lệ tham gia 
+consensus, thời gian phản hồi và các số liệu tài nguyên. Bổ sung các phương thức phân tích để phát hiện 
+validator hoạt động bất thường và tạo báo cáo hiệu suất.
+Ngày: 31/08/2024
+
+43. [FIXED] **blockchain/onchain/brigde/bridge_adapter**. Không chuẩn hóa mapping chainId → tên chain ở tất cả adapter:
+   - Một số adapter (ví dụ Axelar) có mapping chainId → tên chain, nhưng các adapter khác không đồng nhất, dễ gây lỗi khi mở rộng hoặc truy vấn chuỗi.
+   - Đã sửa: Chuẩn hóa interface IBridgeAdapter để có hàm getChainName(uint16) trả về tên chain theo chainId. Thêm mapping chainId → tên chain và hàm thực thi trong tất cả các adapter (WormholeAdapter, LayerZeroAdapter và CustomAdapterTemplate).
+   - Ngày sửa: 2024-07-15
+
+44. [FIXED] **blockchain/onchain/brigde/bridge_adapter**. Không kiểm tra giới hạn số lượng token bridge trong một giao dịch:
+   - Nếu không giới hạn, user có thể bridge số lượng lớn gây rủi ro hoặc tấn công DoS.
+   - Đã sửa: Thêm biến limitPerTx và kiểm tra trong WormholeAdapter và LayerZeroAdapter. Giới hạn này được đặt trong constructor và có thể cập nhật thông qua hàm updateLimits.
+   - Ngày sửa: 2024-07-15
+
+45. [FIXED] **blockchain/onchain/brigde/bridge_adapter**. Không có cơ chế xác thực message (message authentication) ở các adapter mới:
+   - Nếu không xác thực message, có thể bị tấn công giả mạo hoặc replay attack.
+   - Đã sửa: Cải thiện xác thực message trong LayerZeroAdapter và WormholeAdapter bằng cách thêm và kiểm tra trustedRemotes mapping. Bắt buộc đặt trusted remote trước khi bridge.
+   - Ngày sửa: 2024-07-15
+
+46. [FIXED] **blockchain/onchain/brigde/bridge_adapter**. Không có cơ chế giới hạn tổng số lượng token bridge trong một khoảng thời gian:
+   - Nếu không giới hạn, có thể bị tấn công drain liquidity hoặc spam cross-chain.
+   - Đã sửa: Thêm biến limitPerPeriod, periodDuration và cơ chế theo dõi khối lượng giao dịch trong từng khoảng thời gian. Triển khai hàm _checkAndUpdatePeriodVolume để kiểm tra và cập nhật trong WormholeAdapter và LayerZeroAdapter.
+   - Ngày sửa: 2024-07-15
+
+47. [FIXED] **blockchain/onchain/brigde/bridge_adapter**. Không có log chi tiết khi bridge thất bại hoặc bị revert:
+   - Nếu bridge thất bại, không có log chi tiết để debug hoặc cảnh báo admin.
+   - Đã sửa: Thêm event BridgeFailed và try-catch trong bridgeTo để bắt và log lỗi. Thêm cơ chế _storeFailedMessage trong LayerZeroAdapter để theo dõi các giao dịch thất bại.
+   - Ngày sửa: 2024-07-15
+
+48. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát quyền admin/owner rõ ràng:
+   - Nếu không kiểm soát tốt, adapter có thể bị takeover hoặc bị abuse.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về kiểm soát quyền với cơ chế Ownable, onlyOperator modifier, và timelock cho các thay đổi quan trọng. Triển khai mapping operators và các hàm quản lý operator.
+   - Ngày sửa: 2024-07-15
+
+49. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát fee hoặc cấu hình phí động:
+   - Nếu không kiểm soát tốt, adapter có thể bị set phí quá cao hoặc quá thấp gây mất cân bằng hệ thống.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về fee control với baseFee, feePercentage, và MAX_FEE_PERCENTAGE. Triển khai các hàm requestFeeUpdate, applyFeeUpdate với timelock để đảm bảo an toàn khi thay đổi phí.
+   - Ngày sửa: 2024-07-15
+
+50. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi trùng lặp định nghĩa IBridgeAdapter:
+   - Interface IBridgeAdapter được định nghĩa trong cả bridge_interface.sol và trong bridge_adapter/IBridgeAdapter.sol.
+   - Đã sửa: Loại bỏ định nghĩa trùng lặp IBridgeAdapter trong bridge_interface.sol và thay thế bằng import từ bridge_adapter/IBridgeAdapter.sol.
+   - Ngày sửa: 2024-07-15
+
+51. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi getTokenAddress() trả về address(0):
+   - Hàm getTokenAddress() chỉ định nghĩa virtual nhưng không có triển khai mặc định, trả về address(0) gây lỗi.
+   - Đã sửa: Thêm biến state wrappedDMDToken và triển khai hàm getTokenAddress() để trả về địa chỉ token thực tế. Thêm hàm updateTokenAddress để cho phép cập nhật địa chỉ token.
+   - Ngày sửa: 2024-07-15
+
+52. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi kiểm tra feeCollector khi tính phí:
+   - Chỉ kiểm tra feeCollector khác address(0) nhưng vẫn chấp nhận giao dịch nếu feeCollector là address(0).
+   - Đã sửa: Thay đổi logic kiểm tra feeCollector để revert nếu feeCollector chưa được đặt, đảm bảo tính nhất quán của hệ thống.
+   - Ngày sửa: 2024-07-15
+
+53. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Thêm multi-sig cho rút tiền:
+   - Các hàm withdrawETH và withdrawToken chỉ kiểm tra onlyOwner mà không có thêm bảo vệ.
+   - Đã sửa: Thay thế bằng hệ thống multi-sig với timelock cho việc rút tiền. Triển khai các hàm requestWithdrawETH, requestWithdrawToken, approveWithdrawal, và các hàm thực hiện có timelock.
+   - Ngày sửa: 2024-07-15
+
+54. [FIXED] **blockchain/onchain/brigde/bridge_adapter/WormholeAdapter.sol**. Thêm modifier onlyOwner và cập nhật bảo mật:
+   - Các hàm updateWormholeAddress và updateConsistencyLevel thiếu modifier onlyOwner.
+   - Đã sửa: Thêm modifier onlyOwner cho các hàm cập nhật. Thêm kiểm tra trusted remote khi gửi message. Bổ sung hàm setTrustedRemote và getTrustedRemote.
+   - Ngày sửa: 2024-07-15
+
+55. [FIXED] **blockchain/onchain/brigde/bridge_adapter/LayerZeroAdapter.sol**. Cải thiện kiểm tra trusted remote:
+   - Thiếu kiểm tra trusted remote khi gửi message và cải thiện kiểm tra trong _nonblockingLzReceive.
+   - Đã sửa: Thêm kiểm tra trustedRemotes[dstChainId].length > 0 trước khi gửi message. Cải thiện _nonblockingLzReceive với kiểm tra byte-by-byte và try-catch để bắt lỗi.
+   - Ngày sửa: 2024-07-15
+
+56. [FIXED] **blockchain/onchain/brigde/erc20_wrappeddmd.sol**. Sửa lỗi reentrancy trong bridgeToNear:
+   - Hàm bridgeToNear không tuân thủ pattern check-effects-interactions.
+   - Đã sửa: Áp dụng pattern check-effects-interactions, thêm ReentrancyGuard, và thực hiện burn token trước khi gọi external contract.
+   - Ngày sửa: 2024-07-15
+
+57. [FIXED] **blockchain/onchain/brigde/erc1155_wrapper.sol**. Thêm ReentrancyGuard và emergencyUnwrap:
+   - Các hàm wrap và unwrap thiếu ReentrancyGuard và không có cơ chế khẩn cấp.
+   - Đã sửa: Thêm nonReentrant modifier cho wrap và unwrap. Bổ sung hàm emergencyUnwrap để cung cấp cơ chế khẩn cấp khi bridge bị tắt.
+   - Ngày sửa: 2024-07-15
+
+58. [FIXED] **blockchain/onchain/brigde/erc1155_bridge_adapter.sol**. Mapping supportedChains chỉ set cứng cho NEAR/Solana:
+   - Khi mở rộng chain mới phải sửa code, dễ gây lỗi hoặc quên cập nhật.
+   - Đã sửa: Cho phép owner cập nhật mapping chainId động, log mọi thay đổi chainId.
+   - Ngày sửa: 2024-07-15
+
+59. [FIXED] **blockchain/onchain/brigde/erc1155_bridge_adapter.sol**. Không có cơ chế emergency withdraw cho token bị kẹt:
+   - Nếu bridge fail hoặc stuck, user không thể rút lại token.
+   - Đã sửa: Thêm hàm emergency withdraw cho owner hoặc user có proof hợp lệ.
+   - Ngày sửa: 2024-07-15
+
+60. [FIXED] **blockchain/onchain/brigde/bridge_adapter/LayerZeroAdapter.sol**. Không kiểm tra trusted remote khi gửi message:
+   - Nếu cấu hình trusted remote sai, có thể bị tấn công spoofing hoặc gửi nhầm chain.
+   - Đã sửa: Bổ sung mapping trustedRemote và kiểm tra trước khi gửi message.
+   - Ngày sửa: 2024-07-15
+
+61. [FIXED] **blockchain/onchain/brigde/bridge_adapter/WormholeAdapter.sol**. Các hàm updateWormholeAddress/updateConsistencyLevel không có modifier onlyOwner:
+   - Có thể bị bất kỳ ai gọi, gây mất quyền kiểm soát adapter.
+   - Đã sửa: Thêm modifier onlyOwner cho các hàm này. Thêm kiểm tra trusted remote khi gửi message. Bổ sung hàm setTrustedRemote và getTrustedRemote.
+   - Ngày sửa: 2024-07-15
+
+62. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát quyền admin/owner rõ ràng:
+   - Nếu không kiểm soát tốt, adapter có thể bị takeover hoặc bị abuse.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về kiểm soát quyền với cơ chế Ownable, onlyOperator modifier, và timelock cho các thay đổi quan trọng. Triển khai mapping operators và các hàm quản lý operator.
+   - Ngày sửa: 2024-07-15
+
+63. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát fee hoặc cấu hình phí động:
+   - Nếu không kiểm soát tốt, adapter có thể bị set phí quá cao hoặc quá thấp gây mất cân bằng hệ thống.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về fee control với baseFee, feePercentage, và MAX_FEE_PERCENTAGE. Triển khai các hàm requestFeeUpdate, applyFeeUpdate với timelock để đảm bảo an toàn khi thay đổi phí.
+   - Ngày sửa: 2024-07-15
+
+64. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi trùng lặp định nghĩa IBridgeAdapter:
+   - Interface IBridgeAdapter được định nghĩa trong cả bridge_interface.sol và trong bridge_adapter/IBridgeAdapter.sol.
+   - Đã sửa: Loại bỏ định nghĩa trùng lặp IBridgeAdapter trong bridge_interface.sol và thay thế bằng import từ bridge_adapter/IBridgeAdapter.sol.
+   - Ngày sửa: 2024-07-15
+
+65. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi getTokenAddress() trả về address(0):
+   - Hàm getTokenAddress() chỉ định nghĩa virtual nhưng không có triển khai mặc định, trả về address(0) gây lỗi.
+   - Đã sửa: Thêm biến state wrappedDMDToken và triển khai hàm getTokenAddress() để trả về địa chỉ token thực tế. Thêm hàm updateTokenAddress để cho phép cập nhật địa chỉ token.
+   - Ngày sửa: 2024-07-15
+
+66. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Sửa lỗi kiểm tra feeCollector khi tính phí:
+   - Chỉ kiểm tra feeCollector khác address(0) nhưng vẫn chấp nhận giao dịch nếu feeCollector là address(0).
+   - Đã sửa: Thay đổi logic kiểm tra feeCollector để revert nếu feeCollector chưa được đặt, đảm bảo tính nhất quán của hệ thống.
+   - Ngày sửa: 2024-07-15
+
+67. [FIXED] **blockchain/onchain/brigde/bridge_interface.sol**. Thêm multi-sig cho rút tiền:
+   - Các hàm withdrawETH và withdrawToken chỉ kiểm tra onlyOwner mà không có thêm bảo vệ.
+   - Đã sửa: Thay thế bằng hệ thống multi-sig với timelock cho việc rút tiền. Triển khai các hàm requestWithdrawETH, requestWithdrawToken, approveWithdrawal, và các hàm thực hiện có timelock.
+   - Ngày sửa: 2024-07-15
+
+68. [FIXED] **blockchain/onchain/brigde/bridge_adapter/WormholeAdapter.sol**. Thêm modifier onlyOwner và cập nhật bảo mật:
+   - Các hàm updateWormholeAddress và updateConsistencyLevel thiếu modifier onlyOwner.
+   - Đã sửa: Thêm modifier onlyOwner cho các hàm này. Thêm kiểm tra trusted remote khi gửi message. Bổ sung hàm setTrustedRemote và getTrustedRemote.
+   - Ngày sửa: 2024-07-15
+
+69. [FIXED] **blockchain/onchain/brigde/bridge_adapter/LayerZeroAdapter.sol**. Cải thiện kiểm tra trusted remote:
+   - Thiếu kiểm tra trusted remote khi gửi message và cải thiện kiểm tra trong _nonblockingLzReceive.
+   - Đã sửa: Thêm kiểm tra trustedRemotes[dstChainId].length > 0 trước khi gửi message. Cải thiện _nonblockingLzReceive với kiểm tra byte-by-byte và try-catch để bắt lỗi.
+   - Ngày sửa: 2024-07-15
+
+70. [FIXED] **blockchain/onchain/brigde/erc20_wrappeddmd.sol**. Sửa lỗi reentrancy trong bridgeToNear:
+   - Hàm bridgeToNear không tuân thủ pattern check-effects-interactions.
+   - Đã sửa: Áp dụng pattern check-effects-interactions, thêm ReentrancyGuard, và thực hiện burn token trước khi gọi external contract.
+   - Ngày sửa: 2024-07-15
+
+71. [FIXED] **blockchain/onchain/brigde/erc1155_wrapper.sol**. Thêm ReentrancyGuard và emergencyUnwrap:
+   - Các hàm wrap và unwrap thiếu ReentrancyGuard và không có cơ chế khẩn cấp.
+   - Đã sửa: Thêm nonReentrant modifier cho wrap và unwrap. Bổ sung hàm emergencyUnwrap để cung cấp cơ chế khẩn cấp khi bridge bị tắt.
+   - Ngày sửa: 2024-07-15
+
+72. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát quyền admin/owner rõ ràng:
+   - Nếu không kiểm soát tốt, adapter có thể bị takeover hoặc bị abuse.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về kiểm soát quyền với cơ chế Ownable, onlyOperator modifier, và timelock cho các thay đổi quan trọng. Triển khai mapping operators và các hàm quản lý operator.
+   - Ngày sửa: 2024-07-15
+
+73. [FIXED] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát fee hoặc cấu hình phí động:
+   - Nếu không kiểm soát tốt, adapter có thể bị set phí quá cao hoặc quá thấp gây mất cân bằng hệ thống.
+   - Đã sửa: Bổ sung hướng dẫn và code mẫu về fee control với baseFee, feePercentage, và MAX_FEE_PERCENTAGE. Triển khai các hàm requestFeeUpdate, applyFeeUpdate với timelock để đảm bảo an toàn khi thay đổi phí.
+   - Ngày sửa: 2024-07-15

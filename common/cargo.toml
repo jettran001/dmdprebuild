@@ -1,0 +1,6 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+# Có thể thêm dependencies nếu cần, dựa trên dự án, nhưng giữ đơn giản để tránh lỗi
