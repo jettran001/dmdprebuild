@@ -1,3 +1,116 @@
+# Kế hoạch tái cấu trúc Domain Blockchain
+
+## Tái cấu trúc thành 3 phần chính
+- Thời gian hoàn thành: 6 tuần
+
+### 1. Cấu trúc mới cho blockchain
+- [ ] Tái cấu trúc blockchain/src theo mô hình:
+  - [ ] contracts/: Mã nguồn smart contract (Solidity, Move, Ink...)
+  - [ ] sdk/: Wrapper SDK (Rust) → cho frontend và các domain khác import (via wasm-bindgen hoặc FFI)
+  - [ ] processor/: Backend logic (event handler, indexer, relayer, bridge...)
+
+### 2. Chuyển các module cho Backend (processor/)
+- [ ] Chuyển các module xử lý logic phía backend vào processor/
+  - [ ] processor/bridge/: Từ module bridge hiện tại
+    - [ ] processor/bridge/manager.rs: Bridge Manager
+    - [ ] processor/bridge/hubs/: Các Hub cho bridge (near_hub.rs, sol_hub.rs...)
+    - [ ] processor/bridge/spokes/: Các Spoke cho bridge (evm_spoke.rs...)
+    - [ ] processor/bridge/repository/: Persistent storage cho bridge
+    - [ ] processor/bridge/events/: Event handlers
+  - [ ] processor/oracle/: Từ module oracle hiện tại
+    - [ ] processor/oracle/providers/: Các provider cho oracle (chainlink.rs, onchain.rs...)
+    - [ ] processor/oracle/aggregator.rs: Tổng hợp dữ liệu từ nhiều nguồn
+    - [ ] processor/oracle/cache.rs: Cơ chế cache cho oracle
+  - [ ] processor/indexer/: Indexer cho các sự kiện blockchain
+    - [ ] processor/indexer/event_scanner.rs: Quét sự kiện từ blockchain
+    - [ ] processor/indexer/processors/: Xử lý sự kiện theo loại
+    - [ ] processor/indexer/storage/: Lưu trữ dữ liệu đã index
+  - [ ] processor/relayer/: Relay thông tin giữa các chain
+    - [ ] processor/relayer/transaction_monitor.rs: Theo dõi trạng thái giao dịch
+    - [ ] processor/relayer/message_queue.rs: Hàng đợi tin nhắn
+  - [ ] processor/security/: Module bảo mật
+    - [ ] processor/security/validator.rs: Xác thực giao dịch
+    - [ ] processor/security/fraud_detector.rs: Phát hiện gian lận
+    - [ ] processor/security/rate_limiter.rs: Giới hạn tần suất
+  - [ ] processor/common/: Các thành phần dùng chung
+    - [ ] processor/common/chain_types.rs: Định nghĩa các loại chain
+    - [ ] processor/common/utils.rs: Các tiện ích
+    - [ ] processor/common/errors.rs: Xử lý lỗi
+
+### 3. Cấu trúc SDK cho Frontends và domain khác (sdk/)
+- [ ] Tạo Rust SDK để các ứng dụng bên ngoài tương tác với blockchain
+  - [ ] sdk/token/: SDK cho token
+    - [ ] sdk/token/multi_chain.rs: Quản lý token trên đa blockchain
+    - [ ] sdk/token/balance.rs: Truy vấn số dư
+    - [ ] sdk/token/transfer.rs: Chuyển token
+  - [ ] sdk/bridge/: SDK cho bridge
+    - [ ] sdk/bridge/transactions.rs: Quản lý giao dịch bridge
+    - [ ] sdk/bridge/status.rs: Kiểm tra trạng thái bridge
+    - [ ] sdk/bridge/fee.rs: Tính phí bridge
+  - [ ] sdk/wallet/: SDK cho ví
+    - [ ] sdk/wallet/account.rs: Quản lý tài khoản
+    - [ ] sdk/wallet/keys.rs: Quản lý khóa
+    - [ ] sdk/wallet/signature.rs: Ký giao dịch
+  - [ ] sdk/farm/: SDK cho farming
+    - [ ] sdk/farm/pools.rs: Quản lý farming pools
+    - [ ] sdk/farm/rewards.rs: Tính toán rewards
+  - [ ] sdk/stake/: SDK cho staking
+    - [ ] sdk/stake/validators.rs: Quản lý validators
+    - [ ] sdk/stake/pools.rs: Quản lý staking pools
+  - [ ] sdk/wasm/: Phiên bản WASM của SDK để dùng từ frontend
+    - [ ] sdk/wasm/token.rs: WASM bindings cho token
+    - [ ] sdk/wasm/bridge.rs: WASM bindings cho bridge
+    - [ ] sdk/wasm/wallet.rs: WASM bindings cho wallet
+
+### 4. Smart Contracts (contracts/)
+- [ ] Tổ chức lại các smart contract
+  - [ ] contracts/evm/: Smart contracts cho EVM chains
+    - [ ] contracts/evm/token/: Token contracts (ERC20, etc.)
+    - [ ] contracts/evm/bridge/: Bridge contracts
+    - [ ] contracts/evm/farm/: Farming contracts
+    - [ ] contracts/evm/stake/: Staking contracts
+    - [ ] contracts/evm/interfaces/: Interfaces
+  - [ ] contracts/solana/: Smart contracts cho Solana
+    - [ ] contracts/solana/token/: Token programs
+    - [ ] contracts/solana/bridge/: Bridge programs
+  - [ ] contracts/near/: Smart contracts cho NEAR
+    - [ ] contracts/near/token/: Token contracts
+    - [ ] contracts/near/bridge/: Bridge contracts
+  - [ ] contracts/ton/: Smart contracts cho TON
+  - [ ] contracts/scripts/: Scripts build và deploy
+
+### 5. Công cụ và tiện ích
+- [ ] Sử dụng ethers-rs để đọc logs và encode/decode events chuẩn
+  - [ ] processor/utils/event_decoder.rs: Decode các event từ blockchain
+  - [ ] processor/utils/log_reader.rs: Đọc logs từ blockchain
+  - [ ] processor/utils/abi_parser.rs: Parse ABIs
+- [ ] Tạo thư viện chung cho đa blockchain
+  - [ ] common/multi_chain/: Abstraction layer cho đa blockchain
+  - [ ] common/serialization/: Serialization/deserialization cho đa blockchain
+
+### 6. Tích hợp với các Domain khác
+- [ ] Tích hợp blockchain SDK với wallet domain
+  - [ ] sdk/integrations/wallet/: SDK tích hợp với wallet
+- [ ] Tích hợp blockchain SDK với snipebot domain
+  - [ ] sdk/integrations/snipebot/: SDK tích hợp với snipebot
+- [ ] Tích hợp blockchain SDK với frontend (Dioxus)
+  - [ ] sdk/integrations/frontend/: SDK tích hợp với frontend
+  - [ ] Các WASM bindings
+
+### 7. Testing và Deployment
+- [ ] Viết tests cho cấu trúc mới
+  - [ ] Các unit tests
+  - [ ] Các integration tests
+  - [ ] Các e2e tests
+- [ ] Cập nhật tài liệu
+  - [ ] Tài liệu kiến trúc
+  - [ ] Tài liệu API
+  - [ ] Tài liệu sử dụng
+- [ ] Tạo scripts CI/CD mới
+  - [ ] Script build
+  - [ ] Script test
+  - [ ] Script deploy
+
 # Kế hoạch phát triển tương lai:
 
 ## Smartcontract prebuild
