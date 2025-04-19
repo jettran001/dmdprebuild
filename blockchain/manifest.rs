@@ -333,6 +333,26 @@ pub mod apis {
 
 /// --- BRIDGE MODULES ---
 /// 
+/// Bridge Module cho Diamond Chain là hệ thống multi-bridge router linh hoạt, cho phép kết nối nhiều 
+/// blockchain khác nhau (NEAR, BSC, Ethereum, Solana...) thông qua các bridge protocol đa dạng.
+///
+/// Cấu trúc thư mục:
+/// ```
+/// brigde/
+/// ├── bridge_interface.sol         # Router trung tâm, quản lý các adapter và định tuyến giao dịch
+/// ├── bridge_adapter/              # Thư mục chứa các adapter cho các bridge protocol
+/// │   ├── IBridgeAdapter.sol       # Interface chuẩn cho tất cả các adapter
+/// │   ├── LayerZeroAdapter.sol     # Adapter cho LayerZero protocol
+/// │   └── WormholeAdapter.sol      # Adapter cho Wormhole protocol
+/// ├── BridgeDeployer.sol           # Factory contract để triển khai và liên kết các module
+/// ├── erc20_wrappeddmd.sol         # ERC-20 đại diện trong quá trình bridge
+/// ├── erc1155_wrapper.sol          # Wrapper cho ERC-1155 thành ERC-20
+/// ├── erc1155_bridge_adapter.sol   # Adapter kết nối với bridge protocol
+/// └── erc1155_unwrapper_near.rs    # Bộ giải nén trên NEAR
+/// ```
+/// 
+/// Mô tả chi tiết các thành phần bridge:
+/// 
 /// 1. erc1155_wrapper.sol — Bộ đóng gói (wrap)
 ///    Chain: EVM (BSC, Polygon, Arbitrum...)
 ///    - Nhận ERC-1155 từ user
@@ -365,6 +385,20 @@ pub mod apis {
 ///    - Cho phép chọn adapter (LayerZero, Wormhole, Custom...)
 ///    - Route các request bridge đến đúng adapter
 ///    - Cấu hình được, mở rộng được
+///    - Tính năng tự động chọn adapter với phí thấp nhất
+///
+/// 6. bridge_adapter/ — Các adapter cho bridge protocol
+///    Chain: Tùy thuộc vào protocol
+///    - IBridgeAdapter.sol: Interface chuẩn cho tất cả các adapter
+///    - LayerZeroAdapter.sol: Adapter cho LayerZero protocol
+///    - WormholeAdapter.sol: Adapter cho Wormhole protocol
+///    - Dễ dàng mở rộng thêm các adapter mới (Axelar, Multichain, v.v.)
+///
+/// 7. BridgeDeployer.sol — Factory triển khai hệ thống
+///    - Triển khai BridgeInterface và các adapter đồng thời
+///    - Tự động đăng ký các adapter vào BridgeInterface
+///    - Chức năng mở rộng để thêm adapter mới sau khi triển khai
+///    - Tạo liên kết giữa các thành phần hệ thống
 
 /// --- ĐỊNH NGHĨA BỔ SUNG VỀ BRIDGE INTERFACE ---
 ///
@@ -396,8 +430,14 @@ pub mod apis {
 /// ```
 ///
 /// 2. Adapter: LayerZeroAdapter.sol, WormholeAdapter.sol 
+/// - Triển khai interface IBridgeAdapter
+/// - Kết nối với các protocol cross-chain (LayerZero, Wormhole)
+/// - Ước tính phí bridge và quản lý danh sách các chain được hỗ trợ
 ///
 /// 3. Các bridge mới được add vào từ ngoài = Qua registerBridge(...)
+/// - Mở rộng hệ thống bằng cách tạo adapter mới tuân theo IBridgeAdapter
+/// - Triển khai adapter mới và đăng ký vào BridgeInterface
+/// - Không cần thay đổi code hiện có của BridgeInterface
 ///
 /// 4. Smartcontract trung tâm gọi thông qua BridgeInterface = Luôn gọi gián tiếp
 ///
@@ -409,3 +449,21 @@ pub mod apis {
 ///     bridgeInterface.sendMessage(bridge, chainId, payload);
 /// }
 /// ```
+///
+/// --- HƯỚNG DẪN TRIỂN KHAI ---
+///
+/// Triển khai qua Remix IDE (cho EVM chains):
+/// 1. Triển khai bridge_adapter/IBridgeAdapter.sol
+/// 2. Triển khai bridge_adapter/LayerZeroAdapter.sol và WormholeAdapter.sol
+/// 3. Triển khai bridge_interface.sol (DmdBscBridge hoặc ERC20Bridge)
+/// 4. Đăng ký các adapter vào BridgeInterface
+///
+/// Triển khai trên NEAR VM (cho NEAR chain):
+/// 1. Compile erc1155_unwrapper_near.rs bằng near-sdk
+/// 2. Triển khai lên NEAR testnet/mainnet
+/// 3. Liên kết với BridgeInterface thông qua các bridge protocol
+///
+/// Mở rộng hệ thống:
+/// - Tạo adapter mới trong thư mục bridge_adapter/ kế thừa IBridgeAdapter
+/// - Đăng ký adapter mới vào BridgeInterface thông qua registerBridge()
+/// - Hệ thống sẽ tự động tích hợp adapter mới và cung cấp chức năng tìm giá thấp nhất

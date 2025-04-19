@@ -181,7 +181,7 @@
     Sửa: Thêm cấu trúc ValidatorAlert, AlertNotifierFn và hàm thông báo cảnh báo. Bổ sung phương thức kiểm tra kết nối và tham gia consensus theo định kỳ, tính năng tự động phát hiện validator mất kết nối hoặc bỏ lỡ consensus liên tiếp với hệ thống mức độ cảnh báo. Thêm các trạng thái chi tiết cho validator và chức năng tự động tạm dừng/phạt validator dựa trên mức độ vi phạm.
 
 23. [FIXED] **blockchain/src/oracle/mod.rs**. Khi fetch_data từ nhiều nguồn, nếu tất cả nguồn đều lỗi chỉ trả về lỗi chung mà không ghi lại chi tiết từng nguồn lỗi. [2024-07-03]
-    Sửa: Thêm cấu trúc SourceErrorLog để lưu chi tiết lỗi cho từng nguồn dữ liệu, thêm các phương thức log_source_error, get_source_error_logs, get_source_error_logs_filtered để lưu trữ và truy vấn thông tin lỗi. Cải thiện phương thức fetch_data để ghi lại chi tiết lỗi từng nguồn, bao gồm thời gian truy vấn, thông tin nguồn dữ liệu, và chi tiết lỗi. Bổ sung phương thức analyze_error_logs để phân tích và cảnh báo khi có nguồn dữ liệu bị lỗi nhiều, và export_error_logs để xuất log lỗi ra file.
+    Sửa: Thêm cấu trúc SourceErrorLog để lưu chi tiết lỗi cho từng nguồn dữ liệu, thêm các phương thức log_source_error, get_source_error_logs, get_source_error_logs_filtered để lưu trữ và truy vấn thông tin lỗi. Bổ sung phương thức fetch_data để ghi lại chi tiết lỗi từng nguồn, bao gồm thời gian truy vấn, thông tin nguồn dữ liệu, và chi tiết lỗi. Bổ sung phương thức analyze_error_logs để phân tích và cảnh báo khi có nguồn dữ liệu bị lỗi nhiều, và export_error_logs để xuất log lỗi ra file.
 
 24. [FIXED] **blockchain/src/bridge/oracle.rs**. Khi thêm provider mới, nếu provider không hỗ trợ chain nào sẽ chỉ log cảnh báo mà không chặn thêm provider. [2024-07-03]
     Sửa: Cải thiện phương thức add_provider để từ chối thêm provider không hỗ trợ chain nào thông qua cài đặt require_supported_chains (mặc định là true). Thêm khả năng cấu hình hành vi này bằng phương thức set_require_supported_chains. Cải thiện cảnh báo để rõ ràng hơn khi provider thiếu các chain quan trọng. Thêm hiển thị thông tin đầy đủ về các chain được hỗ trợ và các chain quan trọng bị thiếu.
@@ -255,13 +255,124 @@ Ngày: 31/08/2024
 
 ### **LỖI TIỀM ẨN MỚI PHÁT HIỆN (2024-07)**
 
+8. [OPEN] **blockchain/onchain/brigde**. Lỗi chính tả tên thư mục:
+   - Thư mục "brigde" nên đổi thành "bridge" để tránh nhầm lẫn khi import và sử dụng module.
+   - Có thể gây lỗi khi import hoặc build tự động.
+   - Đề xuất: Đổi tên thư mục thành "bridge" và cập nhật lại toàn bộ đường dẫn liên quan.
 
-7. [FIXED] **blockchain/src/smartcontracts/dmd_token.rs**. Một số hàm transfer và bridge vẫn còn logic kiểm tra trạng thái giao dịch chưa đồng nhất giữa các chain (ví dụ: chỉ kiểm tra tx_hash mà không xác thực receipt hoặc trạng thái thành công/thất bại). Cần chuẩn hóa kiểm tra trạng thái giao dịch sau khi gửi trên tất cả các chain.
-   - Đã sửa: Chuẩn hóa hàm transfer_to_polygon để đợi và kiểm tra receipt, bao gồm trạng thái, và đã thêm cơ chế retry khi giao dịch thất bại hoặc timeout. Thêm kiểm tra số dư token và MATIC đầy đủ trước khi gửi giao dịch.
-   - Ngày sửa: 2024-08-01
+9. [OPEN] **blockchain/onchain/brigde**. Lỗi import thư viện OpenZeppelin/LayerZero:
+   - Các file Solidity import các thư viện như @openzeppelin/contracts/... và @layerzerolabs/... nhưng không có trong node_modules hoặc không được cài đặt đúng.
+   - Gây lỗi biên dịch: "Source not found".
+   - Đề xuất: Cài đặt đúng các thư viện này hoặc kiểm tra lại đường dẫn import.
 
-11. [FIXED] **blockchain/src/stake/validator.rs**. Một số hàm chưa implement đầy đủ (ví dụ: stop_auto_snapshot chỉ log cảnh báo chưa implement). Cần bổ sung logic hoàn thiện hoặc đánh dấu rõ ràng TODO để tránh nhầm lẫn khi sử dụng.
-   - Đã sửa: Implement đầy đủ chức năng stop_auto_snapshot bằng cách thêm trường auto_snapshot_handle vào struct ValidatorImpl để lưu tokio::task::AbortHandle, cập nhật start_auto_snapshot để lưu handle và stop_auto_snapshot để sử dụng handle đó. Đã thêm chức năng tạo snapshot cuối trước khi dừng và lưu metadata kèm theo.
-   - Ngày sửa: 2024-08-01
+10. [OPEN] **blockchain/onchain/brigde/BridgeDeployer.sol**. Thiếu import contract:
+   - Tham chiếu đến DmdBscBridge và ERC20Bridge nhưng không import rõ ràng hoặc không có file contract tương ứng.
+   - Có thể gây lỗi khi deploy hoặc biên dịch.
+   - Đề xuất: Đảm bảo các contract này tồn tại và import đúng.
 
-// Ghi chú: Cập nhật danh sách khi sửa lỗi
+11. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol & bridge_adapter/IBridgeAdapter.sol**. Định nghĩa interface trùng lặp:
+   - Interface IBridgeAdapter được định nghĩa ở nhiều nơi, có thể gây xung đột khi biên dịch.
+   - Đề xuất: Chỉ giữ một định nghĩa duy nhất và import từ file chuẩn.
+
+12. [OPEN] **blockchain/onchain/brigde**. Lỗi linting và format code:
+   - Nhiều file Solidity có lỗi indentation, spacing, và format code không chuẩn.
+   - Đề xuất: Chạy linter và format lại toàn bộ code Solidity.
+
+13. [OPEN] **blockchain/onchain/brigde/CustomAdapterTemplate.sol**. Thiếu mapping chainId → tên chain:
+   - Không có mapping đầy đủ giữa chainId và tên chain, có thể gây lỗi khi bridge đến nhiều chain khác nhau.
+   - Đề xuất: Bổ sung mapping và kiểm tra logic khi mở rộng chain mới.
+
+14. [OPEN] **blockchain/onchain/brigde/BridgeDeployer.sol**. BridgeHelper không nên nằm chung file:
+   - BridgeHelper nên tách thành file riêng để dễ bảo trì và mở rộng.
+   - Đề xuất: Di chuyển BridgeHelper ra file riêng.
+
+15. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol**. Cảnh báo bảo mật:
+   - Các hàm withdrawETH, withdrawToken có thể bị lạm dụng nếu không kiểm soát quyền hạn chặt chẽ.
+   - Đề xuất: Xem xét bổ sung kiểm tra hoặc giới hạn quyền truy cập, log chi tiết các thao tác rút tiền.
+
+16. [OPEN] **blockchain/onchain/brigde**. Lỗi phiên bản Solidity:
+   - Đảm bảo toàn bộ contract sử dụng đúng phiên bản 0.8.20 như manifest yêu cầu.
+   - Đề xuất: Kiểm tra lại pragma solidity ở tất cả các file.
+
+17. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol**. Trùng lặp định nghĩa IBridgeAdapter:
+   - Interface IBridgeAdapter được định nghĩa cả trong bridge_interface.sol và bridge_adapter/IBridgeAdapter.sol, dễ gây lỗi khi cập nhật hoặc mở rộng.
+   - Đề xuất: Chỉ giữ một file interface chuẩn (ở bridge_adapter/IBridgeAdapter.sol) và import từ đó.
+
+18. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol**. Hàm getTokenAddress trả về address(0) ở contract gốc:
+   - Nếu quên override ở contract con sẽ gây lỗi khi bridge, mất token hoặc không thể mint/burn đúng contract.
+   - Đề xuất: Bắt buộc override ở các contract triển khai thực tế, thêm require hoặc revert nếu gọi ở contract gốc.
+
+19. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol**. Lỗi tiềm ẩn khi tính phí và burn/mint token:
+   - Nếu feeCollector = address(0) hoặc wrapped token không chuẩn, có thể gây mất phí hoặc không mint đúng cho collector.
+   - Đề xuất: Kiểm tra chặt chẽ feeCollector và wrapped token, log chi tiết khi xảy ra lỗi.
+
+20. [OPEN] **blockchain/onchain/brigde/bridge_interface.sol**. Hàm withdrawETH/withdrawToken không kiểm soát multi-sig hoặc 2FA:
+   - Chỉ kiểm tra owner, dễ bị lạm dụng nếu private key bị lộ.
+   - Đề xuất: Xem xét bổ sung multi-sig hoặc xác thực nâng cao cho các hàm rút tiền.
+
+21. [OPEN] **blockchain/onchain/brigde/BridgeDeployer.sol**. Không kiểm tra lại quyền sở hữu adapter sau khi deploy:
+   - Sau khi deploy, các adapter vẫn thuộc quyền deployer, không chuyển ownership về admin.
+   - Đề xuất: Thêm logic chuyển quyền sở hữu adapter về admin sau khi deploy.
+
+22. [OPEN] **blockchain/onchain/brigde/BridgeDeployer.sol**. BridgeHelper không có kiểm soát truy cập:
+   - Các hàm view có thể bị abuse để dò thông tin hệ thống, cần xem xét hạn chế hoặc log truy cập.
+
+23. [OPEN] **blockchain/onchain/brigde/erc20_wrappeddmd.sol**. Hàm bridgeToNear dùng approve + call, có thể bị front-running hoặc reentrancy:
+   - Nếu bridgeProxy không kiểm soát tốt, user có thể bị mất token hoặc bị tấn công reentrancy.
+   - Đề xuất: Sử dụng pattern pull hoặc kiểm tra kỹ logic bridgeProxy.
+
+24. [OPEN] **blockchain/onchain/brigde/erc1155_wrapper.sol**. Hàm unwrap chỉ cho phép wrappedDmd gọi, nhưng không kiểm tra reentrancy:
+   - Nếu wrappedDmd contract có bug, có thể gây mất token hoặc double-unlock.
+   - Đề xuất: Thêm ReentrancyGuard hoặc kiểm tra logic unwrap kỹ hơn.
+
+25. [OPEN] **blockchain/onchain/brigde/erc1155_bridge_adapter.sol**. Mapping supportedChains chỉ set cứng cho NEAR/Solana:
+   - Khi mở rộng chain mới phải sửa code, dễ gây lỗi hoặc quên cập nhật.
+   - Đề xuất: Cho phép owner cập nhật mapping chainId động, log mọi thay đổi chainId.
+
+26. [OPEN] **blockchain/onchain/brigde/erc1155_bridge_adapter.sol**. Không có cơ chế emergency withdraw cho token bị kẹt:
+   - Nếu bridge fail hoặc stuck, user không thể rút lại token.
+   - Đề xuất: Thêm hàm emergency withdraw cho owner hoặc user có proof hợp lệ.
+
+27. [OPEN] **blockchain/onchain/brigde/bridge_adapter/LayerZeroAdapter.sol**. Không kiểm tra trusted remote khi gửi message:
+   - Nếu cấu hình trusted remote sai, có thể bị tấn công spoofing hoặc gửi nhầm chain.
+   - Đề xuất: Bổ sung mapping trustedRemote và kiểm tra trước khi gửi message.
+
+28. [OPEN] **blockchain/onchain/brigde/bridge_adapter/WormholeAdapter.sol**. Các hàm updateWormholeAddress/updateConsistencyLevel không có modifier onlyOwner:
+   - Có thể bị bất kỳ ai gọi, gây mất quyền kiểm soát adapter.
+   - Đề xuất: Thêm modifier onlyOwner hoặc quyền admin cho các hàm này.
+
+29. [OPEN] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có mapping chainId → tên chain chuẩn hóa:
+   - Khi mở rộng nhiều chain, việc mapping thủ công dễ gây lỗi hoặc nhầm lẫn.
+   - Đề xuất: Chuẩn hóa mapping chainId → tên chain, lưu vào biến public để dễ truy vấn.
+
+30. [OPEN] **blockchain/onchain/brigde/erc1155_unwrapper_near.rs**. Không có cơ chế rollback khi unwrap thất bại hoặc payload lỗi:
+   - Nếu payload lỗi hoặc unlock thất bại, token có thể bị mất hoặc không cập nhật đúng lịch sử.
+   - Đề xuất: Thêm rollback hoặc log chi tiết khi unwrap lỗi, kiểm tra trạng thái trước/sau khi unlock.
+
+31. [OPEN] **blockchain/onchain/brigde/bridge_adapter**. Không chuẩn hóa mapping chainId → tên chain ở tất cả adapter:
+   - Một số adapter (ví dụ Axelar) có mapping chainId → tên chain, nhưng các adapter khác không đồng nhất, dễ gây lỗi khi mở rộng hoặc truy vấn chuỗi.
+   - Đề xuất: Chuẩn hóa interface IBridgeAdapter để có hàm public mapping chainId → tên chain, hoặc một hàm trả về tên chain theo chainId.
+
+32. [OPEN] **blockchain/onchain/brigde/bridge_adapter**. Không kiểm tra giới hạn số lượng token bridge trong một giao dịch:
+   - Nếu không giới hạn, user có thể bridge số lượng lớn gây rủi ro hoặc tấn công DoS.
+   - Đề xuất: Thêm biến limitPerTx và kiểm tra ở tất cả các adapter.
+
+33. [OPEN] **blockchain/onchain/brigde/bridge_adapter**. Không có cơ chế xác thực message (message authentication) ở các adapter mới:
+   - Nếu không xác thực message, có thể bị tấn công giả mạo hoặc replay attack.
+   - Đề xuất: Bắt buộc các adapter mới phải implement xác thực message (ví dụ: signature, nonce, hoặc proof).
+
+34. [OPEN] **blockchain/onchain/brigde/bridge_adapter**. Không có cơ chế giới hạn tổng số lượng token bridge trong một khoảng thời gian:
+   - Nếu không giới hạn, có thể bị tấn công drain liquidity hoặc spam cross-chain.
+   - Đề xuất: Thêm biến limitPerPeriod (theo block hoặc timestamp) và kiểm tra ở các adapter.
+
+35. [OPEN] **blockchain/onchain/brigde/bridge_adapter**. Không có log chi tiết khi bridge thất bại hoặc bị revert:
+   - Nếu bridge thất bại, không có log chi tiết để debug hoặc cảnh báo admin.
+   - Đề xuất: Bắt buộc emit event BridgeFailed hoặc log chi tiết khi bridge lỗi ở tất cả các adapter.
+
+36. [OPEN] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát quyền admin/owner rõ ràng:
+   - Nếu không kiểm soát tốt, adapter có thể bị takeover hoặc bị abuse.
+   - Đề xuất: Bổ sung hướng dẫn và code mẫu về kiểm soát quyền admin/owner, multi-sig, hoặc xác thực nâng cao.
+
+37. [OPEN] **blockchain/onchain/brigde/bridge_adapter/CustomAdapterTemplate.sol**. Không có hướng dẫn về kiểm soát fee hoặc cấu hình phí động:
+   - Nếu không kiểm soát tốt, adapter có thể bị set phí quá cao hoặc quá thấp gây mất cân bằng hệ thống.
+   - Đề xuất: Bổ sung hướng dẫn và code mẫu về fee control, fee cap, và event log khi thay đổi phí.

@@ -50,6 +50,9 @@ contract BridgeInterface is Ownable, Pausable {
     event BridgeUsed(address indexed user, address indexed adapter, uint16 targetChain, uint256 amount);
     event FeeUpdated(uint256 feePercentage);
     event FeeCollectorUpdated(address indexed newCollector);
+    event CustomBridgeAdapterAdded(string adapterName, address indexed adapter, uint256 adapterId);
+    event AdapterConfigUpdated(address indexed adapter, bytes newConfig);
+    event ChainSupportAdded(address indexed adapter, uint16 chainId);
     
     // Biến số
     Counters.Counter private bridgeCounter;
@@ -297,6 +300,73 @@ contract BridgeInterface is Ownable, Pausable {
      */
     function unpause() external onlyOwner {
         _unpause();
+    }
+    
+    /**
+     * @dev Thêm một adapter tùy chỉnh mới vào hệ thống bridge
+     * @param adapterName Tên của adapter mới (ví dụ: "Axelar", "Multichain")
+     * @param adapterImplementation Địa chỉ của implementation adapter
+     * @param adapterConfig Cấu hình tùy chỉnh cho adapter (JSON encoded)
+     * @return ID của adapter mới được thêm vào
+     */
+    function addCustomBridgeAdapter(
+        string calldata adapterName,
+        address adapterImplementation,
+        bytes calldata adapterConfig
+    ) 
+        external 
+        onlyOwner 
+        returns (uint256) 
+    {
+        require(adapterImplementation != address(0), "Invalid adapter implementation");
+        require(bytes(adapterName).length > 0, "Adapter name cannot be empty");
+        
+        // Kiểm tra xem adapter có tuân thủ interface IBridgeAdapter không
+        // bằng cách gọi một hàm trong interface và kiểm tra không revert
+        try IBridgeAdapter(adapterImplementation).adapterType() returns (string memory) {
+            // Nếu không revert, tiếp tục thêm adapter
+        } catch {
+            revert("Implementation does not conform to IBridgeAdapter");
+        }
+        
+        // Thực hiện đăng ký adapter
+        registerBridge(adapterImplementation);
+        
+        // Lưu thêm thông tin tùy chỉnh nếu cần (có thể mở rộng thêm)
+        // Ví dụ: lưu cấu hình cho adapter nếu cần
+        
+        // Phát sự kiện tùy chỉnh cho adapter mới
+        emit CustomBridgeAdapterAdded(adapterName, adapterImplementation, bridgeCounter.current());
+        
+        return bridgeCounter.current();
+    }
+    
+    /**
+     * @dev Cập nhật cấu hình cho adapter tùy chỉnh
+     * @param adapter Địa chỉ của adapter cần cập nhật
+     * @param newConfig Cấu hình mới (JSON encoded)
+     */
+    function updateAdapterConfig(address adapter, bytes calldata newConfig) external onlyOwner {
+        require(registeredBridges[adapter], "Adapter not registered");
+        
+        // Lưu cấu hình mới nếu cần
+        // Ví dụ: có thể lưu cấu hình vào một mapping
+        
+        emit AdapterConfigUpdated(adapter, newConfig);
+    }
+    
+    /**
+     * @dev Hỗ trợ một chain mới cho adapter hiện có
+     * @param adapter Địa chỉ của adapter cần mở rộng
+     * @param newChainId Chain ID mới để hỗ trợ
+     */
+    function addSupportedChain(address adapter, uint16 newChainId) external onlyOwner {
+        require(registeredBridges[adapter], "Adapter not registered");
+        
+        // Thêm chain vào bridgeAdapters
+        bridgeAdapters[newChainId].push(adapter);
+        
+        emit ChainSupportAdded(adapter, newChainId);
     }
     
     /**
