@@ -1,0 +1,142 @@
+# BUGS & ISSUES TRACKER (chuẩn hóa 2024-09-02)
+
+============================================================
+
+## NHÓM LỖI THEO DOMAIN/MODULE
+
+============================================================
+
+# Ghi chú:
+- [OPEN]: Lỗi chưa fix hoặc đang chờ xác nhận.
+- [FIXED]: Lỗi đã fix, có mô tả sửa đổi và ngày sửa.
+- [PENDING]: Lỗi đã được ghi nhận nhưng file hoặc module tương ứng chưa tồn tại.
+- Định dạng: [TRẠNG THÁI][Ngày phát hiện] [module/file] Mô tả ngắn gọn.
+- Nếu đã fix: thụt lề mô tả sửa đổi, ngày sửa.
+
+============================================================
+
+
+
+1. [FIXED][2024-09-01] [network/core/config.rs, network/infra/config.rs, network/infra/config_types.rs, network/infra/config_loader.rs] Trùng lặp/định nghĩa chồng chéo về config
+   - Mô tả: Nhiều file config định nghĩa các struct và logic tương tự nhau, gây khó bảo trì.
+   - Phân tích hiện trạng:
+     * network/core/config.rs: Định nghĩa NetworkConfig đơn giản cho core engine và ConfigLoader
+     * network/infra/config.rs: Định nghĩa NetworkConfig đầy đủ với nhiều config con chi tiết
+     * network/infra/config_types.rs: Định nghĩa config chi tiết cho các plugin (RedisConfig, IpfsConfig, WasmConfig, WebrtcConfig)
+     * network/infra/config_loader.rs: Định nghĩa ConfigLoader và các phương thức load config
+   - Phân tích chi tiết các xung đột:
+     * NetworkConfig trong network/core/config.rs khác hoàn toàn với NetworkConfig trong network/infra/config.rs:
+       1. Phiên bản core/config.rs tập trung vào cấu hình engine, node_id, network_id, protocols, capabilities...
+       2. Phiên bản infra/config.rs tập trung vào cấu hình service, plugins, security, monitoring...
+     * ConfigLoader trong core/config.rs và infra/config_loader.rs có chức năng tương tự:
+       1. Đều load config từ file, env vars và validate
+       2. Phiên bản infra/config_loader.rs chi tiết và phức tạp hơn
+     * Các ConfigError riêng biệt không đồng nhất
+   - Kế hoạch hợp nhất:
+     1. Tạo một cấu trúc config thống nhất với 3 lớp chính:
+        a. network/infra/config/types.rs: Chỉ định nghĩa các type config chi tiết cho các plugin
+        b. network/infra/config/core.rs: Định nghĩa NetworkCoreConfig, hợp nhất từ network/core/config.rs
+        c. network/infra/config/mod.rs: Export tất cả và định nghĩa NetworkConfig tổng hợp
+     2. Hợp nhất ConfigLoader từ core/config.rs và infra/config_loader.rs vào network/infra/config/loader.rs
+     3. Định nghĩa enum ConfigError tập trung
+     4. Cập nhật tất cả imports trong project để sử dụng cấu trúc mới
+   - Thực hiện:
+     * Đã tạo cấu trúc thư mục mới network/infra/config/
+     * Đã tạo network/infra/config/types.rs hợp nhất các định nghĩa từ config_types.rs
+     * Đã tạo network/infra/config/core.rs định nghĩa NetworkCoreConfig từ core/config.rs
+     * Đã tạo network/infra/config/loader.rs hợp nhất ConfigLoader từ core/config.rs và config_loader.rs
+     * Đã tạo network/infra/config/error.rs định nghĩa enum ConfigError tập trung
+     * Đã tạo network/infra/config/mod.rs export tất cả và định nghĩa NetworkConfig tổng hợp
+     * Đã cập nhật network/infra/mod.rs để export module config mới
+     * Các file cũ vẫn giữ lại tạm thời với annotation @deprecated để đảm bảo tương thích ngược
+     * Đã tạo documentation chi tiết về cấu trúc mới và cách sử dụng
+
+2. [FIXED][2024-09-09] [network/security/configs, network/infra/config] Trùng lặp và không đồng bộ giữa file cấu hình YAML và Rust types
+   - Mô tả: Các file cấu hình YAML trong network/security/configs (auth.yaml, input_validation.yaml, rate_limiter.yaml) chứa cấu trúc không hoàn toàn phù hợp với cấu trúc SecurityConfig trong network/infra/config/mod.rs
+   - Phân tích hiện trạng:
+     * network/security/configs/auth.yaml: Định nghĩa cấu hình xác thực và phân quyền chi tiết
+     * network/security/configs/input_validation.yaml: Định nghĩa cấu hình xác thực đầu vào chi tiết
+     * network/security/configs/rate_limiter.yaml: Định nghĩa cấu hình rate limiter chi tiết
+     * network/infra/config/mod.rs: Định nghĩa SecurityConfig, RateLimitConfig, CorsConfig ít chi tiết hơn
+   - Vấn đề:
+     * SecurityConfig trong mod.rs không phản ánh đầy đủ cấu trúc phức tạp từ các file YAML
+     * ConfigLoader chưa hỗ trợ tải từ file YAML riêng lẻ và kết hợp vào cấu trúc tổng thể
+     * File network/core/config.rs vẫn tồn tại và chưa được đánh dấu deprecated
+   - Kế hoạch giải quyết:
+     1. Tạo file network/infra/config/security.rs với các struct phù hợp cho từng loại cấu hình bảo mật
+     2. Đảm bảo struct định nghĩa khớp với cấu trúc YAML
+     3. Cập nhật ConfigLoader để có thể tải từ cả file YAML riêng lẻ và cấu trúc tổng hợp
+     4. Đánh dấu network/core/config.rs là deprecated
+     5. Cập nhật tất cả imports để sử dụng cấu trúc mới
+   - Thực hiện (2024-09-10):
+     * Đã mở rộng SecurityConfig trong network/infra/config/mod.rs để chứa đầy đủ các cấu trúc từ file YAML
+     * Đã thêm các struct Rust tương ứng với các cấu trúc trong file YAML (AuthConfig, InputValidationConfig, v.v.)
+     * Đã mở rộng RateLimitConfig chi tiết để phản ánh đầy đủ cấu trúc trong rate_limiter.yaml
+     * Đã bổ sung phương thức load_security_configs() và load_all() trong ConfigLoader để tải từ cả file YAML và cấu trúc tổng hợp
+     * Đã đánh dấu network/core/config.rs là deprecated với thông báo rõ ràng về các thay thế
+     * Đã cập nhật docstring, thêm hướng dẫn di chuyển từ cấu trúc cũ sang cấu trúc mới
+     * Đã đảm bảo tương thích ngược bằng cách giữ lại file cũ với annotation @deprecated
+   - Cập nhật (2024-09-11):
+     * Đã cải thiện ConfigLoader.load_all() để thông minh hơn trong việc hợp nhất các cấu hình:
+       - Ưu tiên cấu hình từ file YAML khi có xung đột
+       - Tự động bật enable_auth khi có cấu hình auth.yaml
+       - Tự động bật rate limit khi có cấu hình paths trong rate_limiter.yaml
+     * Đã thêm #[serde(default)] cho các collections để tránh lỗi deserialization
+     * Đã cập nhật hướng dẫn di chuyển trong network/core/config.rs với ví dụ code chi tiết
+     * Đã đặt thời hạn xóa bỏ file network/core/config.rs (2024-12-31)
+
+3. [FIXED][2024-09-10] [network/core/types.rs, network/errors.rs, network/security/input_validation.rs] Trùng lặp/không đồng nhất định nghĩa error
+   - Mô tả: Có nhiều định nghĩa error không đồng nhất giữa các module trong domain network, gây khó khăn khi xử lý lỗi tập trung.
+   - Phân tích hiện trạng:
+     * network/errors.rs: Định nghĩa NetworkError chính làm error tập trung cho toàn bộ domain
+     * network/core/types.rs: Định nghĩa PluginError và EventError riêng biệt
+     * network/security/input_validation.rs: Định nghĩa ValidationError chi tiết
+     * Các module khác cũng định nghĩa các error type riêng (AuthError, RateLimitError, WebRtcError, etc.)
+   - Vấn đề:
+     * Nhiều module không convert error type riêng sang NetworkError
+     * Các error type riêng biệt có trùng lặp về ý nghĩa
+     * Không có cách xử lý lỗi tập trung, thống nhất
+     * Tài liệu về cách sử dụng error type chưa rõ ràng giữa các module
+   - Kế hoạch giải quyết:
+     1. Xác định NetworkError trong errors.rs là error type tập trung duy nhất
+     2. Chuẩn hóa các error type con trong các module riêng biệt
+     3. Đảm bảo có implementation From cho mọi error type con
+     4. Cập nhật docstring và các hướng dẫn sử dụng
+   - Thực hiện (2024-09-10):
+     * Đã cập nhật docstring trong network/errors.rs, thêm thông tin về hợp nhất error types
+     * Đã thêm EventError variant trong NetworkError enum để hỗ trợ lỗi sự kiện từ core/types.rs
+     * Đã thêm implementation From<EventError> cho NetworkError
+     * Đã thêm phương thức is_event_error() trong NetworkError
+     * Đã cập nhật phương thức status_code() để hỗ trợ EventError
+     * Đã đảm bảo cả hai module network/security/input_validation.rs và network/errors.rs đều có tài liệu nhất quán về cách chuyển đổi error
+
+4. [OPEN][2024-09-02] [network/messaging, network/node_manager] Không đồng bộ giữa giao diện xử lý tin nhắn
+   - Vấn đề: Có sự trùng lặp cấu hình giữa nhiều modules (network/core và network/infra và network/security/configs)
+   - File bị ảnh hưởng:
+     - network/core/types.rs:102-113 (NetworkConfig đã lỗi thời nhưng vẫn được sử dụng)
+     - network/core/engine.rs:71-84 (NetworkConfig cũ vẫn được sử dụng)
+     - network/infra/config/mod.rs (Đã hợp nhất nhưng chưa triệt để)
+     - network/security/configs/*.yaml (Cần đảm bảo Rust types phù hợp hoàn toàn)
+   - Hướng giải quyết: 
+     - Đánh dấu các NetworkConfig cũ trong network/core là deprecated 
+     - Sửa code engine.rs để sử dụng NetworkConfig mới từ infra/config
+     - Đảm bảo tính nhất quán giữa Rust types trong infra/config/mod.rs và cấu trúc YAML trong security/configs
+     - Sử dụng file .todolist để thực hiện hợp nhất triệt để
+   - Mức độ ưu tiên: Cao
+
+# [FIXED] Bug: Trùng lặp triệt để giữa cấu hình trong network/core và network/infra
+- Vấn đề: Có sự trùng lặp nghiêm trọng giữa các file cấu hình trong core, infra và security/configs
+- File đã xử lý:
+  - network/core/types.rs:102-113 (NetworkConfig đã được xóa)
+  - network/core/engine.rs:82-98 (NetworkConfig đã được xóa)
+  - network/infra/config/mod.rs (Đã hợp nhất và là nơi định nghĩa NetworkConfig duy nhất)
+  - network/security/configs/*.yaml (Đã được tích hợp vào infra/config SecurityConfig và đã xóa)
+  - network/configs/config.yaml (Đã được tích hợp vào infra/config NetworkConfig và đã xóa)
+- Giải pháp đã thực hiện:
+  - Đã xóa NetworkConfig cũ trong core/types.rs và core/engine.rs
+  - Đã di chuyển NodeType từ engine.rs sang config/core.rs để tránh phụ thuộc ngược
+  - Đã cập nhật DefaultNetworkEngine để sử dụng InfraNetworkConfig thống nhất
+  - Đã cập nhật SecurityConfig trong infra/config/mod.rs
+  - Đã xóa tất cả file YAML trùng lặp 
+  - Đã rmdir các thư mục configs không cần thiết
+- Trạng thái: FIXED
