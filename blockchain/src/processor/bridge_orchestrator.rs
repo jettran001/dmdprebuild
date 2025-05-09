@@ -1,5 +1,8 @@
+#[cfg(feature = "ethereum")]
 use ethers::prelude::*;
+#[cfg(feature = "near")]
 use near_jsonrpc_client::JsonRpcClient;
+#[cfg(feature = "solana")]
 use solana_client::rpc_client::RpcClient;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -258,7 +261,7 @@ impl BridgeOrchestrator {
     // Relay tới Solana thông qua Wormhole
     async fn relay_to_solana(&self, tx: &BridgeTransaction) -> Result<(), Box<dyn Error>> {
         // Chuẩn bị payload cho Wormhole
-        let payload = self.prepare_wormhole_payload(tx)?;
+        let payload = self.prepare_wormhole_payload(tx).await?;
         
         // Gửi payload qua Wormhole
         let wh_tx = self.wormhole_client.send_message(
@@ -324,30 +327,30 @@ impl BridgeOrchestrator {
     }
 
     // Monitoring và retry LayerZero
-    async fn monitor_layerzero_transaction(self, original_tx: String, lz_tx: String) {
+    pub async fn monitor_layerzero_transaction(&self, tx_hash: H256, lz_tx_hash: String) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         let max_retries = 3;
         let mut retries = 0;
         
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             
-            match self.layerzero_client.get_transaction_status(&lz_tx).await {
+            match self.layerzero_client.get_transaction_status(&lz_tx_hash).await {
                 Ok(status) => {
                     if status == "confirmed" {
-                        self.update_transaction_status(&original_tx, BridgeStatus::Completed).await.ok();
+                        self.update_transaction_status(&tx_hash.to_string(), BridgeStatus::Completed).await.ok();
                         break;
                     } else if status == "failed" {
                         if retries < max_retries {
                             retries += 1;
                             // Thử lại giao dịch
-                            if let Ok(tx) = self.get_transaction(&original_tx).await {
+                            if let Ok(tx) = self.get_transaction(&tx_hash.to_string()).await {
                                 if let Err(e) = self.relay_to_near(&tx).await {
                                     log::error!("Retry failed: {}", e);
                                 }
                             }
                         } else {
                             self.update_transaction_status(
-                                &original_tx, 
+                                &tx_hash.to_string(), 
                                 BridgeStatus::Failed("Max retries exceeded".into())
                             ).await.ok();
                             break;
@@ -358,7 +361,7 @@ impl BridgeOrchestrator {
                     log::error!("Error monitoring LayerZero transaction: {}", e);
                     if retries >= max_retries {
                         self.update_transaction_status(
-                            &original_tx, 
+                            &tx_hash.to_string(), 
                             BridgeStatus::Failed(format!("Monitoring error: {}", e))
                         ).await.ok();
                         break;
@@ -370,30 +373,30 @@ impl BridgeOrchestrator {
     }
 
     // Monitoring và retry Wormhole
-    async fn monitor_wormhole_transaction(self, original_tx: String, wh_tx: String) {
+    pub async fn monitor_wormhole_transaction(&self, tx_hash: H256, wh_tx_hash: String) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         let max_retries = 3;
         let mut retries = 0;
         
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             
-            match self.wormhole_client.get_transaction_status(&wh_tx).await {
+            match self.wormhole_client.get_transaction_status(&wh_tx_hash).await {
                 Ok(status) => {
                     if status == "confirmed" {
-                        self.update_transaction_status(&original_tx, BridgeStatus::Completed).await.ok();
+                        self.update_transaction_status(&tx_hash.to_string(), BridgeStatus::Completed).await.ok();
                         break;
                     } else if status == "failed" {
                         if retries < max_retries {
                             retries += 1;
                             // Thử lại giao dịch
-                            if let Ok(tx) = self.get_transaction(&original_tx).await {
+                            if let Ok(tx) = self.get_transaction(&tx_hash.to_string()).await {
                                 if let Err(e) = self.relay_to_solana(&tx).await {
                                     log::error!("Retry failed: {}", e);
                                 }
                             }
                         } else {
                             self.update_transaction_status(
-                                &original_tx, 
+                                &tx_hash.to_string(), 
                                 BridgeStatus::Failed("Max retries exceeded".into())
                             ).await.ok();
                             break;
@@ -404,7 +407,7 @@ impl BridgeOrchestrator {
                     log::error!("Error monitoring Wormhole transaction: {}", e);
                     if retries >= max_retries {
                         self.update_transaction_status(
-                            &original_tx, 
+                            &tx_hash.to_string(), 
                             BridgeStatus::Failed(format!("Monitoring error: {}", e))
                         ).await.ok();
                         break;
@@ -429,7 +432,7 @@ impl BridgeOrchestrator {
     }
 
     // Chuẩn bị payload cho Wormhole
-    fn prepare_wormhole_payload(&self, tx: &BridgeTransaction) -> Result<Vec<u8>, Box<dyn Error>> {
+    async fn prepare_wormhole_payload(&self, tx: &BridgeTransaction) -> Result<Vec<u8>, Box<dyn Error>> {
         // Cấu trúc payload phải khớp với cách DiamondToken trên Solana giải mã
         let solana_program_id = self.get_solana_program_id().await?;
         
@@ -484,9 +487,8 @@ impl BridgeOrchestrator {
         Ok(true)
     }
     
-    // Lấy Solana program ID
-    async fn get_solana_program_id(&self) -> Result<[u8; 32], Box<dyn Error>> {
-        // Thông thường sẽ đọc từ config hoặc bridge contract
+    // Lấy program ID của Solana từ smart contract
+    pub async fn get_solana_program_id(&self) -> Result<Vec<u8>, Box<dyn Error>> {
         let contract = Contract::new(
             self.bridge_contract_bsc,
             include_bytes!("../abi/DmdBscBridge.json"),
@@ -494,15 +496,7 @@ impl BridgeOrchestrator {
         );
         
         let program_id: Bytes = contract.method("solanaProgramId", ())?.call().await?;
-        
-        if program_id.len() != 32 {
-            return Err("Invalid Solana Program ID length".into());
-        }
-        
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&program_id);
-        
-        Ok(result)
+        Ok(program_id.to_vec())
     }
 
     // Phương thức để lấy transaction từ cache hoặc DB

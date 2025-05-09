@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::processor::bridge_orchestrator::{BridgeOrchestrator, BridgeStatus, Chain, FeeEstimate};
+use crate::processor::bridge_orchestrator::{BridgeOrchestrator, BridgeStatus, Chain};
 
 // Đầu vào và đầu ra API
 

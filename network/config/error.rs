@@ -22,6 +22,9 @@ pub enum ConfigError {
     /// Giá trị không hợp lệ
     InvalidValue(String),
     
+    /// Cấu hình không hợp lệ
+    InvalidConfig(String),
+    
     /// Lỗi chuyển đổi kiểu
     ConversionError(String),
     
@@ -45,6 +48,7 @@ impl fmt::Display for ConfigError {
             ConfigError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ConfigError::MissingField(field) => write!(f, "Missing required field: {}", field),
             ConfigError::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
+            ConfigError::InvalidConfig(msg) => write!(f, "Invalid configuration: {}", msg),
             ConfigError::ConversionError(msg) => write!(f, "Type conversion error: {}", msg),
             ConfigError::ConfigConflict(msg) => write!(f, "Configuration conflict: {}", msg),
             ConfigError::FileNotFound(path) => write!(f, "Configuration file not found: {}", path),

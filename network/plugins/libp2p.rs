@@ -1,4 +1,4 @@
-use crate::core::engine::{Plugin, PluginType, PluginError};
+use crate::plugins::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
 use libp2p::{identity, PeerId, Swarm, Multiaddr, Transport, swarm::SwarmEvent, core::upgrade, futures::StreamExt};
@@ -15,6 +15,10 @@ use thiserror::Error;
 use uuid;
 use tokio::time::sleep;
 use tokio::task::JoinHandle;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::HashSet;
+use tokio::sync::mpsc;
+use serde::{Serialize, Deserialize};
 
 #[derive(Error, Debug)]
 pub enum Libp2pError {
@@ -93,6 +97,9 @@ pub trait Libp2pService: Send + Sync {
     
     /// Discover peers on the network
     async fn discover_peers(&self) -> Result<Vec<PeerId>, Libp2pError>;
+    
+    /// Shutdown the service
+    async fn shutdown(&self) -> Result<(), Libp2pError>;
 }
 
 /// Default implementation of Libp2pService (mock)
@@ -150,7 +157,7 @@ impl Libp2pService for DefaultLibp2pService {
                         )).await;
                     } else {
                         error!(plugin_name = "libp2p", operation = "connect_to_peer", status = "fail", error_code = error_code, correlation_id = %correlation_id, attempt = attempt + 1, peer_addr = %peer_addr, "[Libp2p] Connection failed after {} retries: {}", self.config.max_retries, e);
-                        return Err(e.clone());
+                        return Err((*e).clone());
                     }
                 }
             }
@@ -176,7 +183,7 @@ impl Libp2pService for DefaultLibp2pService {
         
         // Store shutdown signal
         let mut lock = self.shutdown_signal.lock().await;
-        *lock = Some(tx.clone());
+        *lock = Some(tx);
         drop(lock);
         
         // Spawn a task to handle incoming messages
@@ -212,6 +219,21 @@ impl Libp2pService for DefaultLibp2pService {
             Ok(vec![])
         }
     }
+    
+    /// Implement shutdown method for trait
+    async fn shutdown(&self) -> Result<(), Libp2pError> {
+        let mut lock = self.shutdown_signal.lock().await;
+        if let Some(tx) = lock.take() {
+            if let Err(e) = tx.send(()) {
+                return Err(Libp2pError::ShutdownError(
+                    format!("Failed to send shutdown signal: {:?}", e)
+                ));
+            }
+        }
+        
+        debug!("[Libp2p] Service shutdown complete");
+        Ok(())
+    }
 }
 
 impl DefaultLibp2pService {
@@ -246,21 +268,6 @@ impl DefaultLibp2pService {
         let peer_id = PeerId::random();
         debug!(plugin_name = "libp2p", operation = "try_connect_to_peer", status = "success", peer_addr = %peer_addr, peer_id = %peer_id, "[Libp2p] Connected to peer (mock)");
         Ok(peer_id)
-    }
-    
-    /// Shutdown the service
-    pub async fn shutdown(&self) -> Result<(), Libp2pError> {
-        let mut lock = self.shutdown_signal.lock().await;
-        if let Some(tx) = lock.take() {
-            if let Err(e) = tx.send(()) {
-                return Err(Libp2pError::ShutdownError(
-                    format!("Failed to send shutdown signal: {:?}", e)
-                ));
-            }
-        }
-        
-        debug!("[Libp2p] Service shutdown complete");
-        Ok(())
     }
 }
 
@@ -367,14 +374,15 @@ impl Plugin for Libp2pPlugin {
     
     fn start(&self) -> Result<bool, PluginError> {
         if self.name.is_empty() {
-            return Err(PluginError::Other("Plugin name is empty".to_string()));
+            return Err(PluginError::ConfigError("Plugin name is empty".to_string()));
         }
         
         // Spawn a task to initialize the plugin
         let init_handle = tokio::spawn({
             let config = self.config.clone();
             let service = self.service.clone();
-            
+            let bg_tasks = self.background_tasks.clone();
+            let shutdown_tx = self.shutdown_tx.clone();
             async move {
                 match DefaultLibp2pService::with_config(config).init_node().await {
                     Ok((peer_id, _)) => {
@@ -384,117 +392,52 @@ impl Plugin for Libp2pPlugin {
                         error!("[Libp2p] Plugin initialization error: {}", e);
                     }
                 }
-            }
-        });
-        
-        // Thêm handle vào list để quản lý shutdown gracefully
-        {
-            let mut bg_tasks = match self.background_tasks.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[Libp2pPlugin] Failed to acquire lock for background_tasks: {}", e);
-                    return Err(PluginError::Other(format!("Failed to acquire lock: {}", e)));
+                // Lưu handle vào background_tasks
+                if let Ok(mut bg) = bg_tasks.try_lock() {
+                    bg.push(tokio::task::spawn(async {}));
                 }
-            };
-            bg_tasks.push(init_handle);
-        }
-        
-        // Spawn background health check & resource usage log task
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-        
-        // Lưu shutdown_tx để có thể dùng khi cần shutdown
-        {
-            let mut tx = match self.shutdown_tx.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[Libp2pPlugin] Failed to acquire lock for shutdown_tx: {}", e);
-                    return Err(PluginError::Other(format!("Failed to acquire lock: {}", e)));
-                }
-            };
-            *tx = Some(shutdown_tx);
-        }
-        
-        let resource_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                        // Log resource usage (memory, fd count nếu có thể)
-                        #[cfg(target_os = "linux")]
-                        if let Ok(meminfo) = std::fs::read_to_string("/proc/self/status") {
-                            for line in meminfo.lines() {
-                                if line.starts_with("VmRSS") || line.starts_with("VmSize") {
-                                    info!("[Libp2pPlugin][Resource] {}", line);
-                                }
-                            }
-                        }
-                        #[cfg(target_os = "linux")]
-                        if let Ok(fds) = std::fs::read_dir("/proc/self/fd") {
-                            let count = fds.count();
-                            info!("[Libp2pPlugin][Resource] Open file descriptors: {}", count);
-                        }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("[Libp2pPlugin] Background resource task shutting down");
-                        break;
-                    }
+                // Lưu shutdown_tx nếu cần
+                if let Ok(mut tx) = shutdown_tx.try_lock() {
+                    *tx = None;
                 }
             }
         });
-        
-        // Thêm handle vào list để quản lý shutdown gracefully
-        {
-            let mut bg_tasks = match self.background_tasks.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[Libp2pPlugin] Failed to acquire lock for background_tasks: {}", e);
-                    return Err(PluginError::Other(format!("Failed to acquire lock: {}", e)));
-                }
-            };
-            bg_tasks.push(resource_handle);
+        // Lưu init_handle vào background_tasks
+        if let Ok(mut bg) = self.background_tasks.try_lock() {
+            bg.push(init_handle);
         }
-        
         Ok(true)
     }
     
     fn stop(&self) -> Result<(), PluginError> {
         info!("[Libp2p] Stopping plugin");
-        
         // Attempt to shutdown service gracefully
-        tokio::spawn({
-            let service = self.service.clone();
-            
-            async move {
-                // Try to shutdown with timeout
-                match tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await {
-                    Ok(result) => {
-                        match result {
-                            Ok(_) => info!("[Libp2p] Service shutdown complete"),
-                            Err(e) => warn!("[Libp2p] Error during service shutdown: {}", e)
-                        }
-                    },
-                    Err(_) => error!("[Libp2p] Service shutdown timed out after 5s")
-                }
+        let service = self.service.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await {
+                Ok(result) => {
+                    match result {
+                        Ok(_) => info!("[Libp2p] Service shutdown complete"),
+                        Err(e) => warn!("[Libp2p] Error during service shutdown: {}", e)
+                    }
+                },
+                Err(_) => error!("[Libp2p] Service shutdown timed out after 5s")
             }
         });
-        
         // Shutdown all background tasks gracefully with timeout
-        if let Ok(mut tasks) = self.background_tasks.lock() {
+        if let Ok(mut tasks) = self.background_tasks.try_lock() {
             for task in tasks.drain(..) {
                 task.abort();
             }
         } else {
             warn!("[Libp2p] Failed to acquire lock for background tasks during shutdown");
         }
-        
         // Đảm bảo lệnh shutdown được gửi đi (nếu có)
-        if let Ok(mut lock) = self.shutdown_tx.lock() {
+        if let Ok(mut lock) = self.shutdown_tx.try_lock() {
             if let Some(tx) = lock.take() {
-                if let Err(e) = tx.send(()) {
-                    warn!("[Libp2p] Failed to send shutdown signal: {}", e);
-                }
+                let _ = tx.send(());
             }
         }
-        
         Ok(())
     }
 
@@ -507,21 +450,18 @@ impl Drop for Libp2pPlugin {
     fn drop(&mut self) {
         // Đảm bảo khi plugin bị drop, tất cả resource được giải phóng đúng cách
         warn!("[Libp2p] Plugin is being dropped, cleaning up resources...");
-        
         // Ngăn chặn deadlock bằng cách sử dụng try_lock thay vì lock trong drop
         if let Ok(mut shutdown_sender) = self.shutdown_tx.try_lock() {
             if let Some(sender) = shutdown_sender.take() {
                 let _ = sender.send(());
             }
         }
-        
         // Abort tất cả background tasks để tránh memory leak
         if let Ok(mut tasks) = self.background_tasks.try_lock() {
             for task in tasks.drain(..) {
                 task.abort();
             }
         }
-        
         info!("[Libp2p] Plugin dropped and cleaned up");
     }
 }
@@ -582,6 +522,7 @@ mod tests {
             async fn send_message(&self, _p: &PeerId, _m: &str) -> Result<(), Libp2pError> { Ok(()) }
             async fn start_message_handler(&self) -> Result<oneshot::Sender<()>, Libp2pError> { Err(Libp2pError::ConnectionError("fail".to_string())) }
             async fn discover_peers(&self) -> Result<Vec<PeerId>, Libp2pError> { Ok(vec![]) }
+            async fn shutdown(&self) -> Result<(), Libp2pError> { Ok(()) }
         }
         let plugin = Libp2pPlugin {
             name: "libp2p-test".to_string(),

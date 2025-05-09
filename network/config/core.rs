@@ -6,7 +6,6 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn, error};
 use crate::config::error::ConfigError;
-use crate::core::types::{NetworkDiscovery, NetworkSecurity, NetworkProtocol, NetworkCapability};
 
 /// NodeType định nghĩa loại node
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -16,6 +15,64 @@ pub enum NodeType {
     Slave,
     Discovery,
     Scheduler,
+}
+
+/// NetworkSecurity: Cấu hình bảo mật mạng
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkSecurity {
+    /// Bật/tắt mã hóa
+    pub enable_encryption: bool,
+    /// Bật/tắt xác thực
+    pub enable_authentication: bool,
+    /// Bật/tắt phân quyền
+    pub enable_authorization: bool,
+    /// Các peer được cho phép
+    pub allowed_peers: Vec<String>,
+    /// Các peer bị chặn
+    pub blocked_peers: Vec<String>,
+}
+
+/// NetworkDiscovery: Cấu hình discovery
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkDiscovery {
+    /// Bật/tắt mDNS
+    pub enable_mdns: bool,
+    /// Bật/tắt Kademlia
+    pub enable_kademlia: bool,
+    /// Các node bootstrap
+    pub bootstrap_nodes: Vec<String>,
+    /// Khoảng thời gian discovery
+    pub discovery_interval: std::time::Duration,
+    /// Số lượng peer tối đa
+    pub max_peers: usize,
+}
+
+/// NetworkProtocol: Các giao thức mạng hỗ trợ
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NetworkProtocol {
+    /// LibP2P
+    LibP2P,
+    /// gRPC
+    gRPC,
+    /// WebSocket
+    WebSocket,
+    /// MQTT
+    MQTT,
+    /// WebRTC
+    WebRTC,
+    /// Redis
+    Redis,
+}
+
+/// NetworkCapability: Các khả năng của node
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NetworkCapability {
+    /// Lưu trữ
+    Storage,
+    /// Tính toán
+    Compute,
+    /// Định tuyến
+    Routing,
 }
 
 /// NetworkCoreConfig: Cấu hình engine core

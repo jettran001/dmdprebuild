@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use std::net::SocketAddr;
 use warp::Filter;
 use futures_util::StreamExt;
+use futures_util::FutureExt;
 use tokio::task::JoinHandle;
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::core::engine::NetworkEngine;
+use crate::plugins::{Plugin, PluginType, PluginError};
 use crate::security::input_validation::security;
 use crate::security::api_validation::{ApiValidator, ApiValidationRule, FieldRule};
 use crate::security::auth_middleware::{AuthService, AuthError, with_admin_or_partner, handle_rejection, UserRole, RejectReason};
@@ -16,10 +17,10 @@ use std::net::IpAddr;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use crate::core::types::{Plugin, PluginType, PluginError};
 use std::time::{Instant, Duration};
 use tokio::sync::RwLock;
 use std::net::Ipv4Addr;
+use crate::core::engine::NetworkEngine;
 
 const MAX_CONNECTIONS: usize = 1000;
 const MAX_CONNECTIONS_PER_IP: usize = 20; // Giới hạn tối đa kết nối mỗi IP
@@ -1313,7 +1314,7 @@ impl Plugin for WebSocketPlugin {
         &self.name
     }
     fn plugin_type(&self) -> PluginType {
-        PluginType::Webrtc // Nếu có PluginType::WebSocket thì thay thế
+        PluginType::WebRtc // Nếu có PluginType::WebSocket thì thay thế
     }
     fn start(&self) -> Result<bool, PluginError> {
         // Khởi động service, spawn monitor task nếu cần

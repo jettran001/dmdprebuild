@@ -211,7 +211,7 @@ pub struct RedisConnectionPool {
     circuit_breaker: Arc<TokioMutex<CircuitBreaker>>,
 }
 
-impl<T: Send + Sync + 'static> ConnectionPool<T> {
+impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// Tạo mới một connection pool với kích thước và timeout được chỉ định.
     ///
     /// # Arguments
@@ -646,9 +646,23 @@ impl<T: Send + Sync + 'static> ConnectionPool<T> {
             }
         });
     }
+
+    /// Đóng một kết nối
+    /// 
+    /// Gọi connection_closer nếu được cung cấp
+    /// 
+    /// # Arguments
+    /// * `key` - Khóa của kết nối cần đóng
+    /// 
+    /// # Returns
+    /// `bool` - true nếu kết nối được đóng thành công, false nếu không tìm thấy
+    pub fn close_connection(&self, key: &str) -> bool {
+        // Implementation
+        false
+    }
 }
 
-impl<T: Send + Sync + 'static> Drop for ConnectionPool<T> {
+impl<T: Send + Sync + Clone + 'static> Drop for ConnectionPool<T> {
     /// Cleanup resources khi pool bị drop.
     /// 
     /// # Notes

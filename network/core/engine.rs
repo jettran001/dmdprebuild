@@ -12,8 +12,9 @@ use thiserror::Error;
 use tokio::sync::{RwLock, Mutex};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
+use std::any::Any;
 
-use crate::config::{NetworkConfig as InfraNetworkConfig, core::NetworkCoreConfig};
+use crate::config::{NetworkConfig, core::NetworkCoreConfig};
 
 pub enum EngineError {
     PluginStartFailed(String),
@@ -130,6 +131,11 @@ pub trait Plugin: Send + Sync {
         // Implement mặc định trả về Ok(true) để các plugin không cần implement lại nếu không cần
         Ok(true)
     }
+    
+    /// Convert plugin to &dyn Any để hỗ trợ downcasting
+    fn as_any(&self) -> &dyn std::any::Any where Self: 'static {
+        self
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -198,7 +204,7 @@ impl Plugin for MockPlugin {
 
 /// DefaultNetworkEngine implementation
 pub struct DefaultNetworkEngine {
-    config: Arc<RwLock<InfraNetworkConfig>>,
+    config: Arc<RwLock<NetworkConfig>>,
     plugins: Arc<RwLock<Vec<Arc<dyn Plugin + Send + Sync>>>>,
     is_running: Arc<RwLock<bool>>,
     master_service: Arc<crate::node_manager::master::PartitionedMasterNodeService>,
@@ -211,7 +217,7 @@ pub struct DefaultNetworkEngine {
 impl DefaultNetworkEngine {
     pub fn new() -> Self {
         Self {
-            config: Arc::new(RwLock::new(InfraNetworkConfig::default())),
+            config: Arc::new(RwLock::new(NetworkConfig::default())),
             plugins: Arc::new(RwLock::new(Vec::new())),
             is_running: Arc::new(RwLock::new(false)),
             master_service: Arc::new(crate::node_manager::master::PartitionedMasterNodeService::new()),
@@ -269,7 +275,7 @@ impl NetworkEngine for DefaultNetworkEngine {
         let mut config_guard = self.config.write().await;
         
         // Tạo cấu hình mới từ NetworkCoreConfig
-        let mut new_config = InfraNetworkConfig::default();
+        let mut new_config = NetworkConfig::default();
         new_config.core = config.clone();
         
         // Cập nhật cấu hình hiện tại
@@ -396,51 +402,34 @@ impl NetworkEngine for DefaultNetworkEngine {
     }
 
     async fn get_plugin(&self, id: PluginId) -> Option<Box<dyn Plugin>> {
-        let plugins = match self.plugins.read().await {
-            Ok(guard) => guard,
-            Err(_) => return None,
-        };
+        let plugins = self.plugins.read().await;
         
         // Tìm plugin theo id, tạm thời trả về None vì chưa triển khai đầy đủ
         None 
     }
 
     async fn get_all_plugins(&self) -> Vec<Box<dyn Plugin>> {
-        let plugins = match self.plugins.read().await {
-            Ok(guard) => guard,
-            Err(_) => return Vec::new(),
-        };
+        let plugins = self.plugins.read().await;
         
         // Tạm thời trả về vector rỗng vì chưa triển khai đầy đủ
         Vec::new() 
     }
 
     async fn remove_plugin(&self, id: PluginId) -> Result<()> {
-        let mut plugins = match self.plugins.write().await {
-            Ok(guard) => guard,
-            Err(e) => return Err(anyhow::anyhow!("Failed to acquire lock: {}", e)),
-        };
+        let mut plugins = self.plugins.write().await;
         
         // Tạm thời trả về Ok vì chưa triển khai đầy đủ
         Ok(())
     }
 
     async fn get_all_plugin_statuses(&self) -> Result<std::collections::HashMap<crate::core::engine::PluginType, crate::core::engine::PluginStatus>, EngineError> {
-        let status = self.plugin_status.read().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        })?;
+        let status = self.plugin_status.read().await;
         Ok(status.clone())
     }
 
     async fn get_metrics(&self) -> Result<String, EngineError> {
         // Sử dụng cách an toàn hơn để lấy read lock cho plugins
-        let plugins = match self.plugins.read().await {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("[NetworkEngine] Failed to acquire read lock for plugins: {}", e);
-                return Err(EngineError::LockError(format!("Failed to acquire plugins lock: {}", e)));
-            }
-        };
+        let plugins = self.plugins.read().await;
         
         // Sử dụng cách an toàn để lấy plugin statuses
         let statuses = self.get_all_plugin_statuses().await?;
@@ -545,43 +534,33 @@ impl NetworkEngine for DefaultNetworkEngine {
     }
 
     async fn list_plugins(&self) -> Result<Vec<crate::core::engine::PluginType>, EngineError> {
-        let plugins = self.plugins.read().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        })?;
-        Ok(plugins.keys().cloned().collect())
+        let plugin_info = self.list_plugin_info().await?;
+        let plugin_types: Vec<PluginType> = plugin_info.into_iter().map(|(ptype, _, _)| ptype).collect();
+        Ok(plugin_types)
     }
 
     async fn check_plugin_health(&self, plugin_type: &crate::core::engine::PluginType) -> Result<bool, EngineError> {
-        let plugin = match self.get_plugin(plugin_type).await {
-            Some(p) => p,
-            None => {
-                warn!("Health check failed: plugin not found: {:?}", plugin_type);
-                return Err(EngineError::PluginStartFailed(format!("Plugin {:?} not found", plugin_type)))
-            },
+        // Sử dụng thực hiện đúng cách thay vì sử dụng match với Ok/Err
+        let plugins = self.plugins.read().await;
+        
+        let plugin = if let Some(p) = plugins.get(plugin_type) {
+            p
+        } else {
+            return Err(EngineError::InternalError(format!("Plugin not found: {:?}", plugin_type)));
         };
+
         match plugin.check_health() {
-            Ok(true) => {
-                info!("Health check passed: {:?}", plugin_type);
-                let mut status = self.plugin_status.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
-                status.insert(plugin_type.clone(), PluginStatus::Active);
-                Ok(true)
-            },
-            _ => {
-                error!("Health check failed: {:?}", plugin_type);
-                let mut status = self.plugin_status.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
-                status.insert(plugin_type.clone(), PluginStatus::Failed);
-                Err(EngineError::PluginStartFailed(plugin.name().to_string()))
+            Ok(status) => Ok(status),
+            Err(e) => {
+                error!("Plugin health check failed for {:?}: {:?}", plugin_type, e);
+                Err(EngineError::InternalError(format!("Plugin health check failed: {:?}", e)))
             }
         }
     }
 
     async fn unregister_plugin(&self, plugin_type: &crate::core::engine::PluginType) -> Result<(), EngineError> {
-        let mut plugins = self.plugins.write().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        })?;
-        let mut status = self.plugin_status.write().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        })?;
+        let mut plugins = self.plugins.write().await;
+        let mut status = self.plugin_status.write().await;
         
         if plugins.remove(plugin_type).is_some() {
             status.remove(plugin_type);
@@ -598,8 +577,17 @@ impl DefaultNetworkEngine {
     pub async fn handle_message(&self, message: NetworkMessage) -> Result<()> {
         let plugins = self.plugins.read().await;
         for plugin in plugins.iter() {
-            if let Err(e) = plugin.handle_message(&message).await {
-                error!("Plugin {} failed to handle message: {}", plugin.name(), e);
+            // Bỏ downcast_ref từ dyn NetworkPlugin (không đúng cú pháp) 
+            // Thay bằng kiểm tra manual qua plugin_type
+            let is_network_plugin = match plugin.plugin_type() {
+                PluginType::WebSocket | PluginType::LibP2P | PluginType::MQTT => true,
+                _ => false
+            };
+            
+            if is_network_plugin {
+                if let Err(e) = plugin.as_any().downcast_ref::<Box<dyn NetworkPlugin>>().unwrap().handle_message(&message).await {
+                    error!("Plugin {} failed to handle message: {}", plugin.name(), e);
+                }
             }
         }
         Ok(())
@@ -615,11 +603,13 @@ impl DefaultNetworkEngine {
             match plugin.start() {
                 Ok(true) => {
                     info!("Plugin started and registered: {} ({:?})", plugin.name(), plugin_type);
-                    let mut plugins = self.plugins.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
+                    let mut plugins = self.plugins.write().await;
                     plugins.insert(plugin_type.clone(), plugin.clone());
-                    let mut status = self.plugin_status.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
+                    
+                    let mut status = self.plugin_status.write().await;
                     status.insert(plugin_type.clone(), PluginStatus::Active);
-                    let mut last_update = self.plugin_last_update.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
+                    
+                    let mut last_update = self.plugin_last_update.write().await;
                     last_update.insert(plugin_type, std::time::Instant::now());
                     return Ok(());
                 },
@@ -635,9 +625,10 @@ impl DefaultNetworkEngine {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         // Nếu vẫn thất bại sau 3 lần
-        let mut status = self.plugin_status.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
+        let mut status = self.plugin_status.write().await;
         status.insert(plugin_type.clone(), PluginStatus::Failed);
-        let mut last_update = self.plugin_last_update.write().await.map_err(|e| EngineError::LockError(e.to_string()))?;
+        
+        let mut last_update = self.plugin_last_update.write().await;
         last_update.insert(plugin_type, std::time::Instant::now());
         
         // Trả về lỗi sau khi đã thử nhiều lần
@@ -648,31 +639,17 @@ impl DefaultNetworkEngine {
     }
 
     pub async fn get_plugin(&self, plugin_type: &PluginType) -> Option<Arc<dyn Plugin + Send + Sync>> {
-        let plugins = self.plugins.read().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        }).ok()?;
+        let plugins = self.plugins.read().await;
         plugins.get(plugin_type).cloned()
     }
 
     /// Management interface: trả về thông tin chi tiết về tất cả plugin runtime
     pub async fn list_plugin_info(&self) -> Result<Vec<(PluginType, String, PluginStatus)>, EngineError> {
         // Sử dụng cách an toàn để lấy read lock cho plugins
-        let plugins = match self.plugins.read().await {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("[NetworkEngine] Failed to acquire read lock for plugins in list_plugin_info: {}", e);
-                return Err(EngineError::LockError(format!("Failed to acquire plugins lock: {}", e)));
-            }
-        };
+        let plugins = self.plugins.read().await;
         
         // Sử dụng cách an toàn để lấy read lock cho statuses
-        let statuses = match self.plugin_status.read().await {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("[NetworkEngine] Failed to acquire read lock for plugin_status: {}", e);
-                return Err(EngineError::LockError(format!("Failed to acquire plugin_status lock: {}", e)));
-            }
-        };
+        let statuses = self.plugin_status.read().await;
         
         let mut info = Vec::new();
         for (ptype, plugin) in plugins.iter() {
@@ -684,9 +661,7 @@ impl DefaultNetworkEngine {
 
     /// Get plugin count by status (for metrics)
     pub async fn get_plugin_count_by_status(&self) -> Result<HashMap<PluginStatus, usize>, EngineError> {
-        let status = self.plugin_status.read().await.map_err(|e| {
-            EngineError::LockError(e.to_string())
-        })?;
+        let status = self.plugin_status.read().await;
         let mut counts = HashMap::new();
         
         // Initialize all status counts to 0

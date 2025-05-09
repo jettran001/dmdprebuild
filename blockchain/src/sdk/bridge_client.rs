@@ -1,7 +1,5 @@
 use std::error::Error;
-use std::sync::Arc;
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
 
 use crate::processor::bridge_orchestrator::{Chain, BridgeStatus, FeeEstimate};
 use crate::sdk::api::{BridgeStatusResponse, FeesResponse, RelayRequest};

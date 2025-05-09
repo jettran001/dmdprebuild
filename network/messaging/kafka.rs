@@ -14,7 +14,7 @@ const MAX_KAFKA_PAYLOAD_SIZE: usize = 1024 * 1024; // 1MB
 #[async_trait]
 pub trait MessagingKafkaService: Send + Sync + 'static {
     async fn connect(&self, brokers: &[String]) -> Result<(), ServiceError>;
-    async fn send(&self, topic: &str, message: &[u8]) -> Result<(), ServiceError>;
+    async fn send(&self, topic: &str, message: &[u8]) -> Result<bool, ServiceError>;
     async fn subscribe(&self, topic: &str, callback: Box<dyn Fn(&[u8]) + Send + Sync>) -> Result<String, ServiceError>;
     async fn unsubscribe(&self, subscription_id: &str) -> Result<(), ServiceError>;
     async fn health_check(&self) -> Result<bool, ServiceError>;
@@ -26,20 +26,35 @@ pub struct DefaultMessagingKafkaService;
 #[async_trait]
 impl MessagingKafkaService for DefaultMessagingKafkaService {
     async fn connect(&self, brokers: &[String]) -> Result<(), ServiceError> {
-        for url in brokers {
-            security::check_xss(url, "kafka_url").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+        for broker in brokers {
+            security::check_xss(broker, "kafka_broker").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+            security::check_sql_injection(broker, "kafka_broker").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
         }
-        info!("[MessagingKafkaService] Connecting to Kafka brokers: {:?}", brokers);
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        info!("[MessagingKafkaService] Connected to kafka brokers: {:?}", brokers);
         Ok(())
     }
-    async fn send(&self, topic: &str, message: &[u8]) -> Result<(), ServiceError> {
-        self.validate_input(topic, message, "mock://kafka")?;
-        self.check_payload_size(message)?;
-        info!("[MessagingKafkaService] Send to topic: {} ({} bytes)", topic, message.len());
+    
+    async fn send(&self, topic: &str, message: &[u8]) -> Result<bool, ServiceError> {
+        security::check_xss(topic, "kafka_topic").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+        security::check_sql_injection(topic, "kafka_topic").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+        
+        if let Ok(msg_str) = std::str::from_utf8(message) {
+            security::check_xss(msg_str, "kafka_message").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+            security::check_sql_injection(msg_str, "kafka_message").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+        }
+        
+        if message.len() > MAX_KAFKA_PAYLOAD_SIZE {
+            return Err(ServiceError::ValidationError(format!("Kafka payload too large: {} bytes", message.len())));
+        }
+        
+        info!("[MessagingKafkaService] Send message to topic: {}, size: {} bytes", topic, message.len());
+        
+        // Mock successful send
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        Ok(())
+        
+        Ok(true)
     }
+    
     async fn subscribe(&self, topic: &str, _callback: Box<dyn Fn(&[u8]) + Send + Sync>) -> Result<String, ServiceError> {
         security::check_xss(topic, "kafka_topic").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
         security::check_sql_injection(topic, "kafka_topic").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
@@ -118,7 +133,7 @@ impl DefaultMessagingKafkaService {
         max_retries: u32,
         retry_delay_ms: u64,
         timeout_ms: u64
-    ) -> Result<bool, String> {
+    ) -> Result<bool, ServiceError> {
         // Check payload size first
         self.check_payload_size(payload)?;
         
@@ -151,7 +166,7 @@ impl DefaultMessagingKafkaService {
             }
         }
         
-        Err(format!("Failed to send after {} attempts", max_retries))
+        Err(ServiceError::TimeoutError(format!("Failed to send after {} attempts", max_retries)))
     }
 
     pub fn validate_input(&self, topic: &str, message: &[u8], _uri: &str) -> Result<(), ServiceError> {

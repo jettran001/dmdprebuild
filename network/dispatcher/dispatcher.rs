@@ -1,13 +1,14 @@
-use crate::core::types::{NodeProfile, NodeRole};
+use crate::node_manager::{NodeProfile, NodeRole};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tracing::{info, warn, error};
 use std::time::Duration;
 use tokio::time;
+use tokio::sync::Mutex;
 
 /// Task enum: Represents a logical task that can be assigned to a node
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Task {
     AiTraining,
     SnipebotExecution,
@@ -15,6 +16,9 @@ pub enum Task {
     RedisCache,
     WalletProcessing,
     EdgeComputation,
+    MasterNode,
+    SlaveNode,
+    WorkerNode,
     Unknown,
 }
 
@@ -143,6 +147,9 @@ impl Dispatcher {
                 NodeRole::RedisNode => tasks.push(Task::RedisCache),
                 NodeRole::WalletNode => tasks.push(Task::WalletProcessing),
                 NodeRole::EdgeCompute => tasks.push(Task::EdgeComputation),
+                NodeRole::Master => tasks.push(Task::MasterNode),
+                NodeRole::Slave => tasks.push(Task::SlaveNode),
+                NodeRole::Worker => tasks.push(Task::WorkerNode),
                 NodeRole::Unknown => {
                     has_unknown_role = true;
                     tasks.push(Task::Unknown);
@@ -189,6 +196,9 @@ impl Dispatcher {
                     NodeRole::RedisNode => result.push(Task::RedisCache),
                     NodeRole::WalletNode => result.push(Task::WalletProcessing),
                     NodeRole::EdgeCompute => result.push(Task::EdgeComputation),
+                    NodeRole::Master => result.push(Task::MasterNode),
+                    NodeRole::Slave => result.push(Task::SlaveNode),
+                    NodeRole::Worker => result.push(Task::WorkerNode),
                     NodeRole::Unknown => {
                         warn!("[Dispatcher] Unknown role detected, using Task::Unknown");
                         result.push(Task::Unknown)
@@ -223,6 +233,9 @@ impl Dispatcher {
                     NodeRole::RedisNode => Task::RedisCache,
                     NodeRole::WalletNode => Task::WalletProcessing,
                     NodeRole::EdgeCompute => Task::EdgeComputation,
+                    NodeRole::Master => Task::MasterNode,
+                    NodeRole::Slave => Task::SlaveNode,
+                    NodeRole::Worker => Task::WorkerNode,
                     NodeRole::Unknown => {
                         has_unknown_role = true;
                         Task::Unknown
@@ -250,7 +263,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::NodeProfile;
+    use crate::node_manager::NodeProfile;
     
     #[test]
     fn test_dispatcher_mapping() {

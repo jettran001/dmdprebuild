@@ -30,12 +30,16 @@ html-escape = "0.2"
 
 [workspace]
 members = [
-    "wallet",
-    "network",
-    "snipebot",
     "common",
-    "blockchain"
+    "blockchain",
+    "wallet",
+    "snipebot",
+    "network",
 ]
+
+[patch.crates-io]
+# Giải quyết xung đột phiên bản curve25519-dalek giữa solana-client và near-jsonrpc-client
+curve25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek", tag = "3.2.1" }
 
 [profile.dev]
 opt-level = 0

@@ -1,15 +1,70 @@
 use async_trait::async_trait;
 use crate::core::engine::NetworkEngine;
+use crate::plugins::PluginType;
 use std::sync::Arc;
 use warp::Filter;
 use std::fs;
 use tracing::{info, warn, error};
+use futures_util::TryFutureExt;
 
 use crate::errors::{NetworkError, Result as NetworkResult};
 use crate::security::api_validation::{
     LogDomainValidator, PluginTypeValidator, MetricsValidator, HealthValidator, 
     create_default_validators
 };
+
+/// Type alias cho API logs đơn giản
+pub type LogsApiFilter = warp::filters::BoxedFilter<(Box<dyn warp::Reply>,)>;
+
+/// Tạo route API logs đơn giản
+/// 
+/// API này cho phép truy xuất log từ hệ thống, với các endpoint:
+/// - GET /api/logs - lấy tất cả log gần đây
+/// - GET /api/logs/{domain} - lấy log của một domain cụ thể (network, blockchain, wallet...)
+pub fn logs_api() -> LogsApiFilter {
+    let log_validator = LogDomainValidator::new();
+    
+    // GET /api/logs
+    let get_logs = warp::path("logs")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(|| {
+            // Implement logic to retrieve all recent logs
+            let response = warp::reply::json(&vec![
+                "Latest log entries would be returned here",
+                "Implement actual log retrieval from your logging system"
+            ]);
+            Box::new(response) as Box<dyn warp::Reply>
+        });
+    
+    // GET /api/logs/{domain}
+    let get_domain_logs = warp::path("logs")
+        .and(warp::path::param::<String>())
+        .and(warp::path::end())
+        .and(warp::get())
+        .and_then(move |domain: String| async move {
+            // Validate domain parameter
+            match log_validator.validate(&domain) {
+                Ok(_) => {
+                    // Implement logic to retrieve logs for specific domain
+                    let response = warp::reply::json(&vec![
+                        format!("Logs for domain: {}", domain),
+                        "Implement actual domain-specific log retrieval"
+                    ]);
+                    Ok(Box::new(response) as Box<dyn warp::Reply>)
+                },
+                Err(_) => Err(warp::reject::custom(NetworkError::ValidationError(
+                    format!("Invalid log domain: {}", domain)
+                )))
+            }
+        });
+    
+    // Combine routes and box the filter
+    get_logs
+        .or(get_domain_logs)
+        .with(warp::cors().allow_any_origin())
+        .boxed()
+}
 
 #[async_trait]
 pub trait NetworkApi: Send + Sync {
@@ -59,7 +114,7 @@ impl NetworkApi for DefaultNetworkApi {
             })?;
             
         let active_count = plugin_statuses.values()
-            .filter(|&status| *status == crate::core::types::PluginStatus::Active)
+            .filter(|&status| *status == crate::core::engine::PluginStatus::Active)
             .count();
             
         Ok(format!("Healthy. Active plugins: {}/{}", active_count, plugin_statuses.len()))
@@ -102,7 +157,6 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "plugin_status", plugin_type = %plugin_type, "Plugin status requested");
         
-        use crate::core::types::PluginType;
         let plugin_type = plugin_type.parse::<PluginType>()
             .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
         
@@ -128,7 +182,6 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "unregister_plugin", plugin_type = %plugin_type, "Plugin unregister requested");
         
-        use crate::core::types::PluginType;
         let plugin_type = plugin_type.parse::<PluginType>()
             .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
         
@@ -148,7 +201,6 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "check_plugin_health", plugin_type = %plugin_type, "Plugin health check requested");
         
-        use crate::core::types::PluginType;
         let plugin_type = plugin_type.parse::<PluginType>()
             .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
         
@@ -161,16 +213,3 @@ impl NetworkApi for DefaultNetworkApi {
         Ok(if healthy { "Healthy".to_string() } else { "Unhealthy".to_string() })
     }
 }
-
-/// API endpoint cho logs
-/// 
-/// # Returns
-/// LogsApiFilter - Type alias cho warp Filter để xử lý truy vấn logs
-pub fn logs_api() -> LogsApiFilter {
-    warp::path!("api" / "logs")
-        .and(warp::get())
-        .and_then(get_logs)
-}
-
-/// Type alias rõ ràng cho kiểu trả về của logs_api
-pub type LogsApiFilter = impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone;

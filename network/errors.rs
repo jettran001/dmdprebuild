@@ -42,7 +42,6 @@ use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 use crate::core::engine::EngineError;
-use crate::core::types::PluginError;
 use crate::security::auth_middleware::AuthError;
 use crate::security::rate_limiter::RateLimitError;
 use crate::security::input_validation::ValidationError;
@@ -167,7 +166,21 @@ impl NetworkError {
         NetworkError::ServiceError(error.to_string())
     }
     
-    /// Lỗi này có phải lỗi xác thực không
+    /// Tạo lỗi emit cho event router
+    pub fn emit_error(msg: impl Into<String>) -> Self {
+        NetworkError::EventError(msg.into())
+    }
+    
+    /// Tạo lỗi "đã đang chạy" cho service/router
+    pub fn already_running() -> Self {
+        NetworkError::EventError("Service is already running".to_string())
+    }
+    
+    /// Tạo lỗi "chưa chạy" cho service/router
+    pub fn not_running() -> Self {
+        NetworkError::EventError("Service is not running".to_string())
+    }
+    
     pub fn is_auth_error(&self) -> bool {
         matches!(self, NetworkError::AuthError(_) | NetworkError::JwtError(_) | NetworkError::ApiKeyError(_))
     }
@@ -215,28 +228,32 @@ impl NetworkError {
         }
     }
     
-    /// Ghi lỗi vào log với chi tiết loại lỗi cụ thể
-    ///
-    /// # Returns
-    /// `()` - Hàm luôn thành công và không trả về giá trị
-    pub fn log(&self) -> () {
-        // Ghi log lỗi phù hợp với loại lỗi
+    /// Log lỗi này
+    pub fn log(&self) {
+        use tracing::{error, warn};
+
         match self {
-            Self::AuthError(msg) => crate::logs::log_network_error(&format!("Auth error: {}", msg)),
-            Self::JwtError(msg) => crate::logs::log_network_error(&format!("JWT error: {}", msg)),
-            Self::ApiKeyError(msg) => crate::logs::log_network_error(&format!("API key error: {}", msg)),
-            Self::ConfigError(msg) => crate::logs::log_network_error(&format!("Config error: {}", msg)),
-            Self::ConnectionError(msg) => crate::logs::log_network_error(&format!("Connection error: {}", msg)),
-            Self::DatabaseError(msg) => crate::logs::log_network_error(&format!("Database error: {}", msg)),
-            Self::EngineError(msg) => crate::logs::log_network_error(&format!("Engine error: {}", msg)),
-            Self::PluginError(msg) => crate::logs::log_network_error(&format!("Plugin error: {}", msg)),
-            Self::IoError(msg) => crate::logs::log_network_error(&format!("IO error: {}", msg)),
-            Self::JsonError(msg) => crate::logs::log_network_error(&format!("JSON error: {}", msg)),
-            Self::ParseError(msg) => crate::logs::log_network_error(&format!("Parse error: {}", msg)),
-            Self::RateLimitError(msg) => crate::logs::log_network_error(&format!("Rate limit error: {}", msg)),
-            Self::ServiceError(msg) => crate::logs::log_network_error(&format!("Service error: {}", msg)),
-            Self::TimeoutError(msg) => crate::logs::log_network_error(&format!("Timeout error: {}", msg)),
-            Self::ValidationError(msg) => crate::logs::log_network_error(&format!("Validation error: {}", msg)),
+            NetworkError::AuthError(msg) | 
+            NetworkError::JwtError(msg) |
+            NetworkError::ApiKeyError(msg) => {
+                warn!(error_type = "auth", message = %msg, "Auth error");
+            },
+
+            NetworkError::ValidationError(msg) => {
+                warn!(error_type = "validation", message = %msg, "Validation error");
+            },
+
+            NetworkError::RateLimitError(msg) => {
+                warn!(error_type = "rate_limit", message = %msg, "Rate limit error");
+            },
+
+            NetworkError::NotFoundError(msg) => {
+                warn!(error_type = "not_found", message = %msg, "Not found error");
+            },
+
+            _ => {
+                error!(error_type = ?self, message = %self, "Network error");
+            }
         }
     }
 }
@@ -284,12 +301,6 @@ impl From<EngineError> for NetworkError {
     }
 }
 
-impl From<PluginError> for NetworkError {
-    fn from(err: PluginError) -> Self {
-        NetworkError::PluginError(err.to_string())
-    }
-}
-
 impl From<ServiceError> for NetworkError {
     fn from(err: ServiceError) -> Self {
         NetworkError::ServiceError(err.to_string())
@@ -317,13 +328,6 @@ impl From<PoolError> for NetworkError {
 impl From<anyhow::Error> for NetworkError {
     fn from(err: anyhow::Error) -> Self {
         NetworkError::UnknownError(err.to_string())
-    }
-}
-
-// Thêm From<EventError> cho NetworkError
-impl From<crate::core::types::EventError> for NetworkError {
-    fn from(err: crate::core::types::EventError) -> Self {
-        NetworkError::EventError(err.to_string())
     }
 }
 

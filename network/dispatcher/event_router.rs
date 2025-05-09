@@ -1,4 +1,4 @@
-use crate::core::types::{Event, EventType, EventHandler, EventError};
+use crate::errors::NetworkError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -6,6 +6,52 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn, error, debug};
 use std::time::Duration;
 use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
+
+/// Event type cho các sự kiện trong network domain
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EventType {
+    /// Sự kiện khi một node kết nối
+    NodeConnected,
+    /// Sự kiện khi một node ngắt kết nối
+    NodeDisconnected,
+    /// Sự kiện khi một plugin được đăng ký
+    PluginRegistered,
+    /// Sự kiện khi một plugin bị hủy đăng ký
+    PluginUnregistered,
+    /// Sự kiện khi nhận được một message
+    MessageReceived,
+    /// Sự kiện khi gửi một message
+    MessageSent,
+    /// Sự kiện khi có lỗi xảy ra
+    Error,
+    /// Sự kiện khi cấu hình thay đổi
+    ConfigChanged,
+    /// Sự kiện khi service bắt đầu
+    ServiceStarted,
+    /// Sự kiện khi service dừng lại
+    ServiceStopped,
+    /// Sự kiện tùy chỉnh
+    Custom(String),
+}
+
+/// Event struct cho các sự kiện trong network domain
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    /// Loại sự kiện
+    pub event_type: EventType,
+    /// Dữ liệu sự kiện
+    pub data: String,
+    /// Timestamp khi sự kiện xảy ra
+    pub timestamp: u64,
+}
+
+/// EventHandler trait cho việc xử lý sự kiện
+#[async_trait]
+pub trait EventHandler: Send + Sync + 'static {
+    /// Xử lý một sự kiện
+    async fn handle_event(&self, event: Event) -> Result<(), NetworkError>;
+}
 
 /// Cấu hình cho EventRouter
 pub struct EventRouterConfig {
@@ -140,7 +186,7 @@ impl EventRouter {
     }
     
     /// Đăng ký handler cho một loại sự kiện
-    pub async fn register_handler(&self, event_type: EventType, handler: Arc<dyn EventHandler>) -> Result<(), EventError> {
+    pub async fn register_handler(&self, event_type: EventType, handler: Arc<dyn EventHandler>) -> Result<(), NetworkError> {
         let mut handlers = self.handlers.lock().await;
         
         handlers.entry(event_type.clone())
@@ -152,7 +198,7 @@ impl EventRouter {
     }
     
     /// Hủy đăng ký handler cho một loại sự kiện
-    pub async fn unregister_handler(&self, event_type: &EventType) -> Result<(), EventError> {
+    pub async fn unregister_handler(&self, event_type: &EventType) -> Result<(), NetworkError> {
         let mut handlers = self.handlers.lock().await;
         
         handlers.remove(event_type);
@@ -162,7 +208,7 @@ impl EventRouter {
     }
     
     /// Gửi sự kiện mới vào router để xử lý
-    pub async fn emit(&self, event: Event) -> Result<(), EventError> {
+    pub async fn emit(&self, event: Event) -> Result<(), NetworkError> {
         let result = self.event_sender.send(event.clone()).await;
         
         match result {
@@ -172,17 +218,17 @@ impl EventRouter {
             },
             Err(e) => {
                 error!("[EventRouter] Failed to emit event: {}", e);
-                Err(EventError::EmitError(format!("Failed to emit event: {}", e)))
+                Err(NetworkError::emit_error(format!("Failed to emit event: {}", e)))
             }
         }
     }
     
     /// Khởi động router
-    pub async fn start(&self) -> Result<(), EventError> {
+    pub async fn start(&self) -> Result<(), NetworkError> {
         let mut is_running = self.is_running.lock().await;
         
         if *is_running {
-            return Err(EventError::AlreadyRunning);
+            return Err(NetworkError::already_running());
         }
         
         *is_running = true;
@@ -312,11 +358,11 @@ impl EventRouter {
     }
     
     /// Dừng router
-    pub async fn stop(&self) -> Result<(), EventError> {
+    pub async fn stop(&self) -> Result<(), NetworkError> {
         let mut is_running = self.is_running.lock().await;
         
         if !*is_running {
-            return Err(EventError::NotRunning);
+            return Err(NetworkError::not_running());
         }
         
         *is_running = false;
@@ -361,7 +407,7 @@ mod tests {
     
     #[async_trait]
     impl EventHandler for MockEventHandler {
-        async fn handle_event(&self, event: Event) -> Result<(), EventError> {
+        async fn handle_event(&self, event: Event) -> Result<(), NetworkError> {
             self.event_received.store(true, Ordering::SeqCst);
             self.handle_count.fetch_add(1, Ordering::SeqCst);
             
@@ -501,5 +547,23 @@ mod tests {
         
         // Dừng router
         router.stop().await.unwrap();
+    }
+}
+
+// Mở rộng NetworkError với các variant cần thiết cho event_router
+impl NetworkError {
+    /// Tạo lỗi EmitError
+    pub fn emit_error(msg: impl Into<String>) -> Self {
+        NetworkError::EventError(format!("EmitError: {}", msg.into()))
+    }
+    
+    /// Kiểm tra xem có phải là lỗi AlreadyRunning không
+    pub fn already_running() -> Self {
+        NetworkError::EventError("EventRouter is already running".to_string())
+    }
+    
+    /// Kiểm tra xem có phải là lỗi NotRunning không
+    pub fn not_running() -> Self {
+        NetworkError::EventError("EventRouter is not running".to_string())
     }
 } 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::core::types::NodeRole;
+use crate::node_manager::NodeRole;
 
 /// Cấu hình profile cho node trong file Cargo.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
