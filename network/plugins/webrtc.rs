@@ -101,14 +101,13 @@ impl Default for WebRtcConfig {
     }
 }
 
-/// Service trait cho WebRTC operations
-#[async_trait]
-pub trait WebrtcService: Send + Sync + 'static {
-    /// Khởi tạo WebRTC service
+/// Trait for WebRTC service
+pub trait WebrtcService: Send + Sync {
+    /// Initialize the service
     async fn init(&self) -> Result<(), ServiceError>;
     
-    /// Tạo peer connection mới
-    async fn create_peer_connection(&self, config: &WebrtcConfig) -> Result<String, ServiceError>;
+    /// Create a new peer connection
+    async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError>;
     
     /// Thêm ICE candidate
     async fn add_ice_candidate(&self, connection_id: &str, candidate: &str) -> Result<(), ServiceError>;
@@ -329,7 +328,7 @@ impl WebrtcService for DefaultWebRtcService {
         Ok(())
     }
     
-    async fn create_peer_connection(&self, config: &WebrtcConfig) -> Result<String, ServiceError> {
+    async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError> {
         let connection_id = format!("webrtc-{}", uuid::Uuid::new_v4());
         debug!("[WebRTC] Creating peer connection: {}", connection_id);
         

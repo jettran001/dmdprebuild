@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::core::engine::NetworkEngine;
-use crate::plugins::PluginType;
+use crate::core::engine::PluginType;
 use std::sync::Arc;
 use warp::Filter;
 use std::fs;
@@ -157,8 +157,9 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "plugin_status", plugin_type = %plugin_type, "Plugin status requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>()
-            .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
+        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
+            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        })?;
         
         let statuses = self.engine.get_all_plugin_statuses().await
             .map_err(|e| {
@@ -182,8 +183,9 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "unregister_plugin", plugin_type = %plugin_type, "Plugin unregister requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>()
-            .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
+        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
+            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        })?;
         
         self.engine.unregister_plugin(&plugin_type)
             .map_err(|e| {
@@ -201,8 +203,9 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "check_plugin_health", plugin_type = %plugin_type, "Plugin health check requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>()
-            .map_err(|_| NetworkError::ValidationError("Invalid plugin type format".to_string()))?;
+        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
+            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        })?;
         
         let healthy = self.engine.check_plugin_health(&plugin_type)
             .map_err(|e| {

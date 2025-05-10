@@ -54,6 +54,7 @@ pub trait EventHandler: Send + Sync + 'static {
 }
 
 /// Cấu hình cho EventRouter
+#[derive(Debug, Clone)]
 pub struct EventRouterConfig {
     /// Kích thước buffer cho kênh xử lý event
     pub channel_buffer_size: usize,
@@ -187,6 +188,7 @@ impl EventRouter {
     
     /// Đăng ký handler cho một loại sự kiện
     pub async fn register_handler(&self, event_type: EventType, handler: Arc<dyn EventHandler>) -> Result<(), NetworkError> {
+        // Lấy lock cho handlers
         let mut handlers = self.handlers.lock().await;
         
         handlers.entry(event_type.clone())
@@ -199,6 +201,7 @@ impl EventRouter {
     
     /// Hủy đăng ký handler cho một loại sự kiện
     pub async fn unregister_handler(&self, event_type: &EventType) -> Result<(), NetworkError> {
+        // Lấy lock cho handlers
         let mut handlers = self.handlers.lock().await;
         
         handlers.remove(event_type);
@@ -209,29 +212,35 @@ impl EventRouter {
     
     /// Gửi sự kiện mới vào router để xử lý
     pub async fn emit(&self, event: Event) -> Result<(), NetworkError> {
-        let result = self.event_sender.send(event.clone()).await;
+        // Kiểm tra nếu router đang chạy
+        let is_running = self.is_running.lock().await;
+        if !*is_running {
+            return Err(NetworkError::event_error("EventRouter is not running".to_string()));
+        }
         
-        match result {
+        // Sử dụng match thay vì unwrap để xử lý lỗi khi gửi event
+        match self.event_sender.send(event.clone()).await {
             Ok(_) => {
                 debug!("[EventRouter] Emitted event of type: {:?}", event.event_type);
                 Ok(())
             },
             Err(e) => {
                 error!("[EventRouter] Failed to emit event: {}", e);
-                Err(NetworkError::emit_error(format!("Failed to emit event: {}", e)))
+                Err(NetworkError::event_error(format!("Failed to emit event: {}", e)))
             }
         }
     }
     
     /// Khởi động router
     pub async fn start(&self) -> Result<(), NetworkError> {
-        let mut is_running = self.is_running.lock().await;
+        // Lấy lock cho is_running
+        let mut is_running_guard = self.is_running.lock().await;
         
-        if *is_running {
-            return Err(NetworkError::already_running());
+        if *is_running_guard {
+            return Err(NetworkError::event_error("EventRouter is already running".to_string()));
         }
         
-        *is_running = true;
+        *is_running_guard = true;
         
         // Tạo kênh shutdown
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
@@ -261,7 +270,9 @@ impl EventRouter {
                     Some(event) = receiver.recv() => {
                         // Tìm các handler cho loại sự kiện này
                         let event_handlers = {
+                            // Lấy lock
                             let handlers_map = handlers.lock().await;
+                            
                             if let Some(h) = handlers_map.get(&event.event_type) {
                                 h.clone()
                             } else {
@@ -299,10 +310,8 @@ impl EventRouter {
                             });
                             
                             // Lưu handle để cleanup sau này nếu cần
-                            {
-                                let mut task_mgr = task_manager.lock().await;
-                                task_mgr.add_task(handle);
-                            }
+                            let mut task_mgr = task_manager.lock().await;
+                            task_mgr.add_task(handle);
                         }
                     },
                     // Nhận tín hiệu shutdown
@@ -359,13 +368,14 @@ impl EventRouter {
     
     /// Dừng router
     pub async fn stop(&self) -> Result<(), NetworkError> {
-        let mut is_running = self.is_running.lock().await;
+        // Lấy lock cho is_running
+        let mut is_running_guard = self.is_running.lock().await;
         
-        if !*is_running {
-            return Err(NetworkError::not_running());
+        if !*is_running_guard {
+            return Err(NetworkError::event_error("EventRouter is not running".to_string()));
         }
         
-        *is_running = false;
+        *is_running_guard = false;
         
         // Cleanup tất cả các task
         let mut task_manager = self.task_manager.lock().await;
@@ -381,11 +391,14 @@ impl Drop for EventRouter {
         // Sử dụng tokio runtime hiện tại nếu có
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.block_on(async {
-                let task_manager = self.task_manager.lock().await;
-                // Đây là trường hợp kỹ thuật, không thể thực sự gọi cleanup()
-                // vì chúng ta chỉ có một tham chiếu bất biến (self)
-                
-                info!("[EventRouter] Dropped, all resources will be cleaned up");
+                // Lấy lock cho task_manager
+                if let Ok(mut task_manager) = self.task_manager.try_lock() {
+                    // Gọi cleanup() để dọn dẹp tài nguyên
+                    let _ = task_manager.cleanup().await;
+                    info!("[EventRouter] Dropped, all resources have been cleaned up");
+                } else {
+                    warn!("[EventRouter] Could not acquire lock for task_manager during drop");
+                }
             });
         } else {
             warn!("[EventRouter] No tokio runtime available during drop, some resources may leak");
@@ -551,19 +564,4 @@ mod tests {
 }
 
 // Mở rộng NetworkError với các variant cần thiết cho event_router
-impl NetworkError {
-    /// Tạo lỗi EmitError
-    pub fn emit_error(msg: impl Into<String>) -> Self {
-        NetworkError::EventError(format!("EmitError: {}", msg.into()))
-    }
-    
-    /// Kiểm tra xem có phải là lỗi AlreadyRunning không
-    pub fn already_running() -> Self {
-        NetworkError::EventError("EventRouter is already running".to_string())
-    }
-    
-    /// Kiểm tra xem có phải là lỗi NotRunning không
-    pub fn not_running() -> Self {
-        NetworkError::EventError("EventRouter is not running".to_string())
-    }
-} 
+// Tất cả các phương thức đã được triển khai trong errors.rs nên không cần lặp lại ở đây 

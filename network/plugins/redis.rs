@@ -425,9 +425,9 @@ impl Plugin for RedisPlugin {
                 info!("[RedisPlugin] Successfully connected to Redis at {}", self.config.url);
                 Ok(true)
             },
-                Err(e) => {
+            Err(e) => {
                 error!("[RedisPlugin] Failed to connect to Redis: {}", e);
-                Err(PluginError::StartupFailed(format!("Failed to connect to Redis: {}", e)))
+                Err(PluginError::StartFailed)
             }
         }
     }

@@ -63,7 +63,17 @@ impl<T: Send + Sync + Clone + 'static> Clone for ConnectionPool<T> {
             shutdown_signal: None, // Không clone shutdown signal
             is_shutdown: AtomicBool::new(self.is_shutdown.load(Ordering::SeqCst)),
             cleanup_handle: None, // Không clone handle, sẽ tạo mới nếu cần
-            connection_closer: self.connection_closer.clone(),
+            // Tạo connection_closer mới thay vì clone
+            connection_closer: match &self.connection_closer {
+                Some(closer) => {
+                    // Tạo Box mới với hàm wrapper để tránh clone Box<dyn Fn>
+                    let original_closer = closer.as_ref();
+                    Some(Box::new(move |conn: &T| {
+                        original_closer(conn);
+                    }) as Box<dyn Fn(&T) -> () + Send + Sync>)
+                },
+                None => None,
+            },
         }
     }
 }
@@ -722,7 +732,9 @@ impl RedisConnectionPool {
         
         // Circuit breaker: kiểm tra trạng thái trước khi kết nối
         {
-            let mut cb = self.circuit_breaker.lock().await;
+            let mut cb = match self.circuit_breaker.lock().await {
+                cb => cb,
+            };
             if !cb.can_attempt() {
                 error!("[CircuitBreaker] Circuit is OPEN, reject connection attempt");
                 return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
@@ -737,8 +749,11 @@ impl RedisConnectionPool {
                         info!("[Redis] Connection established after {} retries", attempt);
                     }
                     // Circuit breaker: reset on success
-                    let mut cb = self.circuit_breaker.lock().await;
-                    cb.on_success();
+                    match self.circuit_breaker.lock().await {
+                        mut cb => {
+                            cb.on_success();
+                        }
+                    }
                     return Ok(service);
                 }
                 Err(e) => {
@@ -748,8 +763,11 @@ impl RedisConnectionPool {
                     } else {
                         error!("[Redis] Connection failed after {} retries: {}", self.max_retries, e);
                         // Circuit breaker: tăng failure
-                        let mut cb = self.circuit_breaker.lock().await;
-                        cb.on_failure();
+                        match self.circuit_breaker.lock().await {
+                            mut cb => {
+                                cb.on_failure();
+                            }
+                        }
                         return Err(PluginError::Other(e));
                     }
                 }
@@ -773,7 +791,9 @@ impl RedisConnectionPool {
     pub async fn get_connection(&self) -> Result<Arc<dyn RedisService>, PluginError> {
         // Circuit breaker: kiểm tra trạng thái trước khi lấy kết nối
         {
-            let mut cb = self.circuit_breaker.lock().await;
+            let mut cb = match self.circuit_breaker.lock().await {
+                cb => cb,
+            };
             if !cb.can_attempt() {
                 error!("[CircuitBreaker] Circuit is OPEN, reject get_connection");
                 return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
@@ -882,6 +902,9 @@ impl RedisConnectionPool {
                 // và có thể thao tác an toàn
                 if let Some(inner) = Arc::get_mut(&mut pool.clone()) {
                     inner.shutdown();
+                } else {
+                    // Không lấy được &mut, log warning
+                    warn!("[RedisPool] Cannot get mutable reference to inner pool during shutdown");
                 }
             });
         }
@@ -901,15 +924,3 @@ impl RedisConnectionPool {
         self
     }
 }
-
-// Example usage:
-// let pool = RedisConnectionPool::new("redis://localhost:6379".to_string(), None, None, 10);
-// 
-// // Get a connection
-// let conn = pool.get_connection().await?;
-// 
-// // Use the connection
-// conn.set("key", "value")?;
-// 
-// // Return the connection to the pool
-// pool.return_connection(conn).await?;

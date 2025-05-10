@@ -6,7 +6,7 @@ use futures_util::FutureExt;
 use tokio::task::JoinHandle;
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::plugins::{Plugin, PluginType, PluginError};
+use crate::core::engine::{Plugin, PluginType, PluginError};
 use crate::security::input_validation::security;
 use crate::security::api_validation::{ApiValidator, ApiValidationRule, FieldRule};
 use crate::security::auth_middleware::{AuthService, AuthError, with_admin_or_partner, handle_rejection, UserRole, RejectReason};
@@ -196,6 +196,9 @@ impl WebSocketConnectionManager {
         let current_connections = self.current_connections.clone();
         let connections_by_ip = self.connections_by_ip.clone();
         tokio::spawn(async move {
+            // Tạo future cho rx để tránh move trong tokio::select!
+            let mut rx_fut = rx;
+            
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
@@ -236,7 +239,7 @@ impl WebSocketConnectionManager {
                             info!("[Resource] Open file descriptors: {}", count);
                         }
                     }
-                    _ = rx => {
+                    _ = &mut rx_fut => {
                         info!("WebSocket monitor task shutting down");
                         break;
                     }

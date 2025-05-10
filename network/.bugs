@@ -142,52 +142,140 @@
   - Giải pháp: Thêm phương thức shutdown() vào trait Libp2pService và triển khai
   - Trạng thái: ✅ ĐÃ SỬA (đã thêm phương thức shutdown() vào trait Libp2pService)
 
-## LỖI CÒN PHẢI SỬA
+## LỖI CẢNH BÁO VÀ LỖI NGHIÊM TRỌNG ĐƯỢC PHÁT HIỆN MỚI NHẤT
 
-- [x] **LỖI CLONE CHO ENUM (plugins/libp2p.rs):**
-  - Lỗi: return Err((*e).clone()); không có method clone cho Libp2pError
-  - Giải pháp: Thêm derive Clone cho enum Libp2pError
+- [x] **LỖI IMPORTS KHÔNG TỒN TẠI**
+  - Mô tả: Một số import sử dụng đường dẫn không chính xác, như `crate::infra::service_traits::{Plugin, PluginType, PluginError}` trong plugins/ws.rs, plugins/libp2p.rs.
+  - Nguyên nhân: Cấu trúc dự án đã thay đổi, nhưng import chưa được cập nhật tương ứng.
+  - Hướng dẫn sửa: Sửa thành `crate::core::engine::{Plugin, PluginType, PluginError}` để phù hợp với manifest.rs.
+  - Trạng thái: ĐÃ SỬA cho plugins/libp2p.rs, plugins/ws.rs.
 
-- [ ] **LỖI MOVE VALUE (plugins/libp2p.rs):**
-  - Lỗi: use of moved value: rx, tx trong oneshot::channel
-  - Giải pháp: Refactor logic spawn task để không move tx/rx nhiều lần
+- [x] **LỖI ENUM VARIANT KHÔNG TỒN TẠI**
+  - Mô tả: Sử dụng các variant không tồn tại như `PluginType::LibP2P` và `PluginType::MQTT`.
+  - Nguyên nhân: Tên variant viết sai (LibP2P thay vì Libp2p) hoặc variant chưa được định nghĩa.
+  - Hướng dẫn sửa: Sửa thành `PluginType::Libp2p` và thêm variant mới nếu cần.
+  - Trạng thái: ĐÃ SỬA (đổi `PluginType::LibP2P` thành `PluginType::Libp2p`, đổi `PluginType::MQTT` thành `PluginType::Unknown`).
 
-- [ ] **LỖI CLONE CHO MUTEX (plugins/libp2p.rs):**
-  - Lỗi: Không có method clone cho Mutex
-  - Giải pháp: Không thể clone Mutex, chỉ truyền reference hoặc Arc
+- [x] **LỖI MISMATCHED TYPES TRONG core/engine.rs**
+  - Mô tả: Lỗi kiểu dữ liệu không khớp khi sử dụng `plugins` như một `Vec` nhưng cần `HashMap`.
+  - Nguyên nhân: Thiết kế không rõ ràng về cách lưu trữ plugins.
+  - Hướng dẫn sửa: Thay đổi `plugins` từ kiểu `Vec<Arc<dyn Plugin + Send + Sync>>` sang `HashMap<PluginType, Arc<dyn Plugin + Send + Sync>>`.
+  - Trạng thái: ĐÃ SỬA (đã chuyển sang HashMap và cập nhật các phương thức liên quan).
 
-- [x] **LỖI CATCH_UNWIND (plugins/ws.rs):**
-  - Lỗi: Thiếu import FutureExt cho catch_unwind
-  - Giải pháp: Thêm use futures_util::FutureExt;
+- [x] **LỖI service_discovery TRẢ VỀ RESULT FUTURE**
+  - Mô tả: Phương thức `service_discovery` trả về kiểu không khớp với kiểu trả về được khai báo.
+  - Nguyên nhân: Không xử lý Result từ `list_plugins().await`.
+  - Hướng dẫn sửa: Trả về trực tiếp kết quả của `list_plugins().await` thay vì bọc trong `Ok()`.
+  - Trạng thái: ĐÃ SỬA (trả về trực tiếp kết quả từ `list_plugins().await`).
 
-- [x] **LỖI PLUGINTYPE::WEBRTC (plugins/ws.rs):**
-  - Lỗi: PluginType::Webrtc không tồn tại, phải là PluginType::WebRtc
+- [x] **LỖI TỪ dyn Any TRONG as_any()**
+  - Mô tả: Phương thức `as_any` trả về kiểu không khớp kiểu khai báo.
+  - Nguyên nhân: Không ép kiểu về dyn Any.
+  - Hướng dẫn sửa: Thêm ép kiểu `self as &dyn std::any::Any`.
+  - Trạng thái: ĐÃ SỬA (thêm ép kiểu rõ ràng).
 
-- [ ] **LỖI PLUGINERROR::STARTFAILED (plugins/ws.rs):**
-  - Lỗi: PluginError::StartFailed dùng như hàm, phải là variant
+- [x] **LỖI STRUCT KHÔNG KHỚP TRONG WebRtcConfig**
+  - Mô tả: Sử dụng tên kiểu `WebrtcConfig` không khớp với tên đã định nghĩa `WebRtcConfig`.
+  - Nguyên nhân: Không nhất quán trong đặt tên (casing).
+  - Hướng dẫn sửa: Đảm bảo sử dụng tên `WebRtcConfig` đúng với định nghĩa.
+  - Trạng thái: ĐÃ SỬA (thay `WebrtcConfig` thành `WebRtcConfig`).
 
-- [ ] **LỖI MOVE OUT OF ONESHOT::SENDER (plugins/ws.rs):**
-  - Lỗi: let _ = tx.send(()); với tx là reference, phải move ownership
+- [x] **LỖI IMPORT TRONG API.RS VÀ DISPATCHER.RS**
+  - Mô tả: Import sai đường dẫn trong các file api.rs và dispatcher.rs.
+  - Nguyên nhân: Tham chiếu đến module không tồn tại hoặc đã thay đổi.
+  - Hướng dẫn sửa: Sửa đúng đường dẫn import.
+  - Trạng thái: ĐÃ SỬA (cập nhật đường dẫn import cho NodeProfile, NodeRole, và PluginType).
 
-- [x] **LỖI WEBRTCCONFIG vs WEBRTCCONFIG (plugins/webrtc.rs):**
-  - Lỗi: Nhầm tên type WebRtcConfig/WebrtcConfig
+- [ ] **LỖI CLONE CHO CÁC KIỂU DỮ LIỆU PHỨC TẠP**
+  - Mô tả: Nhiều kiểu dữ liệu không thể clone như Mutex, option<Box<dyn Fn>>, và Libp2pError.
+  - Nguyên nhân: Sử dụng Clone cho kiểu dữ liệu không implement trait Clone.
+  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct, hoặc thay đổi logic để tránh clone.
+  - Trạng thái: CHƯA SỬA (cần sửa các vị trí: plugins/libp2p.rs dòng 160, 384, 385; plugins/pool.rs dòng 66).
 
-- [x] **LỖI SERVICEERROR::NOTFOUND (plugins/webrtc.rs):**
-  - Lỗi: ServiceError::NotFound không tồn tại, cần thêm variant
+- [ ] **LỖI IMPLEMENT FROM_STR CHO ENUM**
+  - Mô tả: PluginType chưa implement trait FromStr nên không thể dùng parse::<PluginType>().
+  - Nguyên nhân: Cần implement trait FromStr để hỗ trợ chuyển đổi từ String sang PluginType.
+  - Hướng dẫn sửa: Implement trait FromStr cho PluginType, xử lý tất cả các variant có thể.
+  - Trạng thái: CHƯA SỬA (cần sửa lỗi trong file api.rs dòng 160, 185, 204).
 
-## CẬP NHẬT
+- [ ] **LỖI BORROWED DATA ESCAPES**
+  - Mô tả: Borrowed data thoát ra ngoài method trong auth_middleware.rs trong tokio::spawn.
+  - Nguyên nhân: Dùng tham chiếu &self trong tokio::spawn mà không đảm bảo lifetime.
+  - Hướng dẫn sửa: Thay đổi logic để sử dụng Arc, clone hoặc sử dụng lifetime phù hợp.
+  - Trạng thái: CHƯA SỬA (cần sửa lỗi trong file security/auth_middleware.rs dòng 967).
 
-- Ngày 13/10/2023: Đã sửa lỗi dependency libp2p
-- Ngày 14/10/2023: Đã sửa lỗi impl Drop cho WebRtcPlugin
-- Ngày 14/10/2023: Đã sửa các lỗi pattern matching với RwLock
-- Ngày 14/10/2023: Đã sửa lỗi thiếu phương thức as_any()
-- Ngày 14/10/2023: Đã thêm variant InvalidConfig vào ConfigError
-- Ngày 14/10/2023: Đã sửa pattern matching không đầy đủ cho NodeRole
-- Ngày 14/10/2023: Đã sửa lỗi import Path trùng lặp
-- Ngày 14/10/2023: Đã sửa lỗi khi clone() oneshot::Sender
-- Ngày 14/10/2023: Đã thêm phương thức shutdown() cho Libp2pService
-- Ngày 14/10/2023: Đã sửa lỗi derive Clone cho enum Libp2pError
-- Ngày 14/10/2023: Đã sửa lỗi thiếu import FutureExt cho catch_unwind
-- Ngày 14/10/2023: Đã sửa lỗi PluginType::Webrtc thành PluginType::WebRtc
-- Ngày 14/10/2023: Đã sửa lỗi WebRtcConfig vs WebrtcConfig
-- Ngày 14/10/2023: Đã sửa lỗi ServiceError::NotFound thành ServiceError::NotFoundError
+- [ ] **LỖI ASYNC TRONG CÁC HÀM KHÔNG ASYNC**
+  - Mô tả: Sử dụng await trong các hàm không khai báo async, hoặc không xử lý Future.
+  - Nguyên nhân: Logic asynchronous trong hàm synchronous.
+  - Hướng dẫn sửa: Chuyển đổi phương thức thành async, hoặc sử dụng block_on để đợi Future.
+  - Trạng thái: CHƯA SỬA (nhiều vị trí trong api.rs).
+
+# [CẬP NHẬT] LỖI PHÁT HIỆN BỞI CARGO CLIPPY NGÀY 2024-xx-xx (LẦN 2)
+
+## LỖI NGHIÊM TRỌNG (CẬP NHẬT)
+
+- [x] **LỖI CLONE/DERIVE CLONE/PHƯƠNG THỨC CLONE**
+  - Mô tả: Gọi .clone() trên enum Libp2pError, Mutex, Option<Box<dyn Fn>>, v.v. nhưng các type này không implement Clone.
+  - Vị trí: plugins/libp2p.rs dòng 159, 384, 385; plugins/pool.rs dòng 66.
+  - Nguyên nhân: Thiếu derive(Clone) hoặc logic clone không hợp lệ với Mutex, Option<Box<dyn Fn>>.
+  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct cần thiết, hoặc refactor logic để không clone Mutex, Option<Box<dyn Fn>>.
+  - Trạng thái: ĐÃ SỬA - Thêm #[derive(Clone)] cho enum Libp2pError và thay đổi cách clone Box<dyn Fn> trong plugins/pool.rs.
+
+- [x] **LỖI MOVE VALUE/USE OF MOVED VALUE**
+  - Mô tả: Dùng rx trong tokio::select! sau khi đã move, dẫn tới lỗi "use of moved value: rx" 
+  - Vị trí: plugins/libp2p.rs dòng 198-206; plugins/ws.rs dòng 241.
+  - Nguyên nhân: oneshot::Receiver bị move khi dùng trong tokio::select!
+  - Hướng dẫn sửa: Đưa rx vào biến let mut rx_fut và dùng &mut rx_fut trong tokio::select!
+  - Trạng thái: ĐÃ SỬA - Thêm let mut rx_fut = rx; và dùng _ = &mut rx_fut => { } trong tokio::select!
+
+- [x] **LỖI WEBRTC CONFIG KHÔNG NHẤT QUÁN**
+  - Mô tả: Dùng WebrtcConfig trong một số nơi và WebRtcConfig ở nơi khác
+  - Vị trí: plugins/webrtc.rs
+  - Nguyên nhân: Không thống nhất cách đặt tên WebRtc/Webrtc
+  - Hướng dẫn sửa: Chuẩn hóa toàn bộ thành WebRtcConfig
+  - Trạng thái: ĐÃ SỬA - Sửa tên trong trait WebrtcService phương thức create_peer_connection để sử dụng WebRtcConfig
+
+- [x] **LỖI FROMSTR CHO ENUM**
+  - Mô tả: PluginType không implement FromStr nên không thể dùng parse::<PluginType>()
+  - Vị trí: core/engine.rs, api.rs
+  - Nguyên nhân: Thiếu implement trait std::str::FromStr cho enum PluginType
+  - Hướng dẫn sửa: Implement std::str::FromStr cho PluginType và thêm phương thức as_str()
+  - Trạng thái: ĐÃ SỬA - Thêm implement std::str::FromStr cho PluginType, cập nhật các dòng sử dụng parse::<PluginType>() trong api.rs
+
+## LỖI NGHIÊM TRỌNG (CHƯA SỬA)
+- [ ] **LỖI ASYNC TRAIT CHO WEBRTCSERVICE**
+  - Mô tả: trait WebrtcService có các phương thức async nhưng không có #[async_trait]
+  - Vị trí: plugins/webrtc.rs
+  - Nguyên nhân: Missing #[async_trait] macro
+  - Hướng dẫn sửa: Thêm #[async_trait] macro trước trait WebrtcService
+  - Trạng thái: CHƯA SỬA
+
+- [ ] **LỖI NO METHOD NAMED `PING` FOUND**
+  - Mô tả: Không tìm thấy phương thức ping() cho Arc<dyn RedisService>
+  - Vị trí: plugins/pool.rs:504
+  - Nguyên nhân: RedisService trait không có phương thức ping()
+  - Hướng dẫn sửa: Thêm phương thức ping() vào RedisService trait hoặc cài đặt phương pháp khác để kiểm tra kết nối
+  - Trạng thái: CHƯA SỬA
+
+- [ ] **LỖI MISMATCHED TYPES** 
+  - Mô tả: Mismatch giữa bool và Result<_, _> trong pool.rs dòng 512-513
+  - Vị trí: plugins/pool.rs:512-513
+  - Nguyên nhân: rt.block_on() đang trả về bool, trong khi match đang xử lý Result<bool, _>
+  - Hướng dẫn sửa: Sửa lại logic để xử lý kiểu trả về chính xác
+  - Trạng thái: CHƯA SỬA
+
+# CÁC LỖI KHÁC (CHƯA SỬA)
+
+- [ ] **LỖI BORROWED DATA ESCAPES OUTSIDE OF METHOD**
+  - Mô tả: Sử dụng tham chiếu &self trong closure tokio::spawn
+  - Vị trí: security/auth_middleware.rs:967
+  - Nguyên nhân: Tham chiếu &self không sống đủ lâu ('static lifetime)
+  - Hướng dẫn sửa: Dùng Arc::clone() hoặc cloning các thành viên cần thiết thay vì dùng &self
+  - Trạng thái: CHƯA SỬA
+
+- [ ] **LỖI TRAIT BOUND REJECT IS NOT SATISFIED**
+  - Mô tả: NetworkError không implement trait warp::reject::Reject
+  - Vị trí: api.rs
+  - Nguyên nhân: Thiếu implement trait Reject cho NetworkError
+  - Hướng dẫn sửa: Implement trait warp::reject::Reject cho NetworkError
+  - Trạng thái: CHƯA SỬA

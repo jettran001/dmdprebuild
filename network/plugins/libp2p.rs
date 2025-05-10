@@ -1,4 +1,4 @@
-use crate::plugins::{Plugin, PluginType, PluginError};
+use crate::core::engine::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
 use libp2p::{identity, PeerId, Swarm, Multiaddr, Transport, swarm::SwarmEvent, core::upgrade, futures::StreamExt};
@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum Libp2pError {
     #[error("Connection error: {0}")]
     ConnectionError(String),
@@ -157,7 +157,14 @@ impl Libp2pService for DefaultLibp2pService {
                         )).await;
                     } else {
                         error!(plugin_name = "libp2p", operation = "connect_to_peer", status = "fail", error_code = error_code, correlation_id = %correlation_id, attempt = attempt + 1, peer_addr = %peer_addr, "[Libp2p] Connection failed after {} retries: {}", self.config.max_retries, e);
-                        return Err((*e).clone());
+                        return Err(match e {
+                            Libp2pError::ConnectionError(msg) => Libp2pError::ConnectionError(msg.clone()),
+                            Libp2pError::ValidationError(msg) => Libp2pError::ValidationError(msg.clone()),
+                            Libp2pError::TimeoutError(msg) => Libp2pError::TimeoutError(msg.clone()),
+                            Libp2pError::MessageError(msg) => Libp2pError::MessageError(msg.clone()),
+                            Libp2pError::DiscoveryError(msg) => Libp2pError::DiscoveryError(msg.clone()),
+                            Libp2pError::ShutdownError(msg) => Libp2pError::ShutdownError(msg.clone()),
+                        });
                     }
                 }
             }
@@ -179,7 +186,14 @@ impl Libp2pService for DefaultLibp2pService {
     }
     
     async fn start_message_handler(&self) -> Result<oneshot::Sender<()>, Libp2pError> {
+        // Tạo channel mới với tuple struct để có thể clone tx
+        struct ShutdownSender(oneshot::Sender<()>);
+        
+        // Tạo channel oneshot
         let (tx, rx) = oneshot::channel::<()>();
+        
+        // Lưu một bản tx để trả về sau khi spawn task
+        let tx_to_return = tx.clone();
         
         // Store shutdown signal
         let mut lock = self.shutdown_signal.lock().await;
@@ -190,12 +204,15 @@ impl Libp2pService for DefaultLibp2pService {
         tokio::spawn(async move {
             debug!("[Libp2p] Started message handler");
             
+            // Tạo một rx_fut để có thể tokio::select! mà không move rx
+            let mut rx_fut = rx;
+            
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(10)) => {
                         debug!("[Libp2p] Message handler heartbeat");
                     }
-                    _ = rx => {
+                    _ = &mut rx_fut => {
                         debug!("[Libp2p] Shutting down message handler");
                         break;
                     }
@@ -203,11 +220,11 @@ impl Libp2pService for DefaultLibp2pService {
             }
         });
         
-        Ok(tx)
+        Ok(tx_to_return)
     }
     
     async fn discover_peers(&self) -> Result<Vec<PeerId>, Libp2pError> {
-        /// WARNING: This is a mock implementation. Do NOT use in production. Replace with real peer discovery logic!
+        // WARNING: This is a mock implementation. Do NOT use in production. Replace with real peer discovery logic!
         tokio::time::sleep(Duration::from_millis(200)).await;
         if self.config.enable_mdns || self.config.enable_kademlia {
             let peer_id1 = PeerId::random();
@@ -379,12 +396,12 @@ impl Plugin for Libp2pPlugin {
         
         // Spawn a task to initialize the plugin
         let init_handle = tokio::spawn({
-            let config = self.config.clone();
             let service = self.service.clone();
-            let bg_tasks = self.background_tasks.clone();
-            let shutdown_tx = self.shutdown_tx.clone();
+            let bg_tasks = Arc::downgrade(&self.background_tasks);
+            let shutdown_tx = Arc::downgrade(&self.shutdown_tx);
+            
             async move {
-                match DefaultLibp2pService::with_config(config).init_node().await {
+                match service.init_node().await {
                     Ok((peer_id, _)) => {
                         info!("[Libp2p] Plugin initialized with peer ID: {}", peer_id);
                     }
@@ -392,20 +409,31 @@ impl Plugin for Libp2pPlugin {
                         error!("[Libp2p] Plugin initialization error: {}", e);
                     }
                 }
-                // Lưu handle vào background_tasks
-                if let Ok(mut bg) = bg_tasks.try_lock() {
-                    bg.push(tokio::task::spawn(async {}));
+                
+                // Sử dụng upgrade và try_lock an toàn cho background_tasks
+                if let Some(bg_tasks) = bg_tasks.upgrade() {
+                    match bg_tasks.try_lock() {
+                        Ok(mut guard) => guard.push(tokio::task::spawn(async {})),
+                        Err(_) => warn!("[Libp2p] Failed to update background tasks during initialization")
+                    }
                 }
-                // Lưu shutdown_tx nếu cần
-                if let Ok(mut tx) = shutdown_tx.try_lock() {
-                    *tx = None;
+                
+                // Sử dụng upgrade và try_lock an toàn cho shutdown_tx
+                if let Some(shutdown_tx) = shutdown_tx.upgrade() {
+                    match shutdown_tx.try_lock() {
+                        Ok(mut guard) => *guard = None,
+                        Err(_) => warn!("[Libp2p] Failed to update shutdown_tx during initialization")
+                    }
                 }
             }
         });
-        // Lưu init_handle vào background_tasks
+        
         if let Ok(mut bg) = self.background_tasks.try_lock() {
             bg.push(init_handle);
+        } else {
+            warn!("[Libp2p] Failed to acquire lock for background_tasks during start");
         }
+        
         Ok(true)
     }
     
