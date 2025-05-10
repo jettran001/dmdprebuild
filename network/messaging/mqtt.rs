@@ -68,8 +68,8 @@ impl MessagingMqttService for DefaultMessagingMqttService {
     }
     
     async fn publish(&self, topic: &str, message: &[u8], qos: u8) -> Result<(), ServiceError> {
-        self.validate_input(topic, message, "mock://mqtt").map_err(ServiceError::ValidationError)?;
-        self.check_payload_size(message).map_err(ServiceError::ValidationError)?;
+        self.validate_input(topic, message, "mock://mqtt").map_err(|e| ServiceError::ValidationError(e.to_string()))?;
+        self.check_payload_size(message).map_err(|e| ServiceError::ValidationError(e.to_string()))?;
         info!("[MessagingMqttService] Publish to topic: {} ({} bytes) with qos {}", topic, message.len(), qos);
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         Ok(())

@@ -16,8 +16,9 @@
 //! redis_service.connect("redis://localhost:6379").expect("Failed to connect");
 //! ```
 
-use crate::infra::service_traits::{WebrtcService, WebrtcConfig, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, MasterNodeService, SlaveNodeService, SchedulerService, DiscoveryService};
+use crate::infra::service_traits::{WebrtcService, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, MasterNodeService, SlaveNodeService, SchedulerService, DiscoveryService};
 use crate::config::types::{RedisConfig, IpfsConfig, WasmConfig};
+use crate::infra::service_traits::WebRtcConfig;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tracing::{info, warn, error};
@@ -103,6 +104,11 @@ impl RedisService for DefaultRedisService {
     async fn ping_with_timeout(&self, timeout: std::time::Duration) -> Result<bool, ServiceError> {
         info!("[DefaultRedisService] Ping with timeout: {:?}", timeout);
         Ok(true)
+    }
+    
+    async fn ping(&self) -> Result<(), ServiceError> {
+        info!("[DefaultRedisService] Ping Redis server (basic health check)");
+        Ok(())
     }
 }
 
@@ -191,7 +197,7 @@ pub struct DefaultWebrtcService {
     /// Status of WebRTC initialization
     pub is_initialized: bool,
     /// Mock peer connections (ID -> Config)
-    pub connections: Arc<Mutex<HashMap<String, WebrtcConfig>>>,
+    pub connections: Arc<Mutex<HashMap<String, WebRtcConfig>>>,
 }
 
 impl DefaultWebrtcService {
@@ -211,7 +217,7 @@ impl WebrtcService for DefaultWebrtcService {
         Ok(())
     }
     
-    async fn create_peer_connection(&self, config: &WebrtcConfig) -> Result<String, ServiceError> {
+    async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError> {
         info!("[DefaultWebrtcService] Creating peer connection");
         
         // Tạo ID kết nối và lưu config vào connections

@@ -22,7 +22,7 @@ pub type LogsApiFilter = warp::filters::BoxedFilter<(Box<dyn warp::Reply>,)>;
 /// - GET /api/logs - lấy tất cả log gần đây
 /// - GET /api/logs/{domain} - lấy log của một domain cụ thể (network, blockchain, wallet...)
 pub fn logs_api() -> LogsApiFilter {
-    let log_validator = LogDomainValidator::new();
+    let (log_validator, _, _, _) = create_default_validators();
     
     // GET /api/logs
     let get_logs = warp::path("logs")
@@ -74,8 +74,8 @@ pub trait NetworkApi: Send + Sync {
     // --- Plugin management API ---
     async fn list_plugins(&self) -> NetworkResult<Vec<String>>;
     async fn plugin_status(&self, plugin_type: String) -> NetworkResult<String>;
-    fn unregister_plugin(&self, plugin_type: String) -> NetworkResult<String>;
-    fn check_plugin_health(&self, plugin_type: String) -> NetworkResult<String>;
+    async fn unregister_plugin(&self, plugin_type: String) -> NetworkResult<String>;
+    async fn check_plugin_health(&self, plugin_type: String) -> NetworkResult<String>;
 }
 
 pub struct DefaultNetworkApi {
@@ -176,7 +176,7 @@ impl NetworkApi for DefaultNetworkApi {
         }
     }
 
-    fn unregister_plugin(&self, plugin_type: String) -> NetworkResult<String> {
+    async fn unregister_plugin(&self, plugin_type: String) -> NetworkResult<String> {
         // Validate input
         self.validators.1.validate(&plugin_type)?;
         
@@ -187,7 +187,7 @@ impl NetworkApi for DefaultNetworkApi {
             warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
         })?;
         
-        self.engine.unregister_plugin(&plugin_type)
+        self.engine.unregister_plugin(&plugin_type).await
             .map_err(|e| {
                 error!(endpoint = "unregister_plugin", plugin_type = ?plugin_type, error = %e, "Error unregistering plugin");
                 NetworkError::EngineError(format!("Error unregistering plugin: {}", e))
@@ -196,7 +196,7 @@ impl NetworkApi for DefaultNetworkApi {
         Ok("Unregistered successfully".to_string())
     }
 
-    fn check_plugin_health(&self, plugin_type: String) -> NetworkResult<String> {
+    async fn check_plugin_health(&self, plugin_type: String) -> NetworkResult<String> {
         // Validate input
         self.validators.1.validate(&plugin_type)?;
         
@@ -207,7 +207,7 @@ impl NetworkApi for DefaultNetworkApi {
             warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
         })?;
         
-        let healthy = self.engine.check_plugin_health(&plugin_type)
+        let healthy = self.engine.check_plugin_health(&plugin_type).await
             .map_err(|e| {
                 error!(endpoint = "check_plugin_health", plugin_type = ?plugin_type, error = %e, "Error checking plugin health");
                 NetworkError::EngineError(format!("Error checking plugin health: {}", e))

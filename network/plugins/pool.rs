@@ -39,7 +39,7 @@ pub struct ConnectionPool<T: Send + Sync + Clone + 'static> {
     /// Thời gian timeout cho mỗi kết nối (giây)
     connection_timeout_seconds: u64,
     /// Kênh shutdown để dừng background tasks
-    shutdown_signal: Option<oneshot::Sender<()>>,
+    shutdown_signal: Mutex<Option<oneshot::Sender<()>>>,
     /// Cờ đánh dấu trạng thái shutdown
     is_shutdown: AtomicBool,
     /// JoinHandle cho cleanup task (nếu cần join khi drop)
@@ -60,20 +60,11 @@ impl<T: Send + Sync + Clone + 'static> Clone for ConnectionPool<T> {
             pool: TokioMutex::new(VecDeque::new()),
             max_size: self.max_size,
             connection_timeout_seconds: self.connection_timeout_seconds,
-            shutdown_signal: None, // Không clone shutdown signal
+            shutdown_signal: Mutex::new(None), // Không clone shutdown signal
             is_shutdown: AtomicBool::new(self.is_shutdown.load(Ordering::SeqCst)),
             cleanup_handle: None, // Không clone handle, sẽ tạo mới nếu cần
-            // Tạo connection_closer mới thay vì clone
-            connection_closer: match &self.connection_closer {
-                Some(closer) => {
-                    // Tạo Box mới với hàm wrapper để tránh clone Box<dyn Fn>
-                    let original_closer = closer.as_ref();
-                    Some(Box::new(move |conn: &T| {
-                        original_closer(conn);
-                    }) as Box<dyn Fn(&T) -> () + Send + Sync>)
-                },
-                None => None,
-            },
+            // Không clone connection_closer vì Box<dyn Fn> không implement Clone
+            connection_closer: None,
         }
     }
 }
@@ -245,7 +236,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
             pool,
             max_size,
             connection_timeout_seconds,
-            shutdown_signal: Some(shutdown_tx),
+            shutdown_signal: Mutex::new(Some(shutdown_tx)),
             is_shutdown: AtomicBool::new(false),
             cleanup_handle: None,
             connection_closer: None,
@@ -468,14 +459,13 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// * `None` - Nếu không có cách kiểm tra
     ///
     /// # Notes
-    /// Đây là base implementation, được override trong các subtype cụ thể như RedisService
-    fn check_connection_active(&self, conn: &T) -> Option<bool> {
+    /// Đây là base implementation, được override trong các subtype cụ thể
+    fn check_connection_active(&self, _conn: &T) -> Option<bool> {
         // Default implementation trả về None (không thể kiểm tra)
-        // Specialized types (như RedisConnection) sẽ override hàm này
         None
     }
     
-    /// Kiểm tra kết nối Redis còn active không.
+    /// Kiểm tra kết nối Redis còn active không. (private method)
     ///
     /// # Arguments
     /// * `conn` - Kết nối Redis cần kiểm tra
@@ -483,6 +473,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// # Returns
     /// * `Some(bool)` - true nếu kết nối còn active, false nếu không
     /// * `None` - Nếu không thể kiểm tra (hiếm khi xảy ra)
+    #[doc(hidden)]
     fn check_connection_active_redis(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
         // Thử ping để kiểm tra kết nối còn alive không
         let conn_clone = conn.clone();
@@ -500,7 +491,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
         };
         
         // Thực hiện ping trong runtime
-        match rt.block_on(async {
+        let result = rt.block_on(async {
             match conn_clone.ping().await {
                 Ok(_) => true,
                 Err(e) => {
@@ -508,13 +499,13 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
                     false
                 }
             }
-        }) {
-            Ok(active) => Some(active),
-            Err(e) => {
-                error!("[ConnectionPool] Failed to check connection: {}", e);
-                None
-            }
+        });
+        
+        if !result {
+            error!("[ConnectionPool] Connection inactive in check");
         }
+        
+        Some(result)
     }
     
     /// Lấy số lượng kết nối hiện tại trong pool.
@@ -635,24 +626,25 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     ///
     /// # Thread Safety
     /// Phương thức này yêu cầu &mut self để đảm bảo chỉ có một caller có thể shutdown
-    pub fn shutdown(&mut self) {
-        // Đánh dấu pool đã shutdown
-        self.is_shutdown.store(true, Ordering::SeqCst);
+    pub fn shutdown(&self) {
+        // Sử dụng phương pháp an toàn hơn để shutdown pool
+        let inner_pool = self.inner.clone();
         
-        // Gửi tín hiệu dừng đến background task
-        if let Some(signal) = self.shutdown_signal.take() {
-            let _ = signal.send(());
-        }
-        
-        // Không thể spawn async task với &self bị moved, thay vào đó tạo clone để tránh lỗi borrowed data escapes outside method
-        let self_clone = self.clone();
-        let inner_clone = Arc::new(self_clone);
-        
-        // Force close all remaining connections
+        // Tạo một task mới để thực hiện shutdown
         tokio::spawn(async move {
-            match inner_clone.force_close_all().await {
-                Ok(_) => debug!("[Pool] Successfully force closed all connections during shutdown"),
-                Err(e) => error!("[Pool] Failed to force close connections during shutdown: {}", e),
+            // Đánh dấu pool đã shutdown
+            inner_pool.is_shutdown.store(true, Ordering::SeqCst);
+            
+            // Gửi tín hiệu shutdown nếu có
+            let shutdown_signal = inner_pool.shutdown_signal.lock().await;
+            if let Some(tx) = shutdown_signal.as_ref() {
+                let _ = tx.send(());
+            }
+            
+            // Dọn dẹp kết nối trong pool
+            match inner_pool.force_close_all().await {
+                Ok(_) => debug!("[RedisPool] Pool shutdown completed successfully"),
+                Err(e) => warn!("[RedisPool] Error during pool shutdown: {}", e),
             }
         });
     }
@@ -679,8 +671,18 @@ impl<T: Send + Sync + Clone + 'static> Drop for ConnectionPool<T> {
     /// - Gọi shutdown() để clean up background tasks
     /// - Abort cleanup_handle nếu còn running
     fn drop(&mut self) {
-        self.shutdown();
-        // Nếu có cleanup_handle, join hoặc abort
+        // Đánh dấu pool đã shutdown
+        self.is_shutdown.store(true, Ordering::SeqCst);
+        
+        // Gửi tín hiệu dừng đến background task
+        // Không sử dụng lock() vì đây là context synchronous và có thể deadlock
+        if let Ok(mut guard) = self.shutdown_signal.try_lock() {
+            if let Some(signal) = guard.take() {
+                let _ = signal.send(());
+            }
+        }
+        
+        // Nếu có cleanup_handle, abort
         if let Some(handle) = self.cleanup_handle.take() {
             handle.abort();
         }
@@ -743,7 +745,7 @@ impl RedisConnectionPool {
         
         // Try to connect with retries
         for attempt in 0..=self.max_retries {
-            match service.connect_with_auth(&self.url, &self.username, &self.password) {
+            match service.connect_with_auth(&self.url, &self.username, &self.password).await {
                 Ok(_) => {
                     if attempt > 0 {
                         info!("[Redis] Connection established after {} retries", attempt);
@@ -768,7 +770,7 @@ impl RedisConnectionPool {
                                 cb.on_failure();
                             }
                         }
-                        return Err(PluginError::Other(e));
+                        return Err(PluginError::Other(e.to_string()));
                     }
                 }
             }
@@ -823,7 +825,7 @@ impl RedisConnectionPool {
     /// - Nếu kết nối không active, tạo kết nối mới thay thế
     pub async fn return_connection(&self, conn: Arc<dyn RedisService>) -> Result<(), PluginError> {
         // Kiểm tra kết nối còn active trước khi trả về pool
-        if let Ok(is_active) = conn.ping_with_timeout(Duration::from_millis(300)) {
+        if let Ok(is_active) = conn.ping_with_timeout(Duration::from_millis(300)).await {
             if !is_active {
                 // Nếu kết nối không active, thử tạo kết nối mới thay thế
                 debug!("[RedisPool] Connection inactive, creating new replacement");
@@ -887,27 +889,29 @@ impl RedisConnectionPool {
     /// Shutdown pool và cleanup tài nguyên.
     ///
     /// # Thread Safety
-    /// - Sử dụng Arc::downgrade/upgrade để tránh vấn đề về ownership
+    /// - Sử dụng phương pháp an toàn hơn để shutdown pool
     /// - An toàn khi gọi từ nhiều thread
     pub fn shutdown(&self) {
-        // Get a clone of inner pool to avoid mutable borrow issues
+        // Sử dụng phương pháp an toàn hơn để shutdown pool
         let inner_pool = self.inner.clone();
         
-        // Using Arc::downgrade/upgrade pattern to avoid ownership issues
-        let weak_pool = Arc::downgrade(&inner_pool);
-        if let Some(pool) = weak_pool.upgrade() {
-            // Tạo một task mới để thực hiện shutdown
-            tokio::spawn(async move {
-                // Vì đã upgrade từ weak reference, chúng ta có một Arc riêng biệt
-                // và có thể thao tác an toàn
-                if let Some(inner) = Arc::get_mut(&mut pool.clone()) {
-                    inner.shutdown();
-                } else {
-                    // Không lấy được &mut, log warning
-                    warn!("[RedisPool] Cannot get mutable reference to inner pool during shutdown");
-                }
-            });
-        }
+        // Tạo một task mới để thực hiện shutdown
+        tokio::spawn(async move {
+            // Đánh dấu pool đã shutdown
+            inner_pool.is_shutdown.store(true, Ordering::SeqCst);
+            
+            // Gửi tín hiệu shutdown nếu có
+            let shutdown_signal = inner_pool.shutdown_signal.lock().await;
+            if let Some(tx) = shutdown_signal.as_ref() {
+                let _ = tx.send(());
+            }
+            
+            // Dọn dẹp kết nối trong pool
+            match inner_pool.force_close_all().await {
+                Ok(_) => debug!("[RedisPool] Pool shutdown completed successfully"),
+                Err(e) => warn!("[RedisPool] Error during pool shutdown: {}", e),
+            }
+        });
     }
     
     /// Cấu hình tham số retry.
@@ -922,5 +926,13 @@ impl RedisConnectionPool {
         self.max_retries = max_retries;
         self.retry_delay_ms = retry_delay_ms;
         self
+    }
+}
+
+/// Specialization cho RedisService
+impl ConnectionPool<Arc<dyn RedisService>> {
+    fn check_connection_active(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
+        // Sử dụng implemention cụ thể cho RedisService
+        self.check_connection_active_redis(conn)
     }
 }

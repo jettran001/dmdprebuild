@@ -102,6 +102,7 @@ impl Default for WebRtcConfig {
 }
 
 /// Trait for WebRTC service
+#[async_trait]
 pub trait WebrtcService: Send + Sync {
     /// Initialize the service
     async fn init(&self) -> Result<(), ServiceError>;
@@ -500,6 +501,7 @@ impl WebRtcPlugin {
     }
 }
 
+#[async_trait]
 impl Plugin for WebRtcPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -509,7 +511,7 @@ impl Plugin for WebRtcPlugin {
         PluginType::WebRtc
     }
     
-    fn start(&self) -> Result<bool, PluginError> {
+    async fn start(&self) -> Result<bool, PluginError> {
         // Khởi động WebRTC plugin
         info!("[WebRTC] Starting plugin...");
         
@@ -554,7 +556,7 @@ impl Plugin for WebRtcPlugin {
         Ok(true)
     }
     
-    fn stop(&self) -> Result<(), PluginError> {
+    async fn stop(&self) -> Result<(), PluginError> {
         info!("[WebRTC] Stopping plugin...");
         
         let service = self.service.clone();
@@ -576,7 +578,7 @@ impl Plugin for WebRtcPlugin {
         Ok(())
     }
     
-    fn check_health(&self) -> Result<bool, PluginError> {
+    async fn check_health(&self) -> Result<bool, PluginError> {
         // Trả về trạng thái health check đơn giản
         // Trong thực tế, đây sẽ kiểm tra kết nối WebRTC, ICE status, v.v.
         Ok(true)
@@ -615,8 +617,8 @@ mod tests {
     #[test]
     async fn test_webrtc_plugin_start_stop() {
         let plugin = WebRtcPlugin::new();
-        assert!(plugin.start().is_ok());
-        assert!(plugin.stop().is_ok());
+        assert!(plugin.start().await.is_ok());
+        assert!(plugin.stop().await.is_ok());
     }
     
     #[test]

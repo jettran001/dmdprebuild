@@ -107,7 +107,7 @@ impl Default for DefaultDiscoveryService {
         Self {
             nodes,
             node_last_update,
-            cleanup_running: cleanup_tx,
+            cleanup_running: Arc::new(cleanup_tx),
         }
     }
 }

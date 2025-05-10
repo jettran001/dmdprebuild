@@ -186,29 +186,29 @@
   - Hướng dẫn sửa: Sửa đúng đường dẫn import.
   - Trạng thái: ĐÃ SỬA (cập nhật đường dẫn import cho NodeProfile, NodeRole, và PluginType).
 
-- [ ] **LỖI CLONE CHO CÁC KIỂU DỮ LIỆU PHỨC TẠP**
+- [x] **LỖI CLONE CHO CÁC KIỂU DỮ LIỆU PHỨC TẠP**
   - Mô tả: Nhiều kiểu dữ liệu không thể clone như Mutex, option<Box<dyn Fn>>, và Libp2pError.
   - Nguyên nhân: Sử dụng Clone cho kiểu dữ liệu không implement trait Clone.
-  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct, hoặc thay đổi logic để tránh clone.
-  - Trạng thái: CHƯA SỬA (cần sửa các vị trí: plugins/libp2p.rs dòng 160, 384, 385; plugins/pool.rs dòng 66).
+  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct, hoặc thay đổi logic để tránh clone Mutex, Option<Box<dyn Fn>>.
+  - Trạng thái: ĐÃ SỬA (thêm #[derive(Clone)] cho enum Libp2pError và thay đổi cách clone Box<dyn Fn> trong plugins/pool.rs).
 
-- [ ] **LỖI IMPLEMENT FROM_STR CHO ENUM**
+- [x] **LỖI IMPLEMENT FROM_STR CHO ENUM**
   - Mô tả: PluginType chưa implement trait FromStr nên không thể dùng parse::<PluginType>().
   - Nguyên nhân: Cần implement trait FromStr để hỗ trợ chuyển đổi từ String sang PluginType.
   - Hướng dẫn sửa: Implement trait FromStr cho PluginType, xử lý tất cả các variant có thể.
-  - Trạng thái: CHƯA SỬA (cần sửa lỗi trong file api.rs dòng 160, 185, 204).
+  - Trạng thái: ĐÃ SỬA (đã implement std::str::FromStr cho PluginType trong core/engine.rs).
 
 - [ ] **LỖI BORROWED DATA ESCAPES**
   - Mô tả: Borrowed data thoát ra ngoài method trong auth_middleware.rs trong tokio::spawn.
   - Nguyên nhân: Dùng tham chiếu &self trong tokio::spawn mà không đảm bảo lifetime.
   - Hướng dẫn sửa: Thay đổi logic để sử dụng Arc, clone hoặc sử dụng lifetime phù hợp.
-  - Trạng thái: CHƯA SỬA (cần sửa lỗi trong file security/auth_middleware.rs dòng 967).
+  - Trạng thái: CHƯA SỬA
 
 - [ ] **LỖI ASYNC TRONG CÁC HÀM KHÔNG ASYNC**
   - Mô tả: Sử dụng await trong các hàm không khai báo async, hoặc không xử lý Future.
   - Nguyên nhân: Logic asynchronous trong hàm synchronous.
   - Hướng dẫn sửa: Chuyển đổi phương thức thành async, hoặc sử dụng block_on để đợi Future.
-  - Trạng thái: CHƯA SỬA (nhiều vị trí trong api.rs).
+  - Trạng thái: CHƯA SỬA
 
 # [CẬP NHẬT] LỖI PHÁT HIỆN BỞI CARGO CLIPPY NGÀY 2024-xx-xx (LẦN 2)
 
@@ -225,7 +225,7 @@
   - Mô tả: Dùng rx trong tokio::select! sau khi đã move, dẫn tới lỗi "use of moved value: rx" 
   - Vị trí: plugins/libp2p.rs dòng 198-206; plugins/ws.rs dòng 241.
   - Nguyên nhân: oneshot::Receiver bị move khi dùng trong tokio::select!
-  - Hướng dẫn sửa: Đưa rx vào biến let mut rx_fut và dùng &mut rx_fut trong tokio::select!
+  - Hướng dẫn sửa: Đưa rx vào biến let mut rx_fut = rx; và dùng &mut rx_fut trong tokio::select!
   - Trạng thái: ĐÃ SỬA - Thêm let mut rx_fut = rx; và dùng _ = &mut rx_fut => { } trong tokio::select!
 
 - [x] **LỖI WEBRTC CONFIG KHÔNG NHẤT QUÁN**
@@ -243,26 +243,26 @@
   - Trạng thái: ĐÃ SỬA - Thêm implement std::str::FromStr cho PluginType, cập nhật các dòng sử dụng parse::<PluginType>() trong api.rs
 
 ## LỖI NGHIÊM TRỌNG (CHƯA SỬA)
-- [ ] **LỖI ASYNC TRAIT CHO WEBRTCSERVICE**
+- [x] **LỖI ASYNC TRAIT CHO WEBRTCSERVICE**
   - Mô tả: trait WebrtcService có các phương thức async nhưng không có #[async_trait]
   - Vị trí: plugins/webrtc.rs
   - Nguyên nhân: Missing #[async_trait] macro
   - Hướng dẫn sửa: Thêm #[async_trait] macro trước trait WebrtcService
-  - Trạng thái: CHƯA SỬA
+  - Trạng thái: ĐÃ SỬA - Có sẵn #[async_trait] macro trước trait WebrtcService
 
-- [ ] **LỖI NO METHOD NAMED `PING` FOUND**
+- [x] **LỖI NO METHOD NAMED `PING` FOUND**
   - Mô tả: Không tìm thấy phương thức ping() cho Arc<dyn RedisService>
   - Vị trí: plugins/pool.rs:504
   - Nguyên nhân: RedisService trait không có phương thức ping()
   - Hướng dẫn sửa: Thêm phương thức ping() vào RedisService trait hoặc cài đặt phương pháp khác để kiểm tra kết nối
-  - Trạng thái: CHƯA SỬA
+  - Trạng thái: ĐÃ SỬA - Đã thêm phương thức ping() vào trait RedisService và implement trong DefaultRedisService
 
-- [ ] **LỖI MISMATCHED TYPES** 
+- [x] **LỖI MISMATCHED TYPES** 
   - Mô tả: Mismatch giữa bool và Result<_, _> trong pool.rs dòng 512-513
   - Vị trí: plugins/pool.rs:512-513
   - Nguyên nhân: rt.block_on() đang trả về bool, trong khi match đang xử lý Result<bool, _>
   - Hướng dẫn sửa: Sửa lại logic để xử lý kiểu trả về chính xác
-  - Trạng thái: CHƯA SỬA
+  - Trạng thái: ĐÃ SỬA - Đã thêm specialization cho ConnectionPool<Arc<dyn RedisService>> để xử lý check_connection_active đúng cách
 
 # CÁC LỖI KHÁC (CHƯA SỬA)
 
@@ -279,3 +279,47 @@
   - Nguyên nhân: Thiếu implement trait Reject cho NetworkError
   - Hướng dẫn sửa: Implement trait warp::reject::Reject cho NetworkError
   - Trạng thái: CHƯA SỬA
+
+# CLIPPY/LINT/COMPILER ERRORS (auto-update)
+- [x] [plugins/webrtc.rs:107] Trait WebrtcService không dyn compatible do có async fn (E0038) - ĐÃ SỬA - Thêm #[async_trait] macro
+- [x] [plugins/pool.rs:504] Không tìm thấy method ping cho Arc<dyn RedisService> (E0599) - ĐÃ SỬA - Thêm phương thức ping() vào trait RedisService
+- [x] [plugins/pool.rs:512,513] Mismatched types: expected bool, found Result (E0308) - ĐÃ SỬA - Sửa pattern match phù hợp với kiểu trả về
+- [x] [node_manager/discovery.rs:110] Mismatched types: expected Arc<Sender<bool>>, found Sender<bool> (E0308) - ĐÃ SỬA - Wrap cleanup_tx trong Arc::new()
+- [x] [node_manager/scheduler.rs:129] Mismatched types: expected Arc<Sender<bool>>, found Sender<bool> (E0308) - ĐÃ SỬA - Wrap cleanup_tx trong Arc::new()
+- [x] [messaging/mqtt.rs:71,72] map_err dùng sai signature, cần closure (E0631) - ĐÃ SỬA - Sử dụng closure để xử lý error trong map_err
+- [x] [infra/service_mocks.rs:19] Unresolved import WebrtcConfig (E0432) - ĐÃ SỬA - Thay thế bằng import từ crate::infra::service_traits::WebRtcConfig
+- [x] [infra/service_mocks.rs:200,220] Cannot find type WebrtcConfig (E0412) - ĐÃ SỬA - Thay thế tất cả WebrtcConfig thành WebRtcConfig
+- [x] [plugins/pool.rs:463,921] Duplicate definitions for `check_connection_active` (E0428) - ĐÃ SỬA - Làm method check_connection_active_redis private với #[doc(hidden)]
+- [x] [plugins/pool.rs:738,817] Mismatched types expected Future found Result (E0308) - ĐÃ SỬA - Thêm .await vào các gọi hàm async
+- [x] [plugins/pool.rs:894] Cannot move out of `*tx` which is behind a shared reference (E0507) - ĐÃ SỬA - Sử dụng shutdown_signal.lock().await và as_ref()
+- [x] [plugins/pool.rs:893] Method clone does not exist for Option<Sender<()>> (E0599) - ĐÃ SỬA - Thay đổi thành Mutex<Option<oneshot::Sender<()>>> và sử dụng lock().await
+- [x] [plugins/webrtc.rs:513,558,580] Lifetime parameters or bounds don't match trait declaration (E0195) - ĐÃ SỬA - Thêm async và #[async_trait] macro cho impl Plugin
+- [x] [plugins/webrtc.rs:619,620] No method named `is_ok` found for Pin<Box<dyn Future>> (E0599) - ĐÃ SỬA - Thêm .await vào các gọi hàm async trong tests
+- [ ] [api.rs:25] Không có hàm new cho LogDomainValidator (E0599)
+- [ ] [api.rs:52] Mismatched types: expected String, found &str (E0308)
+- [ ] [api.rs:56,161,187,207] NetworkError không implement warp::reject::Reject (E0277)
+- [ ] [api.rs:63] Mismatched types: BoxedFilter (E0308)
+- [ ] [api.rs:162,188,208] ? không convert được error (E0277)
+- [ ] [api.rs:190,210] ? không áp dụng cho Future chưa await (E0277)
+- [ ] [security/input_validation.rs:303] rules: Vec<Box<dyn Fn...>> không implement Debug/Clone (E0277)
+- [ ] [security/input_validation.rs:1288] T thiếu Eq/Hash cho HashSet (E0277)
+- [ ] [security/input_validation.rs:1492] as_any không gọi được do trait bound (E0599)
+- [ ] [api_validation.rs:533,570] one_of nhận &[&str], truyền nhầm Vec<&str> (E0308)
+- [ ] [api_validation.rs:545,582] Không có validate_fields, nên dùng validate (E0599)
+- [ ] [config/loader.rs:156,157] ? không convert được toml/yaml error (E0277)
+- [ ] [plugins/libp2p.rs:4] Unused import: StreamExt, Transport (unused import)
+- [ ] [security/api_validation.rs:16] Unused import: Sanitizer (unused import)
+- [ ] [core/engine.rs:369] Unused variable: file (unused variable)
+- [ ] [core/engine.rs:362,370] Borrow/lifetime issue với logging.log_file, closure cần move (E0597/E0373)
+- [ ] [plugins/ws.rs:744] Use of moved value: fut (E0382)
+- [ ] [plugins/ws.rs:1345] Cannot move out of *tx (E0507)
+- [ ] [plugins/webrtc.rs:331,367] Unused variable: config, mut không cần thiết (unused variable/mut)
+- [ ] [plugins/grpc.rs:342] Unused variable: shutdown_tx (unused variable)
+- [ ] [plugins/pool.rs:71,472,669] Lifetime/unused variable: conn, key, closer closure (E0621/unused variable)
+- [ ] [infra/service_mocks.rs:229] Unused variable: candidate (unused variable)
+- [ ] [infra/redis_pool.rs:234] Unused variable/mut: available_connections (unused variable/mut)
+- [ ] [dispatcher/dispatcher.rs:186] Unused variable/mut: had_error (unused variable/mut)
+- [ ] [security/auth_middleware.rs:967] Borrowed data escapes outside method (E0521)
+- [ ] [security/rate_limiter.rs:219] Unused variable/mut: removed (unused variable/mut)
+- [ ] [security/input_validation.rs:862] Lifetime may not live long enough (E0623)
+- [ ] [config/loader.rs:489] Unused variable: env_config (unused variable)

@@ -126,7 +126,7 @@ impl Default for DefaultSchedulerService {
         Self {
             tasks,
             task_last_update,
-            cleanup_running: cleanup_tx,
+            cleanup_running: Arc::new(cleanup_tx),
         }
     }
 }

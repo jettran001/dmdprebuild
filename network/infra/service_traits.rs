@@ -77,6 +77,8 @@ pub trait RedisService: Send + Sync + 'static {
     async fn health_check(&self) -> Result<bool, ServiceError>;
     /// Ping Redis server with timeout (health check with custom timeout)
     async fn ping_with_timeout(&self, timeout: Duration) -> Result<bool, ServiceError>;
+    /// Ping Redis server (basic health check)
+    async fn ping(&self) -> Result<(), ServiceError>;
 }
 
 /// Trait cho IPFS service
@@ -100,7 +102,7 @@ pub trait WebrtcService: Send + Sync + 'static {
     /// Initialize WebRTC
     async fn init(&self) -> Result<(), ServiceError>;
     /// Create a new peer connection
-    async fn create_peer_connection(&self, config: &WebrtcConfig) -> Result<String, ServiceError>;
+    async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError>;
     /// Add ICE candidate
     async fn add_ice_candidate(&self, connection_id: &str, candidate: &str) -> Result<(), ServiceError>;
     /// Send data through a peer connection
@@ -260,7 +262,7 @@ pub trait DiscoveryService: Send + Sync + 'static {
 
 /// Configuration for WebRTC
 #[derive(Debug, Clone)]
-pub struct WebrtcConfig {
+pub struct WebRtcConfig {
     /// ICE servers
     pub ice_servers: Vec<String>,
     /// STUN servers
@@ -277,7 +279,7 @@ pub struct WebrtcConfig {
     pub max_concurrent_connections: usize,
 }
 
-impl Default for WebrtcConfig {
+impl Default for WebRtcConfig {
     fn default() -> Self {
         Self {
             ice_servers: vec![],
