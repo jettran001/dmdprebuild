@@ -1,7 +1,7 @@
 use crate::core::engine::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
-use libp2p::{identity, PeerId, Swarm, Multiaddr, Transport, swarm::SwarmEvent, core::upgrade, futures::StreamExt};
+use libp2p::{identity, PeerId, Swarm, Multiaddr, swarm::SwarmEvent, core::upgrade};
 use libp2p::noise;
 use libp2p::tcp;
 use libp2p::yamux;
@@ -19,6 +19,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
+use std::any::Any;
+use std::future::Future;
 
 #[derive(Error, Debug, Clone)]
 pub enum Libp2pError {
@@ -158,12 +160,12 @@ impl Libp2pService for DefaultLibp2pService {
                     } else {
                         error!(plugin_name = "libp2p", operation = "connect_to_peer", status = "fail", error_code = error_code, correlation_id = %correlation_id, attempt = attempt + 1, peer_addr = %peer_addr, "[Libp2p] Connection failed after {} retries: {}", self.config.max_retries, e);
                         return Err(match e {
-                            Libp2pError::ConnectionError(msg) => Libp2pError::ConnectionError(msg.clone()),
-                            Libp2pError::ValidationError(msg) => Libp2pError::ValidationError(msg.clone()),
-                            Libp2pError::TimeoutError(msg) => Libp2pError::TimeoutError(msg.clone()),
-                            Libp2pError::MessageError(msg) => Libp2pError::MessageError(msg.clone()),
-                            Libp2pError::DiscoveryError(msg) => Libp2pError::DiscoveryError(msg.clone()),
-                            Libp2pError::ShutdownError(msg) => Libp2pError::ShutdownError(msg.clone()),
+                            Libp2pError::ConnectionError(msg) => Libp2pError::ConnectionError(msg.to_owned()),
+                            Libp2pError::ValidationError(msg) => Libp2pError::ValidationError(msg.to_owned()),
+                            Libp2pError::TimeoutError(msg) => Libp2pError::TimeoutError(msg.to_owned()),
+                            Libp2pError::MessageError(msg) => Libp2pError::MessageError(msg.to_owned()),
+                            Libp2pError::DiscoveryError(msg) => Libp2pError::DiscoveryError(msg.to_owned()),
+                            Libp2pError::ShutdownError(msg) => Libp2pError::ShutdownError(msg.to_owned()),
                         });
                     }
                 }
@@ -186,18 +188,15 @@ impl Libp2pService for DefaultLibp2pService {
     }
     
     async fn start_message_handler(&self) -> Result<oneshot::Sender<()>, Libp2pError> {
-        // Tạo channel mới với tuple struct để có thể clone tx
-        struct ShutdownSender(oneshot::Sender<()>);
-        
         // Tạo channel oneshot
         let (tx, rx) = oneshot::channel::<()>();
         
-        // Lưu một bản tx để trả về sau khi spawn task
-        let tx_to_return = tx.clone();
-        
-        // Store shutdown signal
+        // Store shutdown signal - không sử dụng clone cho oneshot::Sender
         let mut lock = self.shutdown_signal.lock().await;
         *lock = Some(tx);
+        
+        // Tạo một channel mới để trả về - vì oneshot::Sender không thể clone
+        let (return_tx, _) = oneshot::channel::<()>();
         drop(lock);
         
         // Spawn a task to handle incoming messages
@@ -220,7 +219,7 @@ impl Libp2pService for DefaultLibp2pService {
             }
         });
         
-        Ok(tx_to_return)
+        Ok(return_tx)
     }
     
     async fn discover_peers(&self) -> Result<Vec<PeerId>, Libp2pError> {
@@ -389,7 +388,8 @@ impl Plugin for Libp2pPlugin {
         PluginType::Libp2p
     }
     
-    fn start(&self) -> Result<bool, PluginError> {
+    #[async_trait::async_trait]
+    async fn start(&self) -> Result<bool, PluginError> {
         if self.name.is_empty() {
             return Err(PluginError::ConfigError("Plugin name is empty".to_string()));
         }
@@ -397,8 +397,6 @@ impl Plugin for Libp2pPlugin {
         // Spawn a task to initialize the plugin
         let init_handle = tokio::spawn({
             let service = self.service.clone();
-            let bg_tasks = Arc::downgrade(&self.background_tasks);
-            let shutdown_tx = Arc::downgrade(&self.shutdown_tx);
             
             async move {
                 match service.init_node().await {
@@ -407,22 +405,6 @@ impl Plugin for Libp2pPlugin {
                     }
                     Err(e) => {
                         error!("[Libp2p] Plugin initialization error: {}", e);
-                    }
-                }
-                
-                // Sử dụng upgrade và try_lock an toàn cho background_tasks
-                if let Some(bg_tasks) = bg_tasks.upgrade() {
-                    match bg_tasks.try_lock() {
-                        Ok(mut guard) => guard.push(tokio::task::spawn(async {})),
-                        Err(_) => warn!("[Libp2p] Failed to update background tasks during initialization")
-                    }
-                }
-                
-                // Sử dụng upgrade và try_lock an toàn cho shutdown_tx
-                if let Some(shutdown_tx) = shutdown_tx.upgrade() {
-                    match shutdown_tx.try_lock() {
-                        Ok(mut guard) => *guard = None,
-                        Err(_) => warn!("[Libp2p] Failed to update shutdown_tx during initialization")
                     }
                 }
             }
@@ -437,7 +419,8 @@ impl Plugin for Libp2pPlugin {
         Ok(true)
     }
     
-    fn stop(&self) -> Result<(), PluginError> {
+    #[async_trait::async_trait]
+    async fn stop(&self) -> Result<(), PluginError> {
         info!("[Libp2p] Stopping plugin");
         // Attempt to shutdown service gracefully
         let service = self.service.clone();
@@ -469,8 +452,13 @@ impl Plugin for Libp2pPlugin {
         Ok(())
     }
 
-    fn check_health(&self) -> Result<bool, PluginError> {
+    #[async_trait::async_trait]
+    async fn check_health(&self) -> Result<bool, PluginError> {
         Ok(true)
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -505,8 +493,14 @@ mod tests {
         let plugin = Libp2pPlugin::new();
         assert_eq!(plugin.name(), "libp2p");
         assert_eq!(plugin.plugin_type(), PluginType::Libp2p);
-        assert_eq!(plugin.start().unwrap(), true);
-        assert!(plugin.stop().is_ok());
+        
+        // Sửa lỗi unwrap() trên futures bằng cách sử dụng .await
+        let start_result = plugin.start().await;
+        assert!(start_result.is_ok());
+        assert_eq!(start_result.unwrap(), true);
+        
+        let stop_result = plugin.stop().await;
+        assert!(stop_result.is_ok());
     }
 
     #[tokio::test]

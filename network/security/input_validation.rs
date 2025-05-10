@@ -297,12 +297,33 @@ impl ValidationErrors {
 }
 
 /// Field validator cho các kiểu dữ liệu cụ thể
-#[derive(Debug, Clone)]
 pub struct FieldValidator<'a, T> {
     name: &'a str,
     rules: Vec<Box<dyn Fn(&T) -> ValidationResult + Send + Sync + 'a>>,
     required: bool,
     _marker: PhantomData<T>,
+}
+
+// Custom implementation Debug thay vì derive
+impl<'a, T: 'a> std::fmt::Debug for FieldValidator<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldValidator")
+            .field("name", &self.name)
+            .field("rules", &format!("[{} rule functions]", self.rules.len()))
+            .field("required", &self.required)
+            .finish()
+    }
+}
+
+// Không thể implement Clone cho Fn trait, nhưng có thể tạo một phương thức clone_box
+impl<'a, T: 'a> FieldValidator<'a, T> {
+    pub fn clone_box(&self) -> FieldValidator<'a, T> 
+    where T: 'a {
+        // Vì không thể clone Box<dyn Fn>, chúng ta chỉ có thể tạo validator mới
+        let mut result = FieldValidator::new(self.name);
+        result.required = self.required;
+        result
+    }
 }
 
 impl<'a, T> FieldValidator<'a, T> {
@@ -1259,7 +1280,7 @@ where
 
 impl<T, V> Validator<Vec<T>> for CollectionValidator<T, V>
 where
-    T: PartialEq + Clone,
+    T: PartialEq + Clone + Eq + std::hash::Hash,
     V: Validator<T>,
 {
     fn validate(&self, value: &Vec<T>) -> ValidationResult {

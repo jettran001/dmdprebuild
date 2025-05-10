@@ -198,7 +198,6 @@ impl PluginType {
     }
 }
 
-/// Implement FromStr cho PluginType để có thể sử dụng parse
 impl std::str::FromStr for PluginType {
     type Err = String;
 
@@ -208,7 +207,6 @@ impl std::str::FromStr for PluginType {
             "wasm" => Ok(PluginType::Wasm),
             "webrtc" => Ok(PluginType::WebRtc),
             "websocket" => Ok(PluginType::WebSocket),
-            "ws" => Ok(PluginType::WebSocket), // Alias cho WebSocket
             "ipfs" => Ok(PluginType::Ipfs),
             "redis" => Ok(PluginType::Redis),
             "libp2p" => Ok(PluginType::Libp2p),
@@ -219,7 +217,6 @@ impl std::str::FromStr for PluginType {
     }
 }
 
-/// Thêm triển khai Display cho PluginType
 impl std::fmt::Display for PluginType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
@@ -361,12 +358,12 @@ impl DefaultNetworkEngine {
         
         match &logging.log_file {
             Some(file_path) => {
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(file_path)
-                {
-                    Ok(file) => {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(file_path)
+            {
+                Ok(file) => {
                         let writer = || -> Box<dyn Write + Send + 'static> {
                             match std::fs::OpenOptions::new()
                                 .create(true)
@@ -374,38 +371,38 @@ impl DefaultNetworkEngine {
                                 .open(file_path)
                             {
                                 Ok(f) => Box::new(f),
-                                Err(e) => {
+                        Err(e) => {
                                     eprintln!("Warning: Could not open log file: {}", e);
                                     Box::new(std::io::stderr())
                                 }
                             }
                         };
                         
-                        tracing_subscriber::fmt()
+                    tracing_subscriber::fmt()
                             .with_env_filter(EnvFilter::new(&logging.level))
-                            .with_ansi(logging.format == "ansi")
-                            .with_writer(writer)
-                            .init();
+                        .with_ansi(logging.format == "ansi")
+                        .with_writer(writer)
+                        .init();
                         
                         info!("Logging initialized with file: {}", file_path);
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Could not open log file '{}': {}", file_path, e);
-                        // Fallback to stderr if file cannot be opened
-                        tracing_subscriber::fmt()
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not open log file '{}': {}", file_path, e);
+                    // Fallback to stderr if file cannot be opened
+                    tracing_subscriber::fmt()
                             .with_env_filter(EnvFilter::new(&logging.level))
-                            .with_ansi(logging.format == "ansi")
-                            .init();
+                        .with_ansi(logging.format == "ansi")
+                        .init();
                         
                         info!("Fallback to stderr logging due to file error");
-                    }
                 }
             }
+            }
             None => {
-                tracing_subscriber::fmt()
+            tracing_subscriber::fmt()
                     .with_env_filter(EnvFilter::new(&logging.level))
-                    .with_ansi(logging.format == "ansi")
-                    .init();
+                .with_ansi(logging.format == "ansi")
+                .init();
                 
                 info!("Logging initialized with stderr (no log file specified)");
             }
@@ -544,7 +541,7 @@ impl NetworkEngine for DefaultNetworkEngine {
             info!("Stopping plugin: {}", plugin_name);
             
             match plugin.stop().await {
-                Ok(_) => {
+            Ok(_) => {
                     info!("Plugin {} stopped successfully", plugin_name);
                     if let Ok(mut status) = self.plugin_status.write().await {
                         status.insert(plugin_type.clone(), PluginStatus::Inactive);
@@ -811,16 +808,16 @@ impl NetworkEngine for DefaultNetworkEngine {
         metrics.push_str(&format!("network_plugin_registry_object_count {}\n", plugins.len()));
         
         // Thêm mock metrics cho các node
-        metrics.push_str("# HELP network_slave_node_count Số lượng slave node trong master\n");
-        metrics.push_str("# TYPE network_slave_node_count gauge\n");
+            metrics.push_str("# HELP network_slave_node_count Số lượng slave node trong master\n");
+            metrics.push_str("# TYPE network_slave_node_count gauge\n");
         metrics.push_str(&format!("network_slave_node_count {}\n", 0)); // Mock: 0 nodes
         
-        metrics.push_str("# HELP network_discovery_node_count Số lượng node discovery\n");
-        metrics.push_str("# TYPE network_discovery_node_count gauge\n");
+            metrics.push_str("# HELP network_discovery_node_count Số lượng node discovery\n");
+            metrics.push_str("# TYPE network_discovery_node_count gauge\n");
         metrics.push_str(&format!("network_discovery_node_count {}\n", 0)); // Mock: 0 nodes
         
-        metrics.push_str("# HELP network_task_node_count Số lượng node có task\n");
-        metrics.push_str("# TYPE network_task_node_count gauge\n");
+            metrics.push_str("# HELP network_task_node_count Số lượng node có task\n");
+            metrics.push_str("# TYPE network_task_node_count gauge\n");
         metrics.push_str(&format!("network_task_node_count {}\n", 0)); // Mock: 0 nodes
         
         Ok(metrics)
@@ -829,8 +826,8 @@ impl NetworkEngine for DefaultNetworkEngine {
     async fn list_plugins(&self) -> Result<Vec<crate::core::engine::PluginType>, EngineError> {
         match self.list_plugin_info().await {
             Ok(plugin_info) => {
-                let plugin_types: Vec<PluginType> = plugin_info.into_iter().map(|(ptype, _, _)| ptype).collect();
-                Ok(plugin_types)
+        let plugin_types: Vec<PluginType> = plugin_info.into_iter().map(|(ptype, _, _)| ptype).collect();
+        Ok(plugin_types)
             },
             Err(e) => Err(e)
         }

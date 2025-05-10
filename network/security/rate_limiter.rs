@@ -359,16 +359,21 @@ impl RateLimiter {
     
     /// Reset giới hạn cho một đường dẫn và identifier
     pub async fn reset_limit(&self, path: &str, identifier: RequestIdentifier) -> Result<(), RateLimitError> {
-        let configs = self.path_configs.read().map_err(|e| RateLimitError::ConfigurationError(format!("Lock poisoned: {}", e)))?;
+        // Đọc cấu hình đường dẫn
+        let configs = self.path_configs.read().await;
+        
         let config = configs.get(path).ok_or_else(|| {
             RateLimitError::ConfigurationError(format!("Không tìm thấy cấu hình cho đường dẫn: {}", path))
         })?;
         
-        let lock_result = timeout(Duration::from_secs(1), self.states.lock());
-        let mut states = match lock_result.await {
-            Ok(guard) => guard.map_err(|_| RateLimitError::ConfigurationError("Lock poisoned".to_string()))?,
+        // Lấy lock cho states với timeout
+        let lock_result = match tokio::time::timeout(Duration::from_secs(1), self.states.lock()).await {
+            Ok(result) => result,
             Err(_) => return Err(RateLimitError::ConfigurationError("Lock timeout".to_string())),
         };
+        
+        let mut states = lock_result;
+        
         let key = (path.to_string(), identifier);
         
         states.insert(key, RateLimitState::new(config.max_requests));
@@ -420,29 +425,40 @@ mod tests {
     fn test_fixed_window() {
         let limiter = RateLimiter::new();
         
+        // Đăng ký path
+        tokio_test::block_on(async {
         limiter.register_path("/api/test", PathConfig {
             max_requests: 3,
             time_window: 10,
             algorithm: RateLimitAlgorithm::FixedWindow,
             action: RateLimitAction::Reject,
-        }).expect("Đăng ký path cho rate limiter phải thành công");
+            }).await.expect("Đăng ký path cho rate limiter phải thành công");
+        });
         
         let id = RequestIdentifier::IpAddress("127.0.0.1".parse().expect("IP phải hợp lệ"));
         
         // Thử 3 yêu cầu - phải thành công
         for _ in 0..3 {
-            let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit phải thành công");
+            let result = tokio_test::block_on(async {
+                limiter.check_limit("/api/test", id.clone()).await
+            }).expect("Check limit phải thành công");
             assert!(!result.is_limited);
         }
         
         // Yêu cầu thứ 4 phải bị từ chối
-        let result = limiter.check_limit("/api/test", id.clone());
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        });
         assert!(result.is_err());
         
         // Reset và thử lại
-        tokio_test::block_on(limiter.reset_limit("/api/test", id.clone())).expect("Reset limit phải thành công");
+        tokio_test::block_on(async {
+            limiter.reset_limit("/api/test", id.clone()).await
+        }).expect("Reset limit phải thành công");
         
-        let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit sau reset phải thành công");
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        }).expect("Check limit sau reset phải thành công");
         assert!(!result.is_limited);
     }
     
@@ -450,30 +466,39 @@ mod tests {
     fn test_sliding_window() {
         let limiter = RateLimiter::new();
         
+        // Đăng ký path
+        tokio_test::block_on(async {
         limiter.register_path("/api/test", PathConfig {
             max_requests: 3,
             time_window: 2,
             algorithm: RateLimitAlgorithm::SlidingWindow,
             action: RateLimitAction::Reject,
-        }).expect("Đăng ký path cho rate limiter phải thành công");
+            }).await.expect("Đăng ký path cho rate limiter phải thành công");
+        });
         
         let id = RequestIdentifier::IpAddress("127.0.0.1".parse().expect("IP phải hợp lệ"));
         
         // Thử 3 yêu cầu - phải thành công
         for _ in 0..3 {
-            let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit phải thành công");
+            let result = tokio_test::block_on(async {
+                limiter.check_limit("/api/test", id.clone()).await
+            }).expect("Check limit phải thành công");
             assert!(!result.is_limited);
         }
         
         // Yêu cầu thứ 4 phải bị từ chối
-        let result = limiter.check_limit("/api/test", id.clone());
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        });
         assert!(result.is_err());
         
         // Đợi cho window trượt
         thread::sleep(Duration::from_secs(2));
         
         // Yêu cầu mới phải thành công
-        let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit sau window trượt phải thành công");
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        }).expect("Check limit sau window trượt phải thành công");
         assert!(!result.is_limited);
     }
     
@@ -481,30 +506,39 @@ mod tests {
     fn test_token_bucket() {
         let limiter = RateLimiter::new();
         
+        // Đăng ký path
+        tokio_test::block_on(async {
         limiter.register_path("/api/test", PathConfig {
             max_requests: 3,
             time_window: 1,
             algorithm: RateLimitAlgorithm::TokenBucket,
             action: RateLimitAction::Reject,
-        }).expect("Đăng ký path cho rate limiter phải thành công");
+            }).await.expect("Đăng ký path cho rate limiter phải thành công");
+        });
         
         let id = RequestIdentifier::IpAddress("127.0.0.1".parse().expect("IP phải hợp lệ"));
         
         // Thử 3 yêu cầu - phải thành công
         for _ in 0..3 {
-            let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit phải thành công");
+            let result = tokio_test::block_on(async {
+                limiter.check_limit("/api/test", id.clone()).await
+            }).expect("Check limit phải thành công");
             assert!(!result.is_limited);
         }
         
         // Yêu cầu thứ 4 phải bị từ chối
-        let result = limiter.check_limit("/api/test", id.clone());
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        });
         assert!(result.is_err());
         
         // Đợi để nạp lại token
         thread::sleep(Duration::from_millis(400)); // ~1.2 token
         
         // Yêu cầu mới phải thành công (vì đã có ít nhất 1 token)
-        let result = limiter.check_limit("/api/test", id.clone()).expect("Check limit sau refill token phải thành công");
+        let result = tokio_test::block_on(async {
+            limiter.check_limit("/api/test", id.clone()).await
+        }).expect("Check limit sau refill token phải thành công");
         assert!(!result.is_limited);
     }
 } 

@@ -103,7 +103,7 @@ impl Default for WebRtcConfig {
 
 /// Trait for WebRTC service
 #[async_trait]
-pub trait WebrtcService: Send + Sync {
+pub trait WebRtcService: Send + Sync {
     /// Initialize the service
     async fn init(&self) -> Result<(), ServiceError>;
     
@@ -312,7 +312,7 @@ impl DefaultWebRtcService {
 }
 
 #[async_trait]
-impl WebrtcService for DefaultWebRtcService {
+impl WebRtcService for DefaultWebRtcService {
     async fn init(&self) -> Result<(), ServiceError> {
         info!("[WebRTC] Initializing service");
         
@@ -411,7 +411,7 @@ pub struct WebRtcPlugin {
     /// Tên plugin
     name: String,
     /// Service xử lý logic WebRTC
-    service: Arc<dyn WebrtcService>,
+    service: Arc<dyn WebRtcService>,
     /// Cấu hình plugin
     config: WebRtcConfig,
     /// Channel để shutdown plugin

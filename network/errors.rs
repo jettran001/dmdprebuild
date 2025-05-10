@@ -40,6 +40,7 @@ use std::error::Error as StdError;
 use std::io;
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
+use warp::reject::Reject;
 
 use crate::core::engine::EngineError;
 use crate::security::auth_middleware::AuthError;
@@ -330,6 +331,9 @@ impl From<anyhow::Error> for NetworkError {
         NetworkError::UnknownError(err.to_string())
     }
 }
+
+// Implement Reject trait cho NetworkError để có thể sử dụng với warp::reject::custom
+impl Reject for NetworkError {}
 
 #[cfg(test)]
 mod tests {

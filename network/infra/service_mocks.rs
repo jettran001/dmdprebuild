@@ -16,9 +16,8 @@
 //! redis_service.connect("redis://localhost:6379").expect("Failed to connect");
 //! ```
 
-use crate::infra::service_traits::{WebrtcService, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, MasterNodeService, SlaveNodeService, SchedulerService, DiscoveryService};
+use crate::infra::service_traits::{WebRtcService, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, MasterNodeService, SlaveNodeService, SchedulerService, DiscoveryService, WebRtcConfig};
 use crate::config::types::{RedisConfig, IpfsConfig, WasmConfig};
-use crate::infra::service_traits::WebRtcConfig;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tracing::{info, warn, error};
@@ -192,16 +191,16 @@ impl IpfsService for DefaultIpfsService {
     }
 }
 
-/// Default implementation của WebrtcService
-pub struct DefaultWebrtcService {
+/// Default implementation của WebRtcService
+pub struct DefaultWebRtcService {
     /// Status of WebRTC initialization
     pub is_initialized: bool,
     /// Mock peer connections (ID -> Config)
     pub connections: Arc<Mutex<HashMap<String, WebRtcConfig>>>,
 }
 
-impl DefaultWebrtcService {
-    /// Create a new DefaultWebrtcService
+impl DefaultWebRtcService {
+    /// Create a new DefaultWebRtcService
     pub fn new() -> Self {
         Self {
             is_initialized: false,
@@ -211,14 +210,14 @@ impl DefaultWebrtcService {
 }
 
 #[async_trait::async_trait]
-impl WebrtcService for DefaultWebrtcService {
+impl WebRtcService for DefaultWebRtcService {
     async fn init(&self) -> Result<(), ServiceError> {
-        info!("[DefaultWebrtcService] Initializing WebRTC");
+        info!("[DefaultWebRtcService] Initializing WebRTC");
         Ok(())
     }
     
     async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError> {
-        info!("[DefaultWebrtcService] Creating peer connection");
+        info!("[DefaultWebRtcService] Creating peer connection");
         
         // Tạo ID kết nối và lưu config vào connections
         let connection_id = uuid::Uuid::new_v4().to_string();
@@ -233,7 +232,7 @@ impl WebrtcService for DefaultWebrtcService {
     }
     
     async fn add_ice_candidate(&self, connection_id: &str, candidate: &str) -> Result<(), ServiceError> {
-        info!("[DefaultWebrtcService] Adding ICE candidate for connection: {}", connection_id);
+        info!("[DefaultWebRtcService] Adding ICE candidate for connection: {}", connection_id);
         
         match self.connections.lock() {
             Ok(connections) => {
@@ -248,7 +247,7 @@ impl WebrtcService for DefaultWebrtcService {
     }
     
     async fn send_data(&self, connection_id: &str, data: &[u8]) -> Result<(), ServiceError> {
-        info!("[DefaultWebrtcService] Sending data through connection: {}, size: {} bytes", connection_id, data.len());
+        info!("[DefaultWebRtcService] Sending data through connection: {}, size: {} bytes", connection_id, data.len());
         
         match self.connections.lock() {
             Ok(connections) => {
@@ -267,7 +266,7 @@ impl WebrtcService for DefaultWebrtcService {
     }
     
     async fn close_connection(&self, connection_id: &str) -> Result<(), ServiceError> {
-        info!("[DefaultWebrtcService] Closing connection: {}", connection_id);
+        info!("[DefaultWebRtcService] Closing connection: {}", connection_id);
         
         match self.connections.lock() {
             Ok(mut connections) => {
@@ -282,7 +281,7 @@ impl WebrtcService for DefaultWebrtcService {
     }
     
     async fn close_all_connections(&self) -> Result<usize, ServiceError> {
-        info!("[DefaultWebrtcService] Closing all connections");
+        info!("[DefaultWebRtcService] Closing all connections");
         
         match self.connections.lock() {
             Ok(mut connections) => {

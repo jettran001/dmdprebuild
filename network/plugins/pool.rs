@@ -212,6 +212,25 @@ pub struct RedisConnectionPool {
     circuit_breaker: Arc<TokioMutex<CircuitBreaker>>,
 }
 
+pub trait ConnectionValidator<T> {
+    /// Kiểm tra kết nối còn active không
+    /// 
+    /// # Arguments
+    /// * `conn` - Kết nối cần kiểm tra
+    /// 
+    /// # Returns
+    /// * `Some(bool)` - true nếu kết nối còn active, false nếu không
+    /// * `None` - Nếu không thể kiểm tra
+    fn check_connection_active(&self, conn: &T) -> Option<bool>;
+}
+
+impl<T: Send + Sync + Clone + 'static> ConnectionValidator<T> for ConnectionPool<T> {
+    fn check_connection_active(&self, _conn: &T) -> Option<bool> {
+        // Default implementation trả về None (không thể kiểm tra)
+        None
+    }
+}
+
 impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// Tạo mới một connection pool với kích thước và timeout được chỉ định.
     ///
@@ -417,7 +436,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
         }
         
         // Thêm kiểm tra kết nối còn active trước khi trả về pool
-        if let Some(conn_check) = self.check_connection_active(&conn) {
+        if let Some(conn_check) = ConnectionValidator::<T>::check_connection_active(self, &conn) {
             if !conn_check {
                 debug!("[Pool] Connection inactive, not returning to pool");
                 return Ok(());  // Không trả kết nối không active vào pool, nhưng cũng không báo lỗi
@@ -449,22 +468,6 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
         Ok(())
     }
     
-    /// Kiểm tra kết nối còn active không.
-    ///
-    /// # Arguments
-    /// * `conn` - Kết nối cần kiểm tra
-    ///
-    /// # Returns
-    /// * `Some(bool)` - true nếu kết nối còn active, false nếu không
-    /// * `None` - Nếu không có cách kiểm tra
-    ///
-    /// # Notes
-    /// Đây là base implementation, được override trong các subtype cụ thể
-    fn check_connection_active(&self, _conn: &T) -> Option<bool> {
-        // Default implementation trả về None (không thể kiểm tra)
-        None
-    }
-    
     /// Kiểm tra kết nối Redis còn active không. (private method)
     ///
     /// # Arguments
@@ -473,8 +476,11 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// # Returns
     /// * `Some(bool)` - true nếu kết nối còn active, false nếu không
     /// * `None` - Nếu không thể kiểm tra (hiếm khi xảy ra)
+    ///
+    /// # Notes
+    /// Đây là base implementation, được override trong các subtype cụ thể
     #[doc(hidden)]
-    fn check_connection_active_redis(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
+    fn check_connection_active_internal(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
         // Thử ping để kiểm tra kết nối còn alive không
         let conn_clone = conn.clone();
         
@@ -586,7 +592,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// - Xóa tất cả kết nối khỏi pool
     /// - Gọi closer cho mỗi kết nối nếu có
     pub async fn force_close_all(&self) -> Result<(), String> {
-        // Set shutdown flag để ngăn thêm các kết nối mới
+        // Đánh dấu pool đã shutdown
         self.is_shutdown.store(true, Ordering::SeqCst);
         
         // Try to get the pool mutex with timeout
@@ -627,24 +633,23 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// # Thread Safety
     /// Phương thức này yêu cầu &mut self để đảm bảo chỉ có một caller có thể shutdown
     pub fn shutdown(&self) {
-        // Sử dụng phương pháp an toàn hơn để shutdown pool
-        let inner_pool = self.inner.clone();
+        // Đánh dấu pool đã shutdown
+        self.is_shutdown.store(true, Ordering::SeqCst);
         
-        // Tạo một task mới để thực hiện shutdown
+        // Tạo một task mới để thực hiện shutdown bất đồng bộ
+        let pool_clone = Arc::new(self.clone());
+        
         tokio::spawn(async move {
-            // Đánh dấu pool đã shutdown
-            inner_pool.is_shutdown.store(true, Ordering::SeqCst);
-            
             // Gửi tín hiệu shutdown nếu có
-            let shutdown_signal = inner_pool.shutdown_signal.lock().await;
-            if let Some(tx) = shutdown_signal.as_ref() {
+            let mut shutdown_signal = pool_clone.shutdown_signal.lock().await;
+            if let Some(tx) = shutdown_signal.take() {
                 let _ = tx.send(());
             }
             
             // Dọn dẹp kết nối trong pool
-            match inner_pool.force_close_all().await {
-                Ok(_) => debug!("[RedisPool] Pool shutdown completed successfully"),
-                Err(e) => warn!("[RedisPool] Error during pool shutdown: {}", e),
+            match pool_clone.force_close_all().await {
+                Ok(_) => debug!("[Pool] Pool shutdown completed successfully"),
+                Err(e) => warn!("[Pool] Error during pool shutdown: {}", e),
             }
         });
     }
@@ -892,22 +897,13 @@ impl RedisConnectionPool {
     /// - Sử dụng phương pháp an toàn hơn để shutdown pool
     /// - An toàn khi gọi từ nhiều thread
     pub fn shutdown(&self) {
-        // Sử dụng phương pháp an toàn hơn để shutdown pool
-        let inner_pool = self.inner.clone();
+        // Clone các thành phần cần thiết để tránh borrowed data escapes
+        let self_clone = self.clone();
         
         // Tạo một task mới để thực hiện shutdown
         tokio::spawn(async move {
-            // Đánh dấu pool đã shutdown
-            inner_pool.is_shutdown.store(true, Ordering::SeqCst);
-            
-            // Gửi tín hiệu shutdown nếu có
-            let shutdown_signal = inner_pool.shutdown_signal.lock().await;
-            if let Some(tx) = shutdown_signal.as_ref() {
-                let _ = tx.send(());
-            }
-            
             // Dọn dẹp kết nối trong pool
-            match inner_pool.force_close_all().await {
+            match self_clone.force_close_all().await {
                 Ok(_) => debug!("[RedisPool] Pool shutdown completed successfully"),
                 Err(e) => warn!("[RedisPool] Error during pool shutdown: {}", e),
             }
@@ -929,10 +925,9 @@ impl RedisConnectionPool {
     }
 }
 
-/// Specialization cho RedisService
-impl ConnectionPool<Arc<dyn RedisService>> {
+impl ConnectionValidator<Arc<dyn RedisService>> for ConnectionPool<Arc<dyn RedisService>> {
     fn check_connection_active(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
-        // Sử dụng implemention cụ thể cho RedisService
-        self.check_connection_active_redis(conn)
+        // Sử dụng implementation cụ thể cho RedisService
+        self.check_connection_active_internal(conn)
     }
 }

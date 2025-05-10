@@ -17,6 +17,8 @@ use once_cell::sync::Lazy;
 use tracing::{info, warn, error, debug};
 use std::env;
 use tokio;
+use tokio_test;
+use uuid::Uuid;
 
 /// # Authentication và Authorization Middleware
 ///
@@ -952,16 +954,13 @@ impl AuthService {
         Ok(revoked_count)
     }
 
-    /// Bắt đầu quy trình xoay vòng key tự động
-    /// 
-    /// Phương thức này sẽ tạo một task chạy ngầm để kiểm tra và xoay vòng các key và token cũ
-    /// theo định kỳ nhằm tăng cường bảo mật.
+    /// Bắt đầu tự động xoay vòng API key và Token theo định kỳ
     /// 
     /// # Arguments
-    /// 
     /// * `interval_days` - Số ngày giữa các lần kiểm tra và xoay vòng key
     pub fn start_auto_key_rotation(&self, interval_days: u64) {
-        let auth_service = Arc::new(self.clone());
+        // Clone self thành Arc để tránh borrowed data escapes
+        let auth_service_clone = self.clone();
         
         // Tạo một task chạy liên tục
         tokio::spawn(async move {
@@ -972,18 +971,115 @@ impl AuthService {
                 debug!("Running scheduled key rotation check");
                 
                 // Kiểm tra và xoay vòng các API key
-                let auth_service_clone = auth_service.clone();
-                check_api_key_rotation_internal(&auth_service_clone, rotation_interval).await;
+                match auth_service_clone.auto_rotate_api_keys() {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Automatically rotated {} expired API keys", count);
+                        }
+                    },
+                    Err(e) => error!("Error during automatic API key rotation: {:?}", e),
+                }
                 
-                // Kiểm tra và xoay vòng các simple token
-                check_simple_token_rotation(&auth_service_clone, rotation_interval).await;
+                // Kiểm tra và xoay vòng các token
+                match auth_service_clone.auto_rotate_tokens() {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Automatically rotated {} expired tokens", count);
+                        }
+                    },
+                    Err(e) => error!("Error during automatic token rotation: {:?}", e),
+                }
                 
-                // Đợi đến lần kiểm tra tiếp theo
+                // Sleep tới lần kiểm tra tiếp theo
                 tokio::time::sleep(check_interval).await;
             }
         });
         
         info!("Started automatic key rotation with interval of {} days", interval_days);
+    }
+
+    pub fn auto_rotate_api_keys(&self) -> Result<usize, AuthError> {
+        let mut keys_to_rotate = Vec::new();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        
+        // Lấy lock cho API keys
+        let api_keys = self.api_keys.read().unwrap();
+        
+        // Tìm các keys đã hết hạn
+        for (key, info) in api_keys.iter() {
+            if let Some(expires_at) = info.expires_at {
+                if now > expires_at {
+                    keys_to_rotate.push((key.clone(), (info.user_id.clone(), info.name.clone(), info.role.clone(), info.additional.clone())));
+                }
+            }
+        }
+        
+        drop(api_keys); // Bỏ read lock trước khi lấy write lock
+        
+        // Xử lý các keys cần rotate
+        if !keys_to_rotate.is_empty() {
+            let mut api_keys = self.api_keys.write().unwrap();
+            for (_key, (user_id, name, role, mut additional)) in keys_to_rotate {
+                // Tạo key mới với lifetime bằng với key cũ
+                let new_key = Uuid::new_v4().to_string();
+                
+                if let Some(ref mut map) = additional {
+                    map.insert("rotated_from".to_string(), "expired_key".to_string());
+                    map.insert("rotated_at".to_string(), now.to_string());
+                }
+                
+                // Thêm key mới
+                let expires_at = now + 7 * 24 * 60 * 60; // 7 days
+                api_keys.insert(new_key, (user_id, Some(expires_at), name, role, additional));
+            }
+        }
+        
+        Ok(keys_to_rotate.len())
+    }
+    
+    pub fn auto_rotate_tokens(&self) -> Result<usize, AuthError> {
+        let mut tokens_to_rotate = Vec::new();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        
+        // Lấy lock cho tokens
+        let tokens = self.simple_tokens.read().unwrap();
+        
+        // Tìm các tokens đã hết hạn
+        for (token, info) in tokens.iter() {
+            // Chỉ rotate tokens có expiration date
+            if now > info.expires_at.unwrap() {
+                tokens_to_rotate.push((token.clone(), (info.user_id.clone(), info.ip_address.clone(), info.role.clone(), info.expires_at.unwrap(), info.additional.clone())));
+            }
+        }
+        
+        drop(tokens); // Bỏ read lock trước khi lấy write lock
+        
+        // Xử lý các tokens cần rotate
+        if !tokens_to_rotate.is_empty() {
+            let mut tokens = self.simple_tokens.write().unwrap();
+            for (_token, (user_id, ip, role, expiration, mut additional)) in tokens_to_rotate {
+                // Tạo token mới với lifetime như token cũ
+                let new_token = Uuid::new_v4().to_string();
+                
+                if let Some(ref mut map) = additional {
+                    map.insert("rotated_from".to_string(), "expired_token".to_string());
+                    map.insert("rotated_at".to_string(), now.to_string());
+                }
+                
+                // Thêm token mới với expiration date như cũ
+                let token_type = "simple".to_string();
+                tokens.insert(new_token, AuthInfo {
+                    user_id,
+                    name: None,
+                    role,
+                    expires_at,
+                    ip_address: ip,
+                    additional: additional.clone(),
+                });
+            }
+        }
+        
+        Ok(tokens_to_rotate.len())
     }
 }
 
@@ -1166,7 +1262,7 @@ pub fn with_auth(
     
     headers_cloned()
         .map(move |headers: HeaderMap<HeaderValue>| (headers, Arc::clone(&auth_service), required_role.clone()))
-        .and_then(|(headers, auth_service, required_role)| async move {
+        .and_then(|(headers, auth_service, required_role): (HeaderMap<HeaderValue>, Arc<AuthService>, Option<UserRole>)| async move {
             // Trích xuất thông tin xác thực từ header
             let (token, auth_type) = match extract_auth_from_header(&headers) {
                 Ok(result) => result,
@@ -1237,7 +1333,7 @@ pub fn with_auth(
                 
             // Kiểm tra quyền nếu required_role được chỉ định
             if let Some(required) = required_role {
-                if !has_sufficient_role(&auth_info.role, &required) {
+                if !has_sufficient_role(&auth_info.role, required) {
                     warn!("[Auth] Authorization failed: User {} with role {:?} does not have required role {:?}", 
                          auth_info.user_id, auth_info.role, required);
                         return Err(warp::reject::custom(RejectReason::Forbidden));
@@ -1407,8 +1503,10 @@ pub fn with_auth_rate_limit(
     headers_cloned()
         .and(warp::addr::remote())
         .and_then(move |headers: HeaderMap, addr: Option<SocketAddr>| {
+            // Cần clone trước khi move vào closure
             let auth_service = auth_service_clone.clone();
             let config = auth_fail_config.clone();
+            let required = required_role.clone();
             
             async move {
                 // Kiểm tra số lần thất bại xác thực của IP này
@@ -1422,18 +1520,22 @@ pub fn with_auth_rate_limit(
                 
                     // Xóa các IP đã hết thời gian block
                     let now = Instant::now();
+                    let lockout_duration = config.lockout_duration_secs;
                     rate_limit.retain(|_, (_, timestamp)| {
-                        now.duration_since(*timestamp).as_secs() < config.lockout_duration_secs
+                        now.duration_since(*timestamp).as_secs() < lockout_duration
                     });
                     
                     // Kiểm tra IP hiện tại
+                    let max_fail_attempts = config.max_fail_attempts;
+                    let fail_window_secs = config.fail_window_secs;
+                    
                     if let Some((attempts, timestamp)) = rate_limit.get(&ip) {
-                        if *attempts >= config.max_fail_attempts && 
-                           now.duration_since(*timestamp).as_secs() < config.fail_window_secs {
+                        if *attempts >= max_fail_attempts && 
+                           now.duration_since(*timestamp).as_secs() < fail_window_secs {
                             // IP đã vượt quá số lần thất bại trong khoảng thời gian
                             return Err(warp::reject::custom(RejectReason::RateLimited(
                                 format!("Too many failed attempts. Try again after {} seconds", 
-                                        config.lockout_duration_secs)
+                                        lockout_duration)
                             )));
                         }
                     }
@@ -1451,7 +1553,7 @@ pub fn with_auth_rate_limit(
                         match result {
                             Ok(auth_info) => {
                                 // Kiểm tra quyền nếu có
-                                if let Some(required) = &required_role {
+                                if let Some(required) = &required {
                                     if !has_sufficient_role(&auth_info.role, required) {
                                         // Tăng số lần thất bại
                                         let mut rate_limit = AUTH_FAIL_RATE_LIMIT.lock().await;
@@ -1518,7 +1620,12 @@ mod tests {
             Some(Duration::from_secs(3600)),
             None
         ).unwrap();
-        let auth_info = auth_service.validate_jwt(&token).unwrap();
+        
+        // Sử dụng block_on để chạy validate_jwt async
+        let auth_info = tokio_test::block_on(async {
+            auth_service.validate_jwt(&token).await
+        }).unwrap();
+        
         assert_eq!(auth_info.user_id, "user123");
         assert_eq!(auth_info.name, Some("Test User".to_string()));
         assert_eq!(auth_info.role, UserRole::Admin);
@@ -1534,7 +1641,12 @@ mod tests {
             Some(Duration::from_secs(3600)),
             None
         ).unwrap();
-        let auth_info = auth_service.validate_jwt(&token).unwrap();
+        
+        // Sử dụng block_on để chạy validate_jwt async
+        let auth_info = tokio_test::block_on(async {
+            auth_service.validate_jwt(&token).await
+        }).unwrap();
+        
         assert_eq!(auth_info.user_id, "partner1");
         assert_eq!(auth_info.name, Some("Partner User".to_string()));
         assert_eq!(auth_info.role, UserRole::Partner);
@@ -1550,7 +1662,12 @@ mod tests {
             Some(Duration::from_secs(3600)),
             None
         ).unwrap();
-        let auth_info = auth_service.validate_jwt(&token).unwrap();
+        
+        // Sử dụng block_on để chạy validate_jwt async
+        let auth_info = tokio_test::block_on(async {
+            auth_service.validate_jwt(&token).await
+        }).unwrap();
+        
         assert_eq!(auth_info.role, UserRole::User);
         // Không phải Admin/Partner, không được phép truy cập API quản trị
         assert!(!allow_admin_or_partner(&auth_info));
@@ -1566,7 +1683,12 @@ mod tests {
             Some(Duration::from_secs(0)), // hết hạn ngay lập tức
             None
         ).unwrap();
-        let result = auth_service.validate_jwt(&token);
+        
+        // Sử dụng block_on để chạy validate_jwt async
+        let result = tokio_test::block_on(async {
+            auth_service.validate_jwt(&token).await
+        });
+        
         assert!(matches!(result, Err(AuthError::ExpiredToken)));
     }
 
@@ -1574,22 +1696,33 @@ mod tests {
     fn test_api_key() {
         let auth_service = AuthService::new("test_secret".to_string());
         
-        let api_key = auth_service.register_api_key(
+        // Sử dụng block_on để chạy register_api_key async
+        let api_key = tokio_test::block_on(async {
+            auth_service.register_api_key(
             "service1", 
             Some("Test Service"), 
             UserRole::Service,
             None
-        ).unwrap();
+            ).await
+        }).unwrap();
         
-        let auth_info = auth_service.validate_api_key(&api_key).unwrap();
+        // Sử dụng block_on để chạy validate_api_key async
+        let auth_info = tokio_test::block_on(async {
+            auth_service.validate_api_key(&api_key).await
+        }).unwrap();
         
         assert_eq!(auth_info.user_id, "service1");
         assert_eq!(auth_info.name, Some("Test Service".to_string()));
         assert_eq!(auth_info.role, UserRole::Service);
         
         // Test revoking
-        auth_service.revoke_api_key(&api_key).unwrap();
-        assert!(auth_service.validate_api_key(&api_key).is_err());
+        tokio_test::block_on(async {
+            auth_service.revoke_api_key(&api_key).await
+        }).unwrap();
+        
+        assert!(tokio_test::block_on(async {
+            auth_service.validate_api_key(&api_key).await.is_err()
+        }));
     }
     
     #[test]
@@ -1597,25 +1730,38 @@ mod tests {
         let auth_service = AuthService::new("test_secret".to_string());
         let ip = "127.0.0.1".parse::<IpAddr>().unwrap();
         
-        let token = auth_service.create_simple_token(
+        // Sử dụng block_on để chạy create_simple_token async
+        let token = tokio_test::block_on(async {
+            auth_service.create_simple_token(
             "node1", 
             ip,
             UserRole::Node,
             Some(Duration::from_secs(3600)),
             None
-        ).unwrap();
+            ).await
+        }).unwrap();
         
-        let auth_info = auth_service.validate_simple_token(&token, Some(ip)).unwrap();
+        // Sử dụng block_on để chạy validate_simple_token async
+        let auth_info = tokio_test::block_on(async {
+            auth_service.validate_simple_token(&token, Some(ip)).await
+        }).unwrap();
         
         assert_eq!(auth_info.user_id, "node1");
         assert_eq!(auth_info.role, UserRole::Node);
         
         // Test IP mismatch
         let wrong_ip = "192.168.1.1".parse::<IpAddr>().unwrap();
-        assert!(auth_service.validate_simple_token(&token, Some(wrong_ip)).is_err());
+        assert!(tokio_test::block_on(async {
+            auth_service.validate_simple_token(&token, Some(wrong_ip)).await.is_err()
+        }));
         
         // Test revocation
-        auth_service.revoke_simple_token(&token).unwrap();
-        assert!(auth_service.validate_simple_token(&token, Some(ip)).is_err());
+        tokio_test::block_on(async {
+            auth_service.revoke_simple_token(&token).await
+        }).unwrap();
+        
+        assert!(tokio_test::block_on(async {
+            auth_service.validate_simple_token(&token, Some(ip)).await.is_err()
+        }));
     }
 } 

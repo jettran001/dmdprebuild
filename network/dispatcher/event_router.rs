@@ -226,7 +226,7 @@ impl EventRouter {
             },
             Err(e) => {
                 error!("[EventRouter] Failed to emit event: {}", e);
-                Err(NetworkError::event_error(format!("Failed to emit event: {}", e)))
+                return Err(NetworkError::EventError(format!("Failed to emit event: {}", e)));
             }
         }
     }
@@ -237,7 +237,7 @@ impl EventRouter {
         let mut is_running_guard = self.is_running.lock().await;
         
         if *is_running_guard {
-            return Err(NetworkError::event_error("EventRouter is already running".to_string()));
+            return Err(NetworkError::EventError("EventRouter is already running".to_string()));
         }
         
         *is_running_guard = true;
@@ -372,7 +372,7 @@ impl EventRouter {
         let mut is_running_guard = self.is_running.lock().await;
         
         if !*is_running_guard {
-            return Err(NetworkError::event_error("EventRouter is not running".to_string()));
+            return Err(NetworkError::EventError("EventRouter is not running".to_string()));
         }
         
         *is_running_guard = false;

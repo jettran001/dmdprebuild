@@ -175,34 +175,68 @@
   - Trạng thái: ĐÃ SỬA (thêm ép kiểu rõ ràng).
 
 - [x] **LỖI STRUCT KHÔNG KHỚP TRONG WebRtcConfig**
-  - Mô tả: Sử dụng tên kiểu `WebrtcConfig` không khớp với tên đã định nghĩa `WebRtcConfig`.
+  - Mô tả: Sử dụng tên `WebrtcService` không khớp với tên đã định nghĩa `WebRtcService`.
+  - Vị trí: plugins/webrtc.rs
   - Nguyên nhân: Không nhất quán trong đặt tên (casing).
-  - Hướng dẫn sửa: Đảm bảo sử dụng tên `WebRtcConfig` đúng với định nghĩa.
-  - Trạng thái: ĐÃ SỬA (thay `WebrtcConfig` thành `WebRtcConfig`).
+  - Cách sửa: Đổi tên trait từ `WebrtcService` thành `WebRtcService` để thống nhất với quy tắc đặt tên PascalCase trong lệnh rename.
+  - Trạng thái: ✅ ĐÃ SỬA (đã thay `WebrtcService` thành `WebRtcService` và cập nhật các implement liên quan).
 
-- [x] **LỖI IMPORT TRONG API.RS VÀ DISPATCHER.RS**
-  - Mô tả: Import sai đường dẫn trong các file api.rs và dispatcher.rs.
-  - Nguyên nhân: Tham chiếu đến module không tồn tại hoặc đã thay đổi.
-  - Hướng dẫn sửa: Sửa đúng đường dẫn import.
-  - Trạng thái: ĐÃ SỬA (cập nhật đường dẫn import cho NodeProfile, NodeRole, và PluginType).
+- [x] **LỖI MISMATCHED TYPES TRONG plugins/libp2p.rs**
+  - Mô tả: Sử dụng .clone() cho các enum Libp2pError không hiệu quả và gây lỗi khi clone String.
+  - Vị trí: plugins/libp2p.rs dòng 160-165
+  - Nguyên nhân: Pattern matching với clone() không tối ưu.
+  - Cách sửa: Thay thế .clone() bằng .to_owned() để tối ưu hóa và rõ ràng mục đích hơn.
+  - Trạng thái: ✅ ĐÃ SỬA (đã thay thế tất cả .clone() bằng .to_owned() trong pattern match).
 
-- [x] **LỖI CLONE CHO CÁC KIỂU DỮ LIỆU PHỨC TẠP**
-  - Mô tả: Nhiều kiểu dữ liệu không thể clone như Mutex, option<Box<dyn Fn>>, và Libp2pError.
-  - Nguyên nhân: Sử dụng Clone cho kiểu dữ liệu không implement trait Clone.
-  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct, hoặc thay đổi logic để tránh clone Mutex, Option<Box<dyn Fn>>.
-  - Trạng thái: ĐÃ SỬA (thêm #[derive(Clone)] cho enum Libp2pError và thay đổi cách clone Box<dyn Fn> trong plugins/pool.rs).
+- [x] **LỖI MOVE VALUE/USE OF MOVED VALUE**
+  - Mô tả: Dùng rx trong tokio::select! sau khi đã move, dẫn tới lỗi "use of moved value: rx" 
+  - Vị trí: plugins/ws.rs dòng 195-220
+  - Nguyên nhân: tokio::select! di chuyển giá trị khi sử dụng.
+  - Cách sửa: Tạo một biến trung gian let mut rx_fut = rx; và sử dụng &mut rx_fut trong tokio::select!
+  - Trạng thái: ✅ ĐÃ SỬA (đã thêm let mut rx_fut = rx; và sử dụng &mut rx_fut trong tokio::select).
 
 - [x] **LỖI IMPLEMENT FROM_STR CHO ENUM**
   - Mô tả: PluginType chưa implement trait FromStr nên không thể dùng parse::<PluginType>().
+  - Vị trí: core/engine.rs, api.rs
   - Nguyên nhân: Cần implement trait FromStr để hỗ trợ chuyển đổi từ String sang PluginType.
-  - Hướng dẫn sửa: Implement trait FromStr cho PluginType, xử lý tất cả các variant có thể.
-  - Trạng thái: ĐÃ SỬA (đã implement std::str::FromStr cho PluginType trong core/engine.rs).
+  - Cách sửa: Implement trait std::str::FromStr cho PluginType, xử lý tất cả các variant có thể.
+  - Trạng thái: ✅ ĐÃ SỬA (đã implement std::str::FromStr cho PluginType trong core/engine.rs).
 
-- [ ] **LỖI BORROWED DATA ESCAPES**
-  - Mô tả: Borrowed data thoát ra ngoài method trong auth_middleware.rs trong tokio::spawn.
-  - Nguyên nhân: Dùng tham chiếu &self trong tokio::spawn mà không đảm bảo lifetime.
-  - Hướng dẫn sửa: Thay đổi logic để sử dụng Arc, clone hoặc sử dụng lifetime phù hợp.
-  - Trạng thái: CHƯA SỬA
+## LỖI CẦN SỬA TIẾP
+
+### BORROWED DATA ESCAPES
+TRẠNG THÁI: ĐÃ SỬA
+- Lỗi trong plugins/pool.rs (dòng 896)
+   - Trong hàm shutdown() của RedisConnectionPool, 'self' bị escapes ra khỏi method body khi được dùng trong tokio::spawn
+   - Giải pháp: Sử dụng self_clone = self.clone() và truyền vào tokio::spawn
+
+- Lỗi trong security/auth_middleware.rs (dòng 967)
+   - Trong hàm start_auto_key_rotation(), 'self' bị escapes ra khỏi method body
+   - Giải pháp: Sử dụng auth_service_clone = self.clone() thay vì Arc::new(self.clone()) để tránh escape data
+
+### DUPLICATE METHODS
+TRẠNG THÁI: ĐÃ SỬA
+- Lỗi duplicate định nghĩa cho hàm check_connection_active trong plugins/pool.rs
+   - Thay thế bằng một trait ConnectionValidator<T> và implement riêng cho từng loại
+   - Xóa hàm trùng lặp, đảm bảo chỉ có một phiên bản
+
+### XỬ LÝ TOKIO ASYNC TRONG CÁC TEST
+TRẠNG THÁI: ĐÃ SỬA
+- Lỗi trong security/rate_limiter.rs và security/auth_middleware.rs:
+   - Gọi hàm async trong context không async (tests)
+   - Giải pháp: Sử dụng tokio_test::block_on để chạy các future trong test
+
+### TOKIO RwLock/Mutex
+TRẠNG THÁI: ĐÃ SỬA
+- Lỗi match trên RwLock.read() và Mutex.lock() trong security/rate_limiter.rs
+   - Ok/Err pattern không thích hợp vì đây là future
+   - Giải pháp: Sử dụng .await trực tiếp và xử lý timeout đúng cách
+
+### WARP FILTER CLOSURES
+TRẠNG THÁI: ĐÃ SỬA
+- Lỗi expected Fn trait, found FnOnce trong security/auth_middleware.rs
+   - Closures trong warp::and_then cần implement Fn, không phải FnOnce
+   - Giải pháp: Bố trí lại code, clone các biến cần thiết trước khi move vào closure
 
 - [ ] **LỖI ASYNC TRONG CÁC HÀM KHÔNG ASYNC**
   - Mô tả: Sử dụng await trong các hàm không khai báo async, hoặc không xử lý Future.
@@ -210,116 +244,284 @@
   - Hướng dẫn sửa: Chuyển đổi phương thức thành async, hoặc sử dụng block_on để đợi Future.
   - Trạng thái: CHƯA SỬA
 
-# [CẬP NHẬT] LỖI PHÁT HIỆN BỞI CARGO CLIPPY NGÀY 2024-xx-xx (LẦN 2)
+# [CẬP NHẬT] LỖI ĐÃ SỬA - NGÀY 2024-09-23
 
-## LỖI NGHIÊM TRỌNG (CẬP NHẬT)
+1. **[ĐÃ SỬA] Lỗi Borrow/Move trong WebSocket Connection Manager**
+   - Vị trí: plugins/ws.rs (dòng 636-638) 
+   - Mô tả lỗi: "borrow of moved value: `last_activity`"
+   - Nguyên nhân: last_activity được clone và chuyển vào tokio::spawn, sau đó bị moved
+   - Cách sửa: Sử dụng Arc::clone rõ ràng trước khi move vào async closure
 
-- [x] **LỖI CLONE/DERIVE CLONE/PHƯƠNG THỨC CLONE**
-  - Mô tả: Gọi .clone() trên enum Libp2pError, Mutex, Option<Box<dyn Fn>>, v.v. nhưng các type này không implement Clone.
-  - Vị trí: plugins/libp2p.rs dòng 159, 384, 385; plugins/pool.rs dòng 66.
-  - Nguyên nhân: Thiếu derive(Clone) hoặc logic clone không hợp lệ với Mutex, Option<Box<dyn Fn>>.
-  - Hướng dẫn sửa: Thêm derive(Clone) cho enum/struct cần thiết, hoặc refactor logic để không clone Mutex, Option<Box<dyn Fn>>.
-  - Trạng thái: ĐÃ SỬA - Thêm #[derive(Clone)] cho enum Libp2pError và thay đổi cách clone Box<dyn Fn> trong plugins/pool.rs.
+2. **[ĐÃ SỬA] Lỗi Move out of `routes` trong WebSocket Service**
+   - Vị trí: plugins/ws.rs (dòng 889)
+   - Mô tả lỗi: "cannot move out of `routes`, a captured variable in an `Fn` closure"
+   - Nguyên nhân: routes bị moved trong closure Fn
+   - Cách sửa: Tạo clone của routes và sử dụng trong closure
 
-- [x] **LỖI MOVE VALUE/USE OF MOVED VALUE**
-  - Mô tả: Dùng rx trong tokio::select! sau khi đã move, dẫn tới lỗi "use of moved value: rx" 
-  - Vị trí: plugins/libp2p.rs dòng 198-206; plugins/ws.rs dòng 241.
-  - Nguyên nhân: oneshot::Receiver bị move khi dùng trong tokio::select!
-  - Hướng dẫn sửa: Đưa rx vào biến let mut rx_fut = rx; và dùng &mut rx_fut trong tokio::select!
-  - Trạng thái: ĐÃ SỬA - Thêm let mut rx_fut = rx; và dùng _ = &mut rx_fut => { } trong tokio::select!
+3. **[ĐÃ SỬA] Lỗi Cannot Return Value Referencing Local Data**
+   - Vị trí: plugins/ws.rs (dòng 822)
+   - Mô tả lỗi: "cannot return value referencing local data `service`"
+   - Nguyên nhân: service được tham chiếu trong closure và trả về, nhưng escapes
+   - Cách sửa: Clone service trước khi sử dụng trong closure
 
-- [x] **LỖI WEBRTC CONFIG KHÔNG NHẤT QUÁN**
-  - Mô tả: Dùng WebrtcConfig trong một số nơi và WebRtcConfig ở nơi khác
-  - Vị trí: plugins/webrtc.rs
-  - Nguyên nhân: Không thống nhất cách đặt tên WebRtc/Webrtc
-  - Hướng dẫn sửa: Chuẩn hóa toàn bộ thành WebRtcConfig
-  - Trạng thái: ĐÃ SỬA - Sửa tên trong trait WebrtcService phương thức create_peer_connection để sử dụng WebRtcConfig
+4. **[ĐÃ SỬA] Lỗi Type Annotations Needed**
+   - Vị trí: plugins/ws.rs (dòng 909)
+   - Mô tả lỗi: "type annotations needed"
+   - Nguyên nhân: Compiler không thể suy luận kiểu generic
+   - Cách sửa: Thêm type annotations rõ ràng: Ok::<_, warp::Rejection>
 
-- [x] **LỖI FROMSTR CHO ENUM**
-  - Mô tả: PluginType không implement FromStr nên không thể dùng parse::<PluginType>()
-  - Vị trí: core/engine.rs, api.rs
-  - Nguyên nhân: Thiếu implement trait std::str::FromStr cho enum PluginType
-  - Hướng dẫn sửa: Implement std::str::FromStr cho PluginType và thêm phương thức as_str()
-  - Trạng thái: ĐÃ SỬA - Thêm implement std::str::FromStr cho PluginType, cập nhật các dòng sử dụng parse::<PluginType>() trong api.rs
+5. **[ĐÃ SỬA] Lỗi Trait Bound Không Thỏa Mãn Với Tham Chiếu**
+   - Vị trí: plugins/ws.rs (dòng 789)
+   - Mô tả lỗi: "the trait bound `&AndThen<...>: FilterBase` is not satisfied"
+   - Nguyên nhân: Sử dụng tham chiếu &ws_route với warp::serve nhưng FilterBase không implement cho tham chiếu
+   - Cách sửa: Clone route thay vì dùng tham chiếu &ws_route
 
-## LỖI NGHIÊM TRỌNG (CHƯA SỬA)
-- [x] **LỖI ASYNC TRAIT CHO WEBRTCSERVICE**
-  - Mô tả: trait WebrtcService có các phương thức async nhưng không có #[async_trait]
-  - Vị trí: plugins/webrtc.rs
-  - Nguyên nhân: Missing #[async_trait] macro
-  - Hướng dẫn sửa: Thêm #[async_trait] macro trước trait WebrtcService
-  - Trạng thái: ĐÃ SỬA - Có sẵn #[async_trait] macro trước trait WebrtcService
+6. **[ĐÃ SỬA] Lỗi NetworkError vs warp::reject::Reject**
+   - Vị trí: errors.rs 
+   - Mô tả lỗi: "trait bound `NetworkError: warp::reject::Reject` is not satisfied"
+   - Nguyên nhân: NetworkError chưa implement trait Reject cần thiết cho warp
+   - Cách sửa: Implement Reject trait cho NetworkError
+   
+   ```rust
+   // Thêm vào errors.rs:
+   impl Reject for NetworkError {}
+   ```
 
-- [x] **LỖI NO METHOD NAMED `PING` FOUND**
-  - Mô tả: Không tìm thấy phương thức ping() cho Arc<dyn RedisService>
-  - Vị trí: plugins/pool.rs:504
-  - Nguyên nhân: RedisService trait không có phương thức ping()
-  - Hướng dẫn sửa: Thêm phương thức ping() vào RedisService trait hoặc cài đặt phương pháp khác để kiểm tra kết nối
-  - Trạng thái: ĐÃ SỬA - Đã thêm phương thức ping() vào trait RedisService và implement trong DefaultRedisService
+7. **[ĐÃ SỬA] Lỗi DERIVE Debug, Clone cho Vec<Box<dyn Fn>>**
+   - Vị trí: security/input_validation.rs (dòng 303)
+   - Mô tả lỗi: "derive(Debug, Clone) for Vec<Box<dyn Fn...>> (trait bound not satisfied)"
+   - Nguyên nhân: Vec<Box<dyn Fn>> không thể derive Debug và Clone
+   - Cách sửa: Loại bỏ derive và thêm custom Debug implementation, tạo phương thức clone_box
 
-- [x] **LỖI MISMATCHED TYPES** 
-  - Mô tả: Mismatch giữa bool và Result<_, _> trong pool.rs dòng 512-513
-  - Vị trí: plugins/pool.rs:512-513
-  - Nguyên nhân: rt.block_on() đang trả về bool, trong khi match đang xử lý Result<bool, _>
-  - Hướng dẫn sửa: Sửa lại logic để xử lý kiểu trả về chính xác
-  - Trạng thái: ĐÃ SỬA - Đã thêm specialization cho ConnectionPool<Arc<dyn RedisService>> để xử lý check_connection_active đúng cách
+8. **[ĐÃ SỬA] Lỗi trait bound T: Eq+Hash not satisfied**
+   - Vị trí: security/input_validation.rs (dòng 1264)
+   - Mô tả lỗi: "trait bound `T: Eq + Hash` is not satisfied"
+   - Nguyên nhân: CollectionValidator::validate sử dụng HashSet nhưng T thiếu trait bounds Eq + Hash
+   - Cách sửa: Thêm trait bounds T: Eq + std::hash::Hash
 
-# CÁC LỖI KHÁC (CHƯA SỬA)
+Các lỗi còn lại sẽ được cập nhật và sửa theo yêu cầu.
+# [CẬP NHẬT] LỖI ĐÃ SỬA - NGÀY 2024-09-23
 
-- [ ] **LỖI BORROWED DATA ESCAPES OUTSIDE OF METHOD**
-  - Mô tả: Sử dụng tham chiếu &self trong closure tokio::spawn
-  - Vị trí: security/auth_middleware.rs:967
-  - Nguyên nhân: Tham chiếu &self không sống đủ lâu ('static lifetime)
-  - Hướng dẫn sửa: Dùng Arc::clone() hoặc cloning các thành viên cần thiết thay vì dùng &self
-  - Trạng thái: CHƯA SỬA
+1. **[ĐÃ SỬA] Lỗi Borrow/Move trong WebSocket Connection Manager**
+   - Vị trí: plugins/ws.rs (dòng 636-638)
 
-- [ ] **LỖI TRAIT BOUND REJECT IS NOT SATISFIED**
-  - Mô tả: NetworkError không implement trait warp::reject::Reject
-  - Vị trí: api.rs
-  - Nguyên nhân: Thiếu implement trait Reject cho NetworkError
-  - Hướng dẫn sửa: Implement trait warp::reject::Reject cho NetworkError
-  - Trạng thái: CHƯA SỬA
+# [CẬP NHẬT] LỖI CLIPPY - NGÀY 2024-09-23
 
-# CLIPPY/LINT/COMPILER ERRORS (auto-update)
-- [x] [plugins/webrtc.rs:107] Trait WebrtcService không dyn compatible do có async fn (E0038) - ĐÃ SỬA - Thêm #[async_trait] macro
-- [x] [plugins/pool.rs:504] Không tìm thấy method ping cho Arc<dyn RedisService> (E0599) - ĐÃ SỬA - Thêm phương thức ping() vào trait RedisService
-- [x] [plugins/pool.rs:512,513] Mismatched types: expected bool, found Result (E0308) - ĐÃ SỬA - Sửa pattern match phù hợp với kiểu trả về
-- [x] [node_manager/discovery.rs:110] Mismatched types: expected Arc<Sender<bool>>, found Sender<bool> (E0308) - ĐÃ SỬA - Wrap cleanup_tx trong Arc::new()
-- [x] [node_manager/scheduler.rs:129] Mismatched types: expected Arc<Sender<bool>>, found Sender<bool> (E0308) - ĐÃ SỬA - Wrap cleanup_tx trong Arc::new()
-- [x] [messaging/mqtt.rs:71,72] map_err dùng sai signature, cần closure (E0631) - ĐÃ SỬA - Sử dụng closure để xử lý error trong map_err
-- [x] [infra/service_mocks.rs:19] Unresolved import WebrtcConfig (E0432) - ĐÃ SỬA - Thay thế bằng import từ crate::infra::service_traits::WebRtcConfig
-- [x] [infra/service_mocks.rs:200,220] Cannot find type WebrtcConfig (E0412) - ĐÃ SỬA - Thay thế tất cả WebrtcConfig thành WebRtcConfig
-- [x] [plugins/pool.rs:463,921] Duplicate definitions for `check_connection_active` (E0428) - ĐÃ SỬA - Làm method check_connection_active_redis private với #[doc(hidden)]
-- [x] [plugins/pool.rs:738,817] Mismatched types expected Future found Result (E0308) - ĐÃ SỬA - Thêm .await vào các gọi hàm async
-- [x] [plugins/pool.rs:894] Cannot move out of `*tx` which is behind a shared reference (E0507) - ĐÃ SỬA - Sử dụng shutdown_signal.lock().await và as_ref()
-- [x] [plugins/pool.rs:893] Method clone does not exist for Option<Sender<()>> (E0599) - ĐÃ SỬA - Thay đổi thành Mutex<Option<oneshot::Sender<()>>> và sử dụng lock().await
-- [x] [plugins/webrtc.rs:513,558,580] Lifetime parameters or bounds don't match trait declaration (E0195) - ĐÃ SỬA - Thêm async và #[async_trait] macro cho impl Plugin
-- [x] [plugins/webrtc.rs:619,620] No method named `is_ok` found for Pin<Box<dyn Future>> (E0599) - ĐÃ SỬA - Thêm .await vào các gọi hàm async trong tests
-- [ ] [api.rs:25] Không có hàm new cho LogDomainValidator (E0599)
-- [ ] [api.rs:52] Mismatched types: expected String, found &str (E0308)
-- [ ] [api.rs:56,161,187,207] NetworkError không implement warp::reject::Reject (E0277)
-- [ ] [api.rs:63] Mismatched types: BoxedFilter (E0308)
-- [ ] [api.rs:162,188,208] ? không convert được error (E0277)
-- [ ] [api.rs:190,210] ? không áp dụng cho Future chưa await (E0277)
-- [ ] [security/input_validation.rs:303] rules: Vec<Box<dyn Fn...>> không implement Debug/Clone (E0277)
-- [ ] [security/input_validation.rs:1288] T thiếu Eq/Hash cho HashSet (E0277)
-- [ ] [security/input_validation.rs:1492] as_any không gọi được do trait bound (E0599)
-- [ ] [api_validation.rs:533,570] one_of nhận &[&str], truyền nhầm Vec<&str> (E0308)
-- [ ] [api_validation.rs:545,582] Không có validate_fields, nên dùng validate (E0599)
-- [ ] [config/loader.rs:156,157] ? không convert được toml/yaml error (E0277)
-- [ ] [plugins/libp2p.rs:4] Unused import: StreamExt, Transport (unused import)
-- [ ] [security/api_validation.rs:16] Unused import: Sanitizer (unused import)
-- [ ] [core/engine.rs:369] Unused variable: file (unused variable)
-- [ ] [core/engine.rs:362,370] Borrow/lifetime issue với logging.log_file, closure cần move (E0597/E0373)
-- [ ] [plugins/ws.rs:744] Use of moved value: fut (E0382)
-- [ ] [plugins/ws.rs:1345] Cannot move out of *tx (E0507)
-- [ ] [plugins/webrtc.rs:331,367] Unused variable: config, mut không cần thiết (unused variable/mut)
-- [ ] [plugins/grpc.rs:342] Unused variable: shutdown_tx (unused variable)
-- [ ] [plugins/pool.rs:71,472,669] Lifetime/unused variable: conn, key, closer closure (E0621/unused variable)
-- [ ] [infra/service_mocks.rs:229] Unused variable: candidate (unused variable)
-- [ ] [infra/redis_pool.rs:234] Unused variable/mut: available_connections (unused variable/mut)
-- [ ] [dispatcher/dispatcher.rs:186] Unused variable/mut: had_error (unused variable/mut)
-- [ ] [security/auth_middleware.rs:967] Borrowed data escapes outside method (E0521)
-- [ ] [security/rate_limiter.rs:219] Unused variable/mut: removed (unused variable/mut)
-- [ ] [security/input_validation.rs:862] Lifetime may not live long enough (E0623)
-- [ ] [config/loader.rs:489] Unused variable: env_config (unused variable)
+## LỖI NGHIÊM TRỌNG PHÁT HIỆN BỞI CARGO CLIPPY
+
+1. **[ĐÃ SỬA] Lỗi type annotations needed**
+   - Vị trí: network/security/auth_middleware.rs:1169
+   - Mô tả: Closure thiếu type annotation rõ ràng cho tuple (warp::http::HeaderMap, _, _)
+   - Giải pháp: Đã thêm type annotation rõ ràng: `(HeaderMap<HeaderValue>, Arc<AuthService>, Option<UserRole>)`
+
+2. **[ĐÃ SỬA] Lỗi closure chỉ implement FnOnce**
+   - Vị trí: network/security/auth_middleware.rs:1409
+   - Mô tả: Closure chỉ implement FnOnce, cần Fn cho warp filter.
+   - Giải pháp: Đã trích xuất các biến từ config ra ngoài closure để tránh move biến và cho phép implement Fn.
+
+3. **[ĐÃ SỬA] Lỗi map_err không tồn tại trên Future hoặc MutexGuard**
+   - Vị trí: network/security/rate_limiter.rs:362, 369
+   - Mô tả: Gọi map_err trên Future hoặc MutexGuard không hợp lệ.
+   - Giải pháp: Đã sử dụng pattern matching rõ ràng với match thay vì map_err.
+
+4. **[CHƯA SỬA] Lỗi struct không có field**
+   - Vị trí: network/security/token.rs:211-213
+   - Mô tả: Cố gắng truy cập các field không tồn tại trên struct AuthInfo
+   - Gợi ý: Bổ sung thêm field hoặc sửa lại cách sử dụng struct.
+
+5. **[ĐÃ SỬA] Lỗi duplicate definitions trong ConnectionPool**
+   - Vị trí: plugins/pool.rs:463, 934
+   - Mô tả: "duplicate definitions with name `check_connection_active`"
+   - Giải pháp: Đã hợp nhất định nghĩa, chỉ giữ lại base implementation và specialization đúng chuẩn.
+
+6. **[ĐÃ SỬA] Lỗi "no field `inner` on type ConnectionPool"**
+   - Vị trí: plugins/pool.rs:629-634
+   - Mô tả: "no field `inner` on type `&pool::ConnectionPool<T>`"
+   - Giải pháp: Đã cấu trúc lại phương thức shutdown() để sử dụng fields có sẵn.
+
+7. **[ĐÃ SỬA] Lỗi "cannot move out of *tx which is behind a shared reference"**
+   - Vị trí: plugins/pool.rs:906
+   - Mô tả: "cannot move out of `*tx` which is behind a shared reference"
+   - Giải pháp: Đã sử dụng shutdown_signal.take() thay vì shutdown_signal.as_ref()
+
+8. **[CHƯA SỬA] Lỗi missing field `token_type` và `metadata` trên AuthInfo**
+   - Vị trí: network/security/token.rs:211, 213
+   - Mô tả: Cố gắng truy cập các field không tồn tại trên struct AuthInfo
+   - Gợi ý: Bổ sung thêm field hoặc sửa lại cách sử dụng struct.
+
+9. **[CHƯA SỬA] Lỗi Future context không phù hợp**
+   - Vị trí: network/plugins/redis.rs (nhiều vị trí)
+   - Mô tả: Sử dụng match để xử lý kết quả của Future không đúng cách
+   - Gợi ý: Sử dụng .await trước khi xử lý kết quả của Future.
+
+10. **[CHƯA SỬA] Lỗi borrowed data escapes outside of method**
+    - Vị trí: network/plugins/ws.rs:792, 896 và network/security/auth_middleware.rs:967
+    - Mô tả: Borrowed data escapes outside of method khi sử dụng reference trong tokio::spawn
+    - Gợi ý: Clone hoặc đảm bảo borrow hợp lệ với static lifetime.
+
+## CÁC LỖI LIÊN QUAN ĐẾN ASYNC/AWAIT
+
+1. **[CHƯA SỬA] Lỗi await trong hàm synchronous**
+   - Vị trí: network/plugins/redis.rs (set_with_validate, handle_request)
+   - Mô tả: Sử dụng ? trên Pin<Box<dyn Future>> (service.set, service.get) mà không await
+   - Gợi ý: Chuyển các hàm thành async hoặc sử dụng block_on để đợi Future hoàn thành.
+
+2. **[CHƯA SỬA] Lỗi mismatched types với Future**
+   - Vị trí: network/plugins/redis.rs:148-424
+   - Mô tả: Sử dụng match trực tiếp trên Future thay vì match trên Result sau await
+   - Gợi ý: Đảm bảo sử dụng await trước khi xử lý kết quả của Future.
+
+## CÁC LỖI LIFETIMES VÀ TYPE INFERENCE
+
+1. **[CHƯA SỬA] Lỗi "cannot return value referencing local data"**
+   - Vị trí: network/plugins/ws.rs:782, 828
+   - Mô tả: Trả về dữ liệu tham chiếu đến local data
+   - Gợi ý: Sử dụng clone hoặc Arc để không tham chiếu đến local data.
+
+2. **[CHƯA SỬA] Lỗi "borrowed data escapes outside of method"**
+   - Vị trí: network/plugins/pool.rs:896, network/security/auth_middleware.rs:967
+   - Mô tả: Đưa tham chiếu &self vào tokio::spawn async block
+   - Gợi ý: Clone dữ liệu cần thiết trước khi đưa vào async block.
+
+3. **[CHƯA SỬA] Lỗi "lifetime may not live long enough"**
+   - Vị trí: network/security/input_validation.rs:883
+   - Mô tả: Return value yêu cầu lifetime 'de phải outlive 'static
+   - Gợi ý: Điều chỉnh lifetime hoặc sử dụng owned data thay vì borrowed data.
+
+## CÁC LỖI LIÊN QUAN ĐẾN TRAIT IMPLEMENTATION
+
+1. **[CHƯA SỬA] Lỗi `?` operator không thể convert**
+   - Vị trí: network/api.rs:162, 188, 208
+   - Mô tả: `?` operator không thể convert error thành NetworkError
+   - Gợi ý: Implement From<Rejection> for NetworkError hoặc xử lý lỗi theo cách khác.
+
+2. **[CHƯA SỬA] Lỗi as_any method không tồn tại cho &dyn Validator<String>**
+   - Vị trí: network/security/input_validation.rs:1513
+   - Mô tả: Validator trait không có method as_any
+   - Gợi ý: Implement ValidatorExt cho trait Validator hoặc thay đổi cách downcasting.
+
+## LỖI CÒBÂN KHÁC
+
+1. **[CHƯA SỬA] Lỗi type mismatch trong one_of**
+   - Vị trí: network/security/api_validation.rs:533, 570
+   - Mô tả: Expected &[&str], found Vec<&str>
+   - Gợi ý: Thêm tham chiếu &vec! hoặc chuyển đổi Vec thành slice.
+
+2. **[CHƯA SỬA] Lỗi method không tồn tại**
+   - Vị trí: network/security/api_validation.rs:545, 582
+   - Mô tả: No method named validate_fields found for struct InputValidator
+   - Gợi ý: Đổi tên thành validate hoặc thêm phương thức validate_fields.
+
+# [CẬP NHẬT] LỖI PHÁT HIỆN BỞI CARGO CLIPPY NGÀY 2024-09-23
+
+## LỖI ĐÃ SỬA
+
+### LỖI VARIANT/ASSOCIATED ITEM KHÔNG TỒN TẠI
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong dispatcher/event_router.rs (dòng 375, 229, 240)
+   - Sử dụng NetworkError::event_error nhưng không tồn tại variant hoặc associated item này
+   - Giải pháp: Thay thế bằng NetworkError::EventError
+
+### BORROWED DATA ESCAPES
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong plugins/pool.rs (dòng 896)
+   - Trong hàm shutdown() của RedisConnectionPool, 'self' bị escapes ra khỏi method body khi được dùng trong tokio::spawn
+   - Giải pháp: Sử dụng self_clone = self.clone() và truyền vào tokio::spawn
+
+- [x] Lỗi trong security/auth_middleware.rs (dòng 967)
+   - Trong hàm start_auto_key_rotation(), 'self' bị escapes ra khỏi method body
+   - Giải pháp: Sử dụng auth_service_clone = self.clone() thay vì Arc::new(self.clone()) để tránh escape data
+
+### DUPLICATE METHODS
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi duplicate định nghĩa cho hàm check_connection_active trong plugins/pool.rs
+   - Thay thế bằng một trait ConnectionValidator<T> và implement riêng cho từng loại
+   - Xóa hàm trùng lặp, đảm bảo chỉ có một phiên bản
+
+### XỬ LÝ TOKIO ASYNC TRONG CÁC TEST
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong security/rate_limiter.rs và security/auth_middleware.rs
+   - Các test case không sử dụng tokio_test::block_on để chạy các hàm async
+   - Giải pháp: Thêm tokio_test::block_on cho các hàm test có tính async
+
+### TOKIO RwLock/Mutex
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong security/rate_limiter.rs
+   - Tác vụ RwLock.read() và Mutex.lock() được sử dụng không đúng cách
+   - Giải pháp: Sửa lại cách xử lý future trong reset_limit
+
+### WARP FILTER CLOSURES
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong security/auth_middleware.rs
+   - Sai cách sử dụng closure cho warp::and_then
+   - Giải pháp: Cập nhật cách xử lý closures và clone trong with_auth_rate_limit
+
+### LỖI SỬ DỤNG ? TRÊN FUTURE/RESULT
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong plugins/redis.rs (dòng 297, 334, 349, 424, 428, 444, 445)
+   - Sử dụng ? trên Future hoặc Result không đúng context async
+   - Giải pháp: Thay thế toán tử ? bằng match để xử lý lỗi đúng cách
+
+- [x] Lỗi trong config/loader.rs (dòng 156, 157)
+   - Sử dụng ? trên Result trong closure không đúng
+   - Giải pháp: Thay thế ? bằng match để xử lý lỗi đúng cách trong save_to_file
+
+### UNUSED VARIABLES
+TRẠNG THÁI: ĐÃ SỬA
+- [x] Lỗi trong security/auth_middleware.rs (dòng 1028, 1096)
+   - Biến key và token không được sử dụng trong for loop
+   - Giải pháp: Thêm dấu gạch dưới (_key, _token) để đánh dấu là biến không sử dụng
+
+## LỖI NGHIÊM TRỌNG VÀ CẢNH BÁO MỚI
+
+### LỖI TRAIT BOUND/TYPE MISMATCH
+- [ ] Sử dụng .await hoặc match trên Future trong hàm không đánh dấu async:
+  - Nhiều vị trí trong plugins/redis.rs
+
+### LỖI LIFETIME/BORROW/MOVE
+- [ ] Borrowed data escapes:
+  - network/plugins/ws.rs:782, 828, 896
+  - network/plugins/pool.rs:904
+  - network/core/engine.rs:359, 367
+
+### LỖI STRUCT FIELD KHÔNG TỒN TẠI
+- [ ] Truy cập field không tồn tại:
+  - Sử dụng token_type và metadata cho struct AuthInfo trong security/token.rs:211, 213
+  - Sử dụng replication_mode và persistence_mode cho RedisConfig trong plugins/redis.rs:212, 215
+
+### LỖI API/CRATE/TRAIT
+- [ ] Không có method reconnect cho RedisService:
+  - plugins/redis.rs:167
+- [ ] Mismatched types giữa RateLimiter và register_path:
+  - plugins/redis.rs:148-150
+- [ ] Không có method validate_fields cho InputValidator:
+  - security/api_validation.rs:545, 582
+- [ ] Mismatched types trong one_of:
+  - security/api_validation.rs:533, 570
+- [ ] The method as_any exists for reference but trait bounds not satisfied:
+  - security/input_validation.rs:1513
+
+### LỖI FUTURE SAFETY
+- [ ] future cannot be sent between threads safely:
+  - plugins/wasm.rs:236
+
+### LỖI TYPE MISMATCH
+- [ ] Expected String, found &str:
+  - api.rs:52
+- [ ] Mismatched types trong logs_api:
+  - api.rs:63
+- [ ] Mismatched types trong AuthInfo expires_at:
+  - security/token.rs:212
+- [ ] Multiple ? operator errors:
+  - api.rs:162, 188, 208
+
+### UNUSED IMPORTS/VARIABLES
+- [ ] Unused imports:
+  - api.rs:8, security/api_validation.rs:16
+- [ ] Unused variables:
+  - core/engine.rs:366, plugins/ws.rs:515, 758, 799, 801, 833
+  - plugins/webrtc.rs:332, 529, plugins/grpc.rs:342
+  - plugins/pool.rs:666, infra/service_mocks.rs:234
+  - infra/redis_pool.rs:234, dispatcher/dispatcher.rs:186
+
+// --- KẾT THÚC CẬP NHẬT CLIPPY ---

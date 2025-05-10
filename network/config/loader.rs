@@ -152,14 +152,27 @@ impl ConfigLoader {
         
         let format = ConfigFormat::from_extension(&path_ref.to_string_lossy());
         let content = match format {
-            ConfigFormat::Json => serde_json::to_string_pretty(config)?,
-            ConfigFormat::Toml => toml::to_string(config)?,
-            ConfigFormat::Yaml => serde_yaml::to_string(config)?,
+            ConfigFormat::Json => match serde_json::to_string_pretty(config) {
+                Ok(content) => content,
+                Err(e) => return Err(ConfigError::from(e)),
+            },
+            ConfigFormat::Toml => match toml::to_string(config) {
+                Ok(content) => content,
+                Err(e) => return Err(ConfigError::ParseError(format!("TOML serialization error: {}", e))),
+            },
+            ConfigFormat::Yaml => match serde_yaml::to_string(config) {
+                Ok(content) => content,
+                Err(e) => return Err(ConfigError::ParseError(format!("YAML serialization error: {}", e))),
+            },
         };
         
-        std::fs::write(path_ref, content)?;
-        info!("Configuration saved to file: {:?}", path_ref);
-        Ok(())
+        match std::fs::write(path_ref, content) {
+            Ok(_) => {
+                info!("Configuration saved to file: {:?}", path_ref);
+                Ok(())
+            },
+            Err(e) => Err(ConfigError::from(e)),
+        }
     }
     
     /// Phân tích nội dung cấu hình theo định dạng

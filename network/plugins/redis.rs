@@ -330,11 +330,17 @@ impl RedisPlugin {
                     }
                 };
                 
-                // Thực hiện set thông qua service
-                self.service.set(key, value)?;
-                info!("Redis set: {} = {}", key, value);
-                
-                Ok(format!("OK"))
+                // Thực hiện set thông qua service - thay ? bằng match
+                match self.service.set(key, value) {
+                    Ok(_) => {
+                        info!("Redis set: {} = {}", key, value);
+                        Ok(format!("OK"))
+                    },
+                    Err(e) => {
+                        error!("Redis set failed: {}", e);
+                        Err(format!("Redis operation failed: {}", e))
+                    }
+                }
             },
             ("GET", "/redis/get") => {
                 let key = match sanitized_params.get("key") {
@@ -345,15 +351,23 @@ impl RedisPlugin {
                     }
                 };
                 
-                // Thực hiện get thông qua service
-                match self.service.get(key)? {
-                    Some(value) => {
-                        info!("Redis get: {} = {}", key, value);
-                        Ok(value)
+                // Thực hiện get thông qua service - thay ? bằng match
+                match self.service.get(key) {
+                    Ok(result) => {
+                        match result {
+                            Some(value) => {
+                                info!("Redis get: {} = {}", key, value);
+                                Ok(value)
+                            },
+                            None => {
+                                info!("Redis get: {} = nil", key);
+                                Ok("nil".to_string())
+                            }
+                        }
                     },
-                    None => {
-                        info!("Redis get: {} = nil", key);
-                        Ok("nil".to_string())
+                    Err(e) => {
+                        error!("Redis get failed: {}", e);
+                        Err(format!("Redis operation failed: {}", e))
                     }
                 }
             },

@@ -98,7 +98,7 @@ pub trait IpfsService: Send + Sync + 'static {
 
 /// Trait cho WebRTC service
 #[async_trait]
-pub trait WebrtcService: Send + Sync + 'static {
+pub trait WebRtcService: Send + Sync + 'static {
     /// Initialize WebRTC
     async fn init(&self) -> Result<(), ServiceError>;
     /// Create a new peer connection
