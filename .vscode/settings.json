@@ -1,0 +1,9 @@
+{
+    "terminal.integrated.sendKeybindingsToShell": true,
+    "terminal.integrated.scrollback": 5000,
+    "terminal.integrated.shellIntegration.history": 0,
+    "cursor.composer.shouldQueueWhenGenerating": false,
+    "editor.cursorBlinking": "blink",
+    "diffEditor.renderSideBySideInlineBreakpoint": 2000,
+    "editor.quickSuggestionsDelay": 100
+}

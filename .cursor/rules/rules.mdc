@@ -1,0 +1,18 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# LUẬT TỐI CAO: MỌI HÀNH ĐỘNG PHẢI TUÂN THỦ 100% QUY TẮC TRONG FILE NÀY.
+# CẤM BỎ QUA, CẤM GIẢI THÍCH, CẤM SỬA NGOÀI LUỒNG, CẤM TỰ Ý.
+# NẾU VI PHẠM, PHẢI LIỆT KÊ LẠI TOÀN BỘ THAO TÁC ĐÃ LÀM.
+- Bắt buộc tuân thủ và thực hiện đúng mệnh lệnh được giao, không tự ý thay đổi mệnh lệnh . 
+- Bắt buộc đọc file .cursorrc trước khi tạo code và sửa lỗi .
+- Bắt buộc tuân thủ nghiêm ngặt quy tắc trong .cursorrc .
+- CẤM KHÔNG ĐƯỢC TẠO FILE MỚI KHI TAO CHƯA ĐỒNG Ý 
+- Bắt buộc kiểm tra đầu tiên file manifest tại thư mục domain khi được yêu cầu quét cấu trúc.  
+- KHÔNG tự ý tạo file chỉ để lấp lỗi mod, chỉ tạo file khi thực sự cần thiết cho code thực thi và đã được xác nhận rõ ràng.
+- KHÔNG dùng manifest để quyết định tạo file/module, chỉ dùng manifest như tài liệu tham khảo tổ chức code.
+- Nếu module không còn dùng, phải xóa khai báo mod khỏi code, không tạo file rỗng.
+- Chỉ sửa code thực tế, không sửa ngoài phạm vi được phép, không lặp lại trait/service ở nhiều nơi.
+- Nếu vi phạm, phải liệt kê lại toàn bộ thao tác đã làm khi được yêu cầu.

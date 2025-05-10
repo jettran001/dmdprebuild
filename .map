@@ -1,0 +1,745 @@
+# DiamondChain Project Structure Map
+# Tài liệu tổng hợp từ các manifest.rs của các module
+
+## 1. Module Common (Gateway Server)
+- **Mô tả**: Server Gateway điều phối API, xác thực người dùng và giao tiếp web3
+- **Đường dẫn**: /common
+- **Cấu trúc**:
+  - `api`: API Gateway và Router
+    - `gateway`: API gateway xử lý yêu cầu
+    - `router`: Định tuyến yêu cầu
+    - `middleware`: Logging, rate limiting
+    - `error_handling`: Xử lý lỗi & format
+    - `docs`: Documentation & testing
+  - `auth`: Xác thực người dùng
+    - `authentication`: JWT, OAuth, v.v.
+    - `authorization`: Phân quyền truy cập
+    - `session`: Quản lý phiên làm việc
+    - `web3_auth`: Xác thực wallet connect
+    - `security`: Bảo vệ chống tấn công
+  - `web3`: Giao tiếp blockchain
+    - `blockchain_gateway`: Kết nối với chains
+    - `transaction`: Quản lý transaction
+    - `contract_interaction`: Smart contract
+    - `event_manager`: Event & subscription
+    - `multichain`: Đa chuỗi và bridge
+  - `frontend`: Dioxus framework
+    - `components`: UI components
+    - `state_management`: State & data flow
+    - `routing`: Navigation
+    - `i18n`: Đa ngôn ngữ
+    - `theming`: Responsive design
+  - `performance`: Tối ưu hiệu năng
+    - `queue`: Redis + Tokio Mutex queue
+    - `concurrency`: Thread safety control
+    - `cache`: Caching mechanism
+    - `optimization`: Performance tuning
+    - `monitoring`: Metrics & monitoring
+  - `mpc`: Multi-Party Computation
+    - `session`: Session management
+    - `cache`: Token/session caching
+    - `signing`: Ký và verify
+    - `key_management`: Key security
+    - `threshold`: Threshold control
+  - `network_integration`: Tích hợp mạng
+    - `grpc`: gRPC integration
+    - `websocket`: WebSocket
+    - `http2`: HTTP/2
+    - `redis`: Redis integration
+    - `p2p`: P2P communications
+  - `config`: Cấu hình
+    - `env`: Biến môi trường
+    - `system`: Cấu hình hệ thống
+    - `service`: Cấu hình service
+    - `feature_flags`: Feature flags
+    - `logging`: Logging configuration
+
+## 2. Module Network
+- **Mô tả**: Cung cấp hạ tầng mạng, giao thức, dịch vụ kết nối cho toàn bộ hệ sinh thái DiamondChain.
+- **Triển khai**:
+  - Domain `network` được build thành **container chính** (network-main) của hệ thống.
+  - Các domain khác (blockchain, wallet, snipebot, ...) sẽ được build thành các Docker image/container riêng biệt.
+  - Tất cả các container domain này sẽ kết nối vào cùng một Docker network với container network chính (`snipebotnet`).
+  - Mọi giao tiếp giữa các domain (websocket, grpc, redis, kafka, mosquitto, ...) sẽ đi qua các service do container network cung cấp.
+  - Sử dụng Docker Compose (hoặc Kubernetes) để orchestration, đảm bảo service discovery và connectivity giữa các container.
+
+### Quy tắc Domain Network
+
+1. **Plugin Architecture**
+   - Mọi công nghệ mạng phải implement Plugin trait
+   - Plugin phải có health check và metrics
+   - Plugin phải hỗ trợ graceful shutdown
+
+2. **Security First**
+   - Mọi input phải được validate
+   - Auth/Authz cho mọi endpoint
+   - Rate limiting cho mọi API
+   - Logging đầy đủ cho security events
+
+3. **Error Handling**
+   - Dùng Result<T, E> với error type rõ ràng
+   - Không unwrap/expect trừ khi test
+   - Log error ở nơi catch cuối cùng
+
+4. **Async Patterns**
+   - Dùng tokio::sync::Mutex/RwLock cho async
+   - Trait objects phải có Send + Sync + 'static
+   - Kiểm tra Send/Sync khi spawn task
+
+5. **Configuration**
+   - Cấu hình tập trung trong infra/config
+   - Không hardcode giá trị nhạy cảm
+   - Validate cấu hình khi load
+
+6. **Documentation**
+   - Public API phải có doc comment
+   - Cập nhật doc khi sửa code
+   - Thêm ví dụ sử dụng
+
+### Dependencies Network
+
+```toml
+[dependencies]
+libp2p = { version = "0.35.1", features = ["tcp", "dns", "async-std", "noise", "mplex", "yamux", "websocket", "kad", "mdns"] }
+tokio = { version = "1.28.0", features = ["full"] }
+serde = { version = "1.0.160", features = ["derive"] }
+tracing = "0.1.37"
+anyhow = "1.0.70"
+thiserror = "1.0.40"
+```
+
+### Entry Points Network
+
+- `main.rs`: Khởi động network engine
+- `api.rs`: Network API endpoints
+- `lib.rs`: Exports các module
+
+### Testing Network
+
+- Unit tests trong mỗi module
+- Integration tests cho plugin
+- Benchmarks cho performance-critical code
+
+## 3. Module Wallet
+- **Mô tả**: Quản lý ví và giao dịch an toàn
+- **Đường dẫn**: /wallet
+- **Cấu trúc**:
+  - `keystore`: Quản lý khóa
+  - `accounts`: Quản lý tài khoản
+  - `transactions`: Quản lý giao dịch
+  - `defi`: Chức năng DeFi (farming, staking, blockchain interaction)
+    - `mod.rs`: Khai báo và re-export các thành phần chính
+    - `provider.rs`: DefiProvider và DefiProviderImpl, re-export từ blockchain
+    - `blockchain.rs`: BlockchainProvider trait và implementations
+    - `contracts.rs`: Quản lý các smart contracts
+    - `erc20.rs`: Tương tác với ERC-20 tokens
+    - `erc721.rs`: Tương tác với ERC-721 NFTs
+    - `erc1155.rs`: Tương tác với ERC-1155 Multi-Token
+    - `chain.rs`: Định nghĩa ChainId và thông tin chain
+    - `security.rs`: Bảo mật DeFi
+    - `error.rs`: DefiError cho module defi
+    - `api.rs`: API công khai DefiApi
+    - `crypto.rs`: Mã hóa/giải mã bằng AES-256-GCM và PBKDF2
+    - `blockchain/non_evm/`: Providers cho blockchain non-EVM
+  - `users`: Người dùng và quyền
+    - `subscription`: Dịch vụ theo gói
+    - `vip_user`: Người dùng VIP
+    - `premium_user`: Người dùng premium
+  - `security`: Bảo mật
+  - `mpc`: Multi-party computation
+
+## 4. Module SnipeBot
+- **Mô tả**: Bot giao dịch DeFi thông minh
+- **Đường dẫn**: /snipebot
+- **Cấu trúc**:
+  - `core`: Core logic
+  - `strategies`: Chiến lược giao dịch
+  - `monitor`: Giám sát thị trường
+  - `execution`: Thực thi giao dịch
+  - `analytics`: Phân tích dữ liệu
+  - `risk`: Quản lý rủi ro
+
+## 5. Module Blockchain
+- **Mô tả**: Tương tác với blockchain, quản lý EIP-2535
+- **Đường dẫn**: /blockchain
+- **Cấu trúc**:
+  - `onchain`: Nơi phát triển smartcontracts
+    - `smartcontract`: Smart contracts cho các blockchain
+      - `dmd_bsc_contract.sol`: Smart contract DMD trên BSC (Solidity 0.8.20)
+      - `near_contract`: Smart contract cho NEAR
+        - `smartcontract.rs`: Implementation contract NEAR
+        - `mod.rs`: Module definitions cho NEAR contract
+      - `solana_contract`: Smart contract cho Solana
+        - `smartcontract.rs`: Implementation contract Solana
+        - `mod.rs`: Module definitions cho Solana contract
+      - `bridge`: Logic bridge qua LayerZero/Wormhole
+        - `bridge_interface.sol`: Router trung tâm, kế thừa NonblockingLzApp của LayerZero
+      - `erc20_wrappeddmd.sol`: ERC-20 đại diện trong quá trình bridge
+      - `erc1155_wrapper.sol`: Wrapper cho ERC-1155 thành ERC-20
+      - `erc1155_unwrapper_near.rs`: Bộ unwrap/bridge trên NEAR
+      - `erc1155_bridge_adapter.sol`: Adapter kết nối với bridge protocol (deprecated)
+      - `ERC20BridgeReceiverNear.rs`: Bridge receiver cho NEAR
+      - `interfaces`: Interface chuẩn hóa cho bridge
+        - `BridgeTypes.sol`
+      - `libraries`: Thư viện dùng chung cho bridge
+        - `ChainRegistry.sol`
+        - `BridgePayloadCodec.sol`
+  - `src`: Source code chính của dự án
+    - `lib.rs`: Entry point cho crate library
+    - `mod.rs`: Module definitions
+    - `main.rs`: Entry point cho backend service
+    - `migrations`: Database migrations
+      - `create_bridge_transactions.sql`: Schema cho bảng bridge_transactions
+      - `mod.rs`: Helper functions để chạy migrations
+    - `sdk`: API Rust → WASM
+      - `api.rs`: REST API endpoints
+      - `bridge_client.rs`: Client cho bridge API
+      - `mod.rs`: Module definitions
+    - `processor`: Xử lý logic backend
+      - `bridge_orchestrator.rs`: Điều phối giao dịch cross-chain
+      - `layerzero.rs`: Client tương tác với LayerZero protocol
+      - `wormhole.rs`: Client tương tác với Wormhole protocol
+      - `mod.rs`: Module definitions
+
+### Những đặc điểm chính của Module Blockchain:
+
+- **ONCHAIN**:
+  - Nơi tạo các smartcontract, chain adapter, bridge logic qua LayerZero
+  - Sử dụng Solidity 0.8.20 cho EVM chains, Rust cho NEAR và Solana
+  - Hỗ trợ bridge native token, ERC20, ERC1155, ERC721, ERC777
+  - Tự động unwrap, daily limit, event chuẩn hóa
+
+- **SDK**:
+  - Cung cấp giao diện Rust → WASM
+  - API cho frontend (domain common) và các ứng dụng khác
+  - Token API được tích hợp trong bridge_orchestrator.rs và api.rs
+  - Wallet API được kết nối qua domain wallet/src/walletmanager/api.rs
+  - WASM API được kết nối qua domain network/src/wasm
+
+- **PROCESSOR**:
+  - Theo dõi trạng thái và xử lý các giao dịch cross-chain
+  - Điều phối các giao dịch cross-chain qua LayerZero và Wormhole
+  - Theo dõi trạng thái giao dịch và retry khi cần thiết
+  - Xử lý và relay các bridge transaction
+  - Ước tính phí bridge giữa các blockchain
+
+- **MIGRATIONS**:
+  - Quản lý schema database và migrations
+  - Tự động tạo và cập nhật schema database
+
+## Mối quan hệ giữa các module
+- **Common → Wallet**: Gọi API wallet để xác thực, quản lý phiên.
+- **Common → SnipeBot**: Điều phối yêu cầu thực thi bot.
+- **Common → Network**: Sử dụng các service mạng (gRPC, WebSocket, Redis).
+- **Common → Blockchain**: Truy vấn dữ liệu blockchain qua gateway.
+- **Wallet → Blockchain**: Thực hiện giao dịch, ký và xác thực.
+- **SnipeBot → Wallet**: Sử dụng ví để giao dịch.
+- **SnipeBot → Blockchain**: Giám sát và tương tác với blockchain.
+- **Network → Blockchain**: Kết nối và đồng bộ node blockchain.
+
+### Kết nối giữa Bridge, Smartcontract và Processor:
+- Bridge và Smartcontract (onchain) được kết nối với Processor thông qua bridge_orchestrator.rs
+- Bridge_orchestrator lắng nghe và xử lý các sự kiện từ smart contract thông qua provider (BSC, NEAR, Solana)
+- Bridge_orchestrator điều phối các giao dịch cross-chain qua LayerZero và Wormhole
+- Processor theo dõi trạng thái giao dịch và retry khi cần thiết
+- SDK giao tiếp với bridge_orchestrator thông qua api.rs và bridge_client.rs
+- Frontend (domain common) truy cập các API này thông qua bridge_client
+
+### Blockchain → Wallet
+- **Cung cấp các thư viện cốt lõi**:
+  - `blockchain::stake::stake_logic::StakeManager`: Cung cấp logic quản lý staking
+  - `blockchain::farm::farm_logic::FarmManager`: Cung cấp logic quản lý farming
+  - `blockchain::stake::stake_logic::StakePoolConfig`: Cấu hình cho staking pools
+  - `blockchain::farm::farm_logic::FarmPoolConfig`: Cấu hình cho farming pools
+  - `blockchain::smartcontracts`: Cung cấp các smart contract interfaces
+  - `blockchain::processor::bridge_orchestrator`: Điều phối giao dịch cross-chain
+
+### Wallet → Blockchain
+- **Import từ blockchain**:
+  - `wallet::defi::provider`: Re-export `blockchain::farm::farm_logic::FarmManager` và `blockchain::stake::stake_logic::StakeManager`
+  - `wallet::defi::provider`: Chuyển đổi kiểu dữ liệu giữa wallet và blockchain
+  - `wallet::defi::provider::DefiProvider`: Wrapper cho logic trong blockchain
+
+### API và Traits
+- **Blockchain Traits**:
+  - `blockchain::smartcontracts::TokenInterface`: Interface cho tương tác với tokens
+  - `blockchain::smartcontracts::BridgeInterface`: Interface cho chức năng bridge
+  - `blockchain::stake::stake_logic::StakeManager`: Logic staking chính
+  - `blockchain::farm::farm_logic::FarmManager`: Logic farming chính
+
+- **Wallet Traits**:
+  - `wallet::defi::provider::DefiProvider`: Interface cao cấp cho DeFi
+  - `wallet::defi::blockchain::BlockchainProvider`: Interface cho blockchain adapters
+  - `wallet::defi::contracts::ContractInterface`: Interface cho smart contracts
+  - `wallet::defi::erc20::Erc20Contract`: Interface cho ERC20 tokens
+  - `wallet::defi::erc721::Erc721Contract`: Interface cho ERC721 NFTs
+  - `wallet::defi::erc1155::Erc1155Contract`: Interface cho ERC1155 Multi-Tokens
+
+### Luồng dữ liệu DeFi:
+- UI → Common → Wallet → DefiManager → DefiProvider → BlockchainFarmManager/BlockchainStakeManager → Blockchain
+
+## Import/Export giữa Blockchain và Wallet
+- **Wallet re-export từ Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  pub use blockchain::farm::farm_logic::FarmManager as BlockchainFarmManager;
+  pub use blockchain::stake::stake_logic::StakeManager as BlockchainStakeManager;
+  pub use blockchain::farm::farm_logic::FarmPoolConfig as BlockchainFarmPoolConfig;
+  pub use blockchain::stake::stake_logic::StakePoolConfig as BlockchainStakePoolConfig;
+  ```
+
+- **Wallet chuyển đổi kiểu dữ liệu từ/đến Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  impl From<FarmPoolConfig> for BlockchainFarmPoolConfig { ... }
+  impl From<StakePoolConfig> for BlockchainStakePoolConfig { ... }
+  ```
+
+- **Wallet sử dụng các module Blockchain**:
+  ```rust
+  // wallet/src/defi/provider.rs
+  pub struct DefiProviderImpl {
+      blockchain_provider: Box<dyn BlockchainProvider>,
+      farm_manager: Arc<BlockchainFarmManager>,
+      stake_manager: Arc<BlockchainStakeManager>,
+  }
+  ```
+
+## Luồng dữ liệu
+1. **UI → Common → Wallet → Blockchain**:
+   - Yêu cầu người dùng → API Gateway → Wallet Service → Blockchain Transaction
+2. **UI → Common → SnipeBot → Wallet → Blockchain**:
+   - Cấu hình bot → API Gateway → Bot Execution → Wallet Transaction → Blockchain
+3. **Network → Common → UI**:
+   - Event Blockchain → Network Listen → Common Websocket → UI Update
+
+## Sơ đồ cây cấu trúc dự án (Tree Structure)
+
+```
+DiamondChain/
+├── common/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── api/
+│       │   ├── gateway.rs
+│       │   ├── router.rs
+│       │   ├── middleware.rs
+│       │   ├── error_handling.rs
+│       │   └── docs.rs
+│       ├── auth/
+│       │   ├── authentication.rs
+│       │   ├── authorization.rs
+│       │   ├── session.rs
+│       │   ├── web3_auth.rs
+│       │   └── security.rs
+│       ├── web3/
+│       │   ├── blockchain_gateway.rs
+│       │   ├── transaction.rs
+│       │   ├── contract_interaction.rs
+│       │   ├── event_manager.rs
+│       │   └── multichain.rs
+│       ├── frontend/
+│       │   ├── components.rs
+│       │   ├── state_management.rs
+│       │   ├── routing.rs
+│       │   ├── i18n.rs
+│       │   └── theming.rs
+│       ├── performance/
+│       │   ├── queue.rs
+│       │   ├── concurrency.rs
+│       │   ├── cache.rs
+│       │   ├── optimization.rs
+│       │   └── monitoring.rs
+│       ├── mpc/
+│       │   ├── session.rs
+│       │   ├── cache.rs
+│       │   ├── signing.rs
+│       │   ├── key_management.rs
+│       │   └── threshold.rs
+│       ├── network_integration/
+│       │   ├── grpc.rs
+│       │   ├── websocket.rs
+│       │   ├── http2.rs
+│       │   ├── redis.rs
+│       │   └── p2p.rs
+│       └── config/
+│           ├── env.rs
+│           ├── system.rs
+│           ├── service.rs
+│           ├── feature_flags.rs
+│           └── logging.rs
+├── network/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── docker/
+│       │   ├── compose.rs
+│       │   ├── containers.rs
+│       │   └── networks.rs
+│       ├── nodes/
+│       │   ├── depin.rs
+│       │   ├── master_slave.rs
+│       │   ├── scaling.rs
+│       │   └── discovery.rs
+│       ├── protocols/
+│       │   ├── ipfs.rs
+│       │   ├── quic.rs
+│       │   ├── grpc.rs
+│       │   ├── websocket.rs
+│       │   ├── redis.rs
+│       │   ├── libp2p.rs
+│       │   ├── webrtc.rs
+│       │   └── coap.rs
+│       ├── messaging/
+│       │   ├── mqtt.rs
+│       │   ├── kafka.rs
+│       │   ├── zeromq.rs
+│       │   └── messagepack.rs
+│       ├── edge/
+│       │   ├── computing.rs
+│       │   ├── sync.rs
+│       │   └── optimization.rs
+│       └── wasm/
+│           ├── runtime.rs
+│           ├── compiler.rs
+│           └── integration.rs
+├── wallet/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── keystore/
+│       ├── accounts/
+│       ├── transactions/
+│       ├── users/
+│       │   ├── subscription/
+│       │   ├── vip_user.rs
+│       │   └── premium_user.rs
+│       ├── security/
+│       └── mpc/
+├── snipebot/
+│   ├── manifest.rs
+│   ├── lib.rs
+│   └── src/
+│       ├── core/
+│       ├── strategies/
+│       ├── monitor/
+│       ├── execution/
+│       ├── analytics/
+│       └── risk/
+└── blockchain/
+    ├── manifest.rs
+    ├── lib.rs
+    └── src/
+        ├── chains/
+        ├── contracts/
+        ├── eip2535/
+        ├── abi/
+        ├── events/
+        └── sync/
+```
+
+## Sơ đồ mối quan hệ giữa các module
+
+```
+┌─────────┐      ┌─────────┐      ┌─────────┐
+│         │      │         │      │         │
+│  UI     │─────▶│ Common  │─────▶│ Wallet  │
+│         │      │         │      │         │
+└─────────┘      └────┬────┘      └────┬────┘
+                      │                 │
+                      ▼                 ▼
+                ┌─────────┐      ┌─────────┐
+                │         │      │         │
+                │SnipeBot │─────▶│Blockchain│
+                │         │      │         │
+                └────┬────┘      └────┬────┘
+                     │                 │
+                     ▼                 ▼
+                ┌─────────┐      ┌─────────┐
+                │         │      │         │
+                │ Network │◀────▶│   MPC   │
+                │         │      │         │
+                └─────────┘      └─────────┘
+```
+
+# DOMAIN MAP - MỐI LIÊN HỆ GIỮA BLOCKCHAIN VÀ WALLET
+
+## 1. TỔNG QUAN CÁC DOMAINS
+
+### Domain Blockchain
+- Tập trung vào tương tác với các blockchain và smart contracts
+- Cung cấp các giao diện chuẩn (TokenInterface, BridgeInterface) cho việc tương tác
+- Quản lý logic staking, farming, bridge và exchange
+- Hỗ trợ nhiều blockchain khác nhau (BSC, Ethereum, Arbitrum, NEAR, Solana, Base, Polygon)
+
+### Domain Wallet
+- Quản lý ví người dùng và tài khoản
+- Xử lý các giao dịch blockchain thông qua các providers
+- Quản lý người dùng (Free, Premium, VIP) và subscription
+- Cung cấp các tính năng DeFi như staking, farming, tương tác với contracts
+- Triển khai các chuẩn token ERC20, ERC721, ERC1155
+
+## 2. MỐI LIÊN HỆ CHUNG
+
+### Kiểu dữ liệu chung
+- `ChainId`, `Address`, `U256`: Sử dụng trong cả hai domains
+- `TokenInfo`, `ContractInfo`: Được sử dụng cho trao đổi thông tin
+- `BlockchainProvider`: Interface chung giữa hai domains
+
+### Cơ chế kết nối
+- Domain Wallet là lớp trung gian giữa người dùng (hoặc SnipeBot) và Blockchain
+- Wallet gọi các methods và traits được định nghĩa trong Blockchain
+- Các smart contracts được quản lý trong Blockchain và được gọi từ Wallet
+- Wallet triển khai bổ sung các chuẩn token (ERC20, ERC721, ERC1155) dựa trên các interfaces của Blockchain
+
+### Flow dữ liệu cơ bản
+```
+SnipeBot ⟷ Wallet (Users, Walletmanager) ⟷ Blockchain (Smartcontracts, Stake, Farm)
+```
+
+## 3. TRAITS VÀ INTERFACES CHUNG
+
+### TokenInterface (blockchain::smartcontracts::mod.rs)
+- **Mô tả**: Trait chính định nghĩa tương tác với tokens trên các blockchain khác nhau
+- **Sử dụng trong Wallet**: wallet::defi::contracts::ContractInterface triển khai dựa trên interface này
+- **Phương thức chính**:
+  ```rust
+  async fn get_balance(&self, address: &str) -> Result<U256>;
+  async fn transfer(&self, private_key: &str, to: &str, amount: U256) -> Result<String>;
+  async fn total_supply(&self) -> Result<U256>;
+  fn decimals(&self) -> u8;
+  fn token_name(&self) -> String;
+  fn token_symbol(&self) -> String;
+  async fn get_total_supply(&self) -> Result<f64>;
+  async fn bridge_to(&self, to_chain: &str, from_account: &str, to_account: &str, amount: f64) -> Result<String>;
+  ```
+
+### BridgeInterface (blockchain::smartcontracts::mod.rs)
+- **Mô tả**: Trait cho chức năng bridge token giữa các blockchain
+- **Sử dụng trong Wallet**: wallet::defi::bridge::BridgeManager sử dụng interface này
+- **Phương thức chính**:
+  ```rust
+  async fn bridge_tokens(&self, private_key: &str, to_address: &str, amount: U256) -> Result<String>;
+  async fn check_bridge_status(&self, tx_hash: &str) -> Result<String>;
+  async fn estimate_bridge_fee(&self, to_address: &str, amount: U256) -> Result<(U256, U256)>;
+  ```
+
+### BlockchainProvider (wallet::defi::blockchain.rs)
+- **Mô tả**: Interface cho các blockchain providers trong Wallet
+- **Tương tác với Blockchain**: Gọi các methods từ TokenInterface và các smart contracts
+- **Được triển khai cho các blockchain**: Diamond, Tron, Solana, Hedera, Cosmos, NEAR
+- **Phương thức chính**:
+  ```rust
+  async fn get_balance(&self, address: &str) -> Result<f64>;
+  async fn send_transaction(&self, txn: &Transaction) -> Result<String>;
+  async fn get_transaction(&self, tx_hash: &str) -> Result<TransactionInfo>;
+  async fn validate_address(&self, address: &str) -> bool;
+  async fn get_token_balance(&self, token_address: &str, wallet_address: &str) -> Result<f64>;
+  ```
+
+### StakePoolManager (blockchain::stake::mod.rs)
+- **Mô tả**: Trait cho quản lý stake pool
+- **Sử dụng trong Wallet**: wallet::users::subscription::staking::StakingManager sử dụng gián tiếp
+- **Phương thức chính**:
+  ```rust
+  async fn create_pool(&self, config: StakePoolConfig) -> Result<Address>;
+  async fn add_token(&self, pool_address: Address, token_address: Address) -> Result<()>;
+  async fn stake(&self, pool_address: Address, user_address: Address, amount: U256, lock_time: u64) -> Result<()>;
+  async fn unstake(&self, pool_address: Address, user_address: Address) -> Result<()>;
+  async fn claim_rewards(&self, pool_address: Address, user_address: Address) -> Result<U256>;
+  ```
+
+## 4. IMPORTS VÀ EXPORTS GIỮA HAI DOMAINS
+
+### Từ Blockchain vào Wallet
+
+#### Imports vào Wallet
+```rust
+use blockchain::smartcontracts::TokenInterface;
+use blockchain::smartcontracts::BridgeInterface;
+use blockchain::smartcontracts::dmd_token::DMDToken;
+use blockchain::smartcontracts::dmd_bsc_bridge::DmdBscBridge;
+use blockchain::stake::StakeManager;
+use blockchain::stake::UserStakeInfo;
+use blockchain::farm::FarmManager;
+```
+
+#### Domain Wallet sử dụng
+- **wallet::defi::blockchain.rs**: Gọi TokenInterface để thực hiện các hoạt động token
+- **wallet::defi::contracts.rs**: Mở rộng TokenInterface với các chức năng bổ sung
+- **wallet::users::subscription::staking.rs**: Sử dụng StakeManager để quản lý stake
+- **wallet::walletmanager::chain.rs**: Tương tác với blockchain thông qua TokenInterface
+
+### Từ Wallet vào Blockchain
+
+#### Imports vào Blockchain
+```rust
+use wallet::walletmanager::api::WalletManagerApi;
+use wallet::users::subscription::staking::StakingManager;
+use wallet::users::subscription::nft::NftValidator;
+```
+
+#### Domain Blockchain sử dụng
+- **blockchain::stake::stake_logic.rs**: Có thể sử dụng StakingManager từ wallet
+- **blockchain::smartcontracts::dmd_token.rs**: Có thể gọi WalletManagerApi để thực hiện các giao dịch
+- **blockchain::farm::farm_logic.rs**: Có thể liên kết với StakingManager để lấy thông tin stake
+
+## 5. API VÀ ENTRY POINTS CHÍNH
+
+### APIs từ Blockchain dùng trong Wallet
+
+#### DMDToken (blockchain::smartcontracts::dmd_token.rs)
+- **new()**: Tạo mới DMDToken instance
+- **get_token_tier(address: &str)**: Lấy tier của token
+- **is_token_allowed(address: &str, required_tier: u8)**: Kiểm tra token có được phép sử dụng dựa trên tier
+
+#### DmdBscBridge (blockchain::smartcontracts::dmd_bsc_bridge.rs)
+- **new()**: Tạo mới DmdBscBridge instance
+- **bridge_tokens()**: Bridge token từ BSC sang chain khác
+
+#### StakeManager (blockchain::stake::stake_logic.rs)
+- **new()**: Tạo mới StakeManager
+- **create_pool()**: Tạo pool staking mới
+- **stake()**: Stake token vào pool
+- **unstake()**: Unstake token từ pool
+- **claim_rewards()**: Nhận rewards từ staking
+
+#### FarmManager (blockchain::farm::farm_logic.rs)
+- **new()**: Tạo mới FarmManager
+- **add_pool()**: Thêm farming pool mới
+- **add_liquidity()**: Thêm liquidity vào pool
+- **remove_liquidity()**: Rút liquidity từ pool
+- **harvest()**: Thu rewards từ farming
+
+### APIs từ Wallet dùng trong Blockchain
+
+#### WalletManagerApi (wallet::walletmanager::api)
+- **create_wallet()**: Tạo ví mới
+- **import_wallet()**: Nhập ví từ seed
+- **get_wallet_info()**: Lấy thông tin ví
+- **sign_transaction()**: Ký giao dịch
+- **send_transaction()**: Gửi giao dịch đã ký
+
+#### StakingManager (wallet::users::subscription::staking)
+- **stake_tokens()**: Stake token cho gói VIP
+- **check_stake_status()**: Kiểm tra trạng thái stake
+- **calculate_rewards()**: Tính toán rewards hiện tại
+- **claim_rewards()**: Nhận rewards
+
+#### TokenManager (wallet::defi::token::manager)
+- **get_token_info()**: Lấy thông tin token
+- **validate_token_address()**: Xác thực địa chỉ token
+- **check_token_balance()**: Kiểm tra số dư token
+
+## 6. LOGIC NGHIỆP VỤ CHUNG
+
+### Staking và Farming
+- **Blockchain domain**: Định nghĩa các interfaces và contract interactions
+- **Wallet domain**: Triển khai logic quản lý stake cho người dùng VIP
+- **Mối liên hệ**: Wallet gọi các phương thức từ Blockchain để thực hiện stake và farm
+
+### Bridge Tokens
+- **Blockchain domain**: Cung cấp BridgeInterface và các triển khai cụ thể
+- **Wallet domain**: Cung cấp UI và flows cho người dùng thực hiện bridge
+- **Mối liên hệ**: Wallet gọi bridge_tokens từ Blockchain để thực hiện bridge
+
+### Contract Interactions
+- **Blockchain domain**: Định nghĩa TokenInterface và Smart Contract Interfaces
+- **Wallet domain**: Triển khai ContractRegistry và các Contract Adapters
+- **Mối liên hệ**: Wallet gói các interface từ Blockchain vào các lớp tiện ích
+
+### Token và NFT Management
+- **Blockchain domain**: Cung cấp token validation, tier checking
+- **Wallet domain**: Quản lý NFT cho VIP, payment token cho subscription
+- **Mối liên hệ**: Wallet sử dụng blockchain để xác minh sở hữu token và NFT
+
+## 7. FLOW TƯƠNG TÁC CHÍNH GIỮA HAI DOMAINS
+
+### 1. Tạo và Quản lý Ví
+```
+SnipeBot -> Wallet (WalletManagerApi) -> Tạo Ví -> Blockchain (TokenInterface để check balance)
+```
+
+### 2. Đăng Ký VIP qua Staking
+```
+User -> Wallet (SubscriptionManager)
+     -> Wallet (StakingManager)
+     -> Blockchain (StakeManager)
+     -> Stake Transaction
+     -> Wallet: Update VIP Status
+```
+
+### 3. Bridge Token giữa các Chain
+```
+User -> Wallet (walletmanager::api)
+     -> Sign Transaction
+     -> Blockchain (DmdBscBridge::bridge_tokens)
+     -> Execute Bridge
+     -> Return Transaction Hash to Wallet
+```
+
+### 4. Farming và Staking
+```
+User -> Wallet (DefiApi)
+     -> Wallet (TokenManager -> validate token)
+     -> Blockchain (FarmManager hoặc StakeManager)
+     -> Add Liquidity/Stake
+     -> Return Status to Wallet
+```
+
+### 5. Check và Claim Rewards
+```
+User -> Wallet (SubscriptionManager)
+     -> Wallet (StakingManager)
+     -> Blockchain (StakeManager::claim_rewards)
+     -> Distribution Transaction
+     -> Return to Wallet and Update User Status
+```
+
+## 8. CÁC THÔNG TIN KHÁC
+
+### Cơ chế Đồng bộ hóa và Cache
+- Cả hai domain đều sử dụng RwLock cho thread safety
+- Wallet triển khai cache có TTL trong các providers
+- Blockchain định nghĩa StakePoolCache và các cơ chế cache khác
+- Wallet mở rộng cache với cleanup_expired_caches
+
+### Error Handling
+- Blockchain định nghĩa các error types chuyên biệt cho từng chức năng
+- Wallet wrap các errors từ Blockchain và thêm context
+- Chain lỗi: Blockchain Error -> Wallet Error -> UI Error
+
+### Security & Validation
+- Blockchain quản lý validation cho các địa chỉ token và blockchain
+- Wallet thêm các lớp validation cho dữ liệu người dùng
+- Security checks được thực hiện ở cả hai domain
+
+### Logging & Metrics
+- Cả hai domain đều sử dụng tracing crate cho logging
+- Wallet thêm chi tiết user context vào logs
+- Performance metrics được thu thập ở cả hai domain
+
+# =========================
+# Cập nhật mapping hệ thống (2024-08-06)
+# =========================
+
+- [wallet/src/users/free_user/auth.rs]
+  - Khi khởi tạo user mới (register_user): sinh JWT_SECRET ngẫu nhiên, lưu vào trường jwt_secret của user (MongoDB).
+  - Thêm hàm output_jwt_secret: cho phép xuất JWT_SECRET nếu user nhập đúng wallet_address, password, email.
+  - Yêu cầu struct FreeUserData có các trường: jwt_secret, email, password_hash, và hàm verify_password.
+
+- [wallet/src/users/free_user/types.rs]
+  - Đảm bảo struct FreeUserData có trường jwt_secret: Option<String>, email: Option<String>, password_hash: String.
+
+- [wallet/src/users/role_admin.rs]
+  - Định nghĩa struct RoleAdmin, enum UserRole, hàm load_from_env để khởi tạo admin từ biến môi trường.
+
+- [RoleUser_database.yaml]
+  - File cấu hình database cho các role user (free, premium, vip, admin) ở thư mục gốc.
+  - Định nghĩa uri, database, collections cho MongoDB.
+
+- [README.md]
+  - Cập nhật hướng dẫn về flow sinh/lưu JWT_SECRET, cách xuất key cho node depin, và cấu hình database.
+
+# Ngày cập nhật: 2024-08-06
