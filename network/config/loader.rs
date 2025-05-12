@@ -412,7 +412,7 @@ impl ConfigLoader {
                                     path: path_str.to_string(),
                                     algorithm: algorithm.to_string(),
                                     limit: limit as u32,
-                                    window: window,
+                                    window,
                                     action: action.to_string(),
                                 });
                             }

@@ -1,7 +1,7 @@
 use crate::core::engine::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
-use libp2p::{identity, PeerId, Swarm, Multiaddr, swarm::SwarmEvent, core::upgrade};
+use libp2p::{identity, PeerId};
 use libp2p::noise;
 use libp2p::tcp;
 use libp2p::yamux;
@@ -15,8 +15,6 @@ use thiserror::Error;
 use uuid;
 use tokio::time::sleep;
 use tokio::task::JoinHandle;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::collections::HashSet;
 use tokio::sync::mpsc;
 use serde::{Serialize, Deserialize};
 use std::any::Any;
@@ -379,6 +377,7 @@ impl Libp2pPlugin {
     }
 }
 
+#[async_trait::async_trait]
 impl Plugin for Libp2pPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -388,7 +387,6 @@ impl Plugin for Libp2pPlugin {
         PluginType::Libp2p
     }
     
-    #[async_trait::async_trait]
     async fn start(&self) -> Result<bool, PluginError> {
         if self.name.is_empty() {
             return Err(PluginError::ConfigError("Plugin name is empty".to_string()));
@@ -419,7 +417,6 @@ impl Plugin for Libp2pPlugin {
         Ok(true)
     }
     
-    #[async_trait::async_trait]
     async fn stop(&self) -> Result<(), PluginError> {
         info!("[Libp2p] Stopping plugin");
         // Attempt to shutdown service gracefully
@@ -452,7 +449,6 @@ impl Plugin for Libp2pPlugin {
         Ok(())
     }
 
-    #[async_trait::async_trait]
     async fn check_health(&self) -> Result<bool, PluginError> {
         Ok(true)
     }

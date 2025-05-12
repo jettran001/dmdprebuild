@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 /// Trạng thái monitor task toàn cục, đảm bảo thread safety tuyệt đối khi drop nhiều pool đồng thời.
 fn get_pool_monitor_flag() -> &'static Arc<AtomicBool> {
-    use std::sync::OnceLock;
+    use tokio::sync::OnceCellLock;
     static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
     FLAG.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
@@ -21,7 +21,7 @@ fn get_pool_monitor_flag() -> &'static Arc<AtomicBool> {
 /// Điều này ngăn chặn sự trùng lặp trong việc log tài nguyên và đảm bảo giám sát nhất quán bộ nhớ và file descriptors.
 ///
 /// # Thread Safety
-/// - Sử dụng tokio::sync::Mutex thay vì std::sync::Mutex để đảm bảo an toàn trong async context
+/// - Sử dụng tokio::sync::Mutex thay vì tokio::sync::Mutex để đảm bảo an toàn trong async context
 /// - Các method hỗ trợ async và sử dụng lock không chặn luồng executor
 ///
 /// # Examples
@@ -45,7 +45,7 @@ pub struct ConnectionPool<T: Send + Sync + Clone + 'static> {
     /// JoinHandle cho cleanup task (nếu cần join khi drop)
     cleanup_handle: Option<JoinHandle<()>>,
     /// Callback để đóng kết nối (nếu có)
-    connection_closer: Option<Box<dyn Fn(&T) -> () + Send + Sync>>,
+    connection_closer: Option<Box<dyn Fn(&T) + Send + Sync>>,
 }
 
 impl<T: Send + Sync + Clone + 'static> Clone for ConnectionPool<T> {
@@ -212,7 +212,8 @@ pub struct RedisConnectionPool {
     circuit_breaker: Arc<TokioMutex<CircuitBreaker>>,
 }
 
-pub trait ConnectionValidator<T> {
+/// Trait chung để kiểm tra kết nối còn active không
+pub trait ConnectionValidator<T>: Send + Sync {
     /// Kiểm tra kết nối còn active không
     /// 
     /// # Arguments
@@ -224,10 +225,35 @@ pub trait ConnectionValidator<T> {
     fn check_connection_active(&self, conn: &T) -> Option<bool>;
 }
 
-impl<T: Send + Sync + Clone + 'static> ConnectionValidator<T> for ConnectionPool<T> {
-    fn check_connection_active(&self, _conn: &T) -> Option<bool> {
-        // Default implementation trả về None (không thể kiểm tra)
-        None
+/// Trait chuyên biệt cho Redis, riêng biệt để tránh xung đột với trait ConnectionValidator generic
+pub trait RedisConnectionValidator {
+    /// Kiểm tra kết nối Redis còn active không
+    /// 
+    /// # Arguments
+    /// * `conn` - Kết nối Redis cần kiểm tra
+    /// 
+    /// # Returns
+    /// * `Some(bool)` - true nếu kết nối còn active, false nếu không
+    /// * `None` - Nếu không thể kiểm tra
+    fn check_redis_connection_active(&self, conn: &Arc<dyn RedisService>) -> Option<bool>;
+}
+
+// Implement ConnectionValidator cho ConnectionPool
+impl<T> ConnectionValidator<T> for ConnectionPool<T>
+where 
+    T: Clone + Send + Sync + 'static,
+{
+    fn check_connection_active(&self, conn: &T) -> Option<bool> {
+        // Kiểm tra kết nối còn active không, mặc định là active
+        Some(true)
+    }
+}
+
+// Implement RedisConnectionValidator cho ConnectionPool chuyên biệt với Redis
+impl RedisConnectionValidator for ConnectionPool<Arc<dyn RedisService>> {
+    fn check_redis_connection_active(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
+        // Sử dụng implementation cụ thể cho RedisService
+        self.check_connection_active_internal(conn)
     }
 }
 
@@ -567,16 +593,16 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
         Ok(())
     }
     
-    /// Đăng ký callback để đóng kết nối khi cần.
+    /// Đăng ký callback để đóng kết nối khi cần thiết.
     ///
     /// # Arguments
-    /// * `closer` - Closure để đóng kết nối, nhận tham chiếu đến kết nối
+    /// * `closer` - Closure dùng để đóng kết nối
     ///
     /// # Type Parameters
-    /// * `F` - Closure type thỏa mãn Fn(&T) -> () + Send + Sync + 'static
+    /// * `F` - Closure type thỏa mãn Fn(&T) + Send + Sync + 'static
     pub fn register_connection_closer<F>(&mut self, closer: F)
     where
-        F: Fn(&T) -> () + Send + Sync + 'static,
+        F: Fn(&T) + Send + Sync + 'static,
     {
         self.connection_closer = Some(Box::new(closer));
     }
@@ -898,12 +924,12 @@ impl RedisConnectionPool {
     /// - An toàn khi gọi từ nhiều thread
     pub fn shutdown(&self) {
         // Clone các thành phần cần thiết để tránh borrowed data escapes
-        let self_clone = self.clone();
+        let self_inner = self.inner.clone();
         
         // Tạo một task mới để thực hiện shutdown
         tokio::spawn(async move {
             // Dọn dẹp kết nối trong pool
-            match self_clone.force_close_all().await {
+            match self_inner.force_close_all().await {
                 Ok(_) => debug!("[RedisPool] Pool shutdown completed successfully"),
                 Err(e) => warn!("[RedisPool] Error during pool shutdown: {}", e),
             }
@@ -922,12 +948,5 @@ impl RedisConnectionPool {
         self.max_retries = max_retries;
         self.retry_delay_ms = retry_delay_ms;
         self
-    }
-}
-
-impl ConnectionValidator<Arc<dyn RedisService>> for ConnectionPool<Arc<dyn RedisService>> {
-    fn check_connection_active(&self, conn: &Arc<dyn RedisService>) -> Option<bool> {
-        // Sử dụng implementation cụ thể cho RedisService
-        self.check_connection_active_internal(conn)
     }
 }

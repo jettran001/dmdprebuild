@@ -109,6 +109,11 @@ impl RedisService for DefaultRedisService {
         info!("[DefaultRedisService] Ping Redis server (basic health check)");
         Ok(())
     }
+    
+    async fn reconnect(&self) -> Result<(), ServiceError> {
+        info!("[DefaultRedisService] Reconnecting to Redis server");
+        Ok(())
+    }
 }
 
 /// Default implementation của IpfsService

@@ -335,6 +335,67 @@ impl From<anyhow::Error> for NetworkError {
 // Implement Reject trait cho NetworkError để có thể sử dụng với warp::reject::custom
 impl Reject for NetworkError {}
 
+// Thêm implementation From<warp::Rejection> for NetworkError
+impl From<warp::Rejection> for NetworkError {
+    fn from(rejection: warp::Rejection) -> Self {
+        // Thử extract NetworkError từ Rejection nếu đó là custom rejection
+        if let Some(network_err) = rejection.find::<NetworkError>() {
+            return network_err.clone();
+        }
+        
+        // Xử lý các loại rejection chuẩn
+        if rejection.is_not_found() {
+            NetworkError::NotFoundError("Resource not found".to_string())
+        } else if rejection.find::<warp::reject::MethodNotAllowed>().is_some() {
+            NetworkError::ValidationError("Method not allowed".to_string())
+        } else if rejection.find::<warp::reject::MissingHeader>().is_some() {
+            NetworkError::ValidationError("Missing required header".to_string())
+        } else if rejection.find::<warp::reject::InvalidQuery>().is_some() {
+            NetworkError::ValidationError("Bad request: invalid query".to_string())
+        } else if rejection.find::<warp::reject::InvalidHeader>().is_some() {
+            NetworkError::ValidationError("Bad request: invalid header".to_string())
+        } else if rejection.find::<warp::reject::PayloadTooLarge>().is_some() {
+            NetworkError::ValidationError("Payload too large".to_string())
+        } else if rejection.find::<warp::reject::UnsupportedMediaType>().is_some() {
+            NetworkError::ValidationError("Unsupported media type".to_string())
+        } else {
+            NetworkError::UnknownError("Unknown rejection reason".to_string())
+        }
+    }
+}
+
+// Implement Clone cho NetworkError
+impl Clone for NetworkError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::AuthError(s) => Self::AuthError(s.clone()),
+            Self::JwtError(s) => Self::JwtError(s.clone()),
+            Self::ApiKeyError(s) => Self::ApiKeyError(s.clone()),
+            Self::ConfigError(s) => Self::ConfigError(s.clone()),
+            Self::ConnectionError(s) => Self::ConnectionError(s.clone()),
+            Self::DatabaseError(s) => Self::DatabaseError(s.clone()),
+            Self::EngineError(s) => Self::EngineError(s.clone()),
+            Self::PluginError(s) => Self::PluginError(s.clone()),
+            Self::IoError(s) => Self::IoError(s.clone()),
+            Self::JsonError(s) => Self::JsonError(s.clone()),
+            Self::ParseError(s) => Self::ParseError(s.clone()),
+            Self::RateLimitError(s) => Self::RateLimitError(s.clone()),
+            Self::ServiceError(s) => Self::ServiceError(s.clone()),
+            Self::TimeoutError(s) => Self::TimeoutError(s.clone()),
+            Self::ValidationError(s) => Self::ValidationError(s.clone()),
+            Self::WebRtcError(s) => Self::WebRtcError(s.clone()),
+            Self::Libp2pError(s) => Self::Libp2pError(s.clone()),
+            Self::PoolError(s) => Self::PoolError(s.clone()),
+            Self::NotFoundError(s) => Self::NotFoundError(s.clone()),
+            Self::PermissionDeniedError(s) => Self::PermissionDeniedError(s.clone()),
+            Self::ProtocolError(s) => Self::ProtocolError(s.clone()),
+            Self::ResourceError(s) => Self::ResourceError(s.clone()),
+            Self::UnknownError(s) => Self::UnknownError(s.clone()),
+            Self::EventError(s) => Self::EventError(s.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

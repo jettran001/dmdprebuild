@@ -6,6 +6,9 @@ use std::time::Duration;
 use tokio::time::timeout;
 use std::future::Future;
 use tracing::{info, warn, error, debug};
+use std::sync::Arc;
+use std::any::Any;
+use std::sync::atomic::AtomicUsize;
 
 /// Cấu hình cho GrpcPlugin
 pub struct GrpcConfig {
@@ -33,6 +36,8 @@ impl Default for GrpcConfig {
 pub struct GrpcPlugin {
     name: String,
     config: GrpcConfig,
+    addr: String,
+    server: Option<Arc<tokio::sync::Mutex<()>>>, // Mock server handle
 }
 
 impl GrpcPlugin {
@@ -40,6 +45,8 @@ impl GrpcPlugin {
         Self {
             name: "grpc".to_string(),
             config: GrpcConfig::default(),
+            addr: "0.0.0.0:50051".to_string(), // Địa chỉ mặc định
+            server: None,
         }
     }
     
@@ -48,7 +55,23 @@ impl GrpcPlugin {
         Self {
             name: "grpc".to_string(),
             config,
+            addr: "0.0.0.0:50051".to_string(), // Địa chỉ mặc định
+            server: None,
         }
+    }
+
+    /// Thiết lập địa chỉ máy chủ
+    pub fn with_addr(mut self, addr: String) -> Self {
+        self.addr = addr;
+        self
+    }
+    
+    /// Khởi động gRPC server
+    pub async fn start_server(&self) -> Result<(), String> {
+        info!("[GrpcPlugin] Starting gRPC server on {}", self.addr);
+        // Mô phỏng việc khởi động server
+        // Trong triển khai thực tế, đây sẽ là logic khởi động Tonic gRPC server
+        Ok(())
     }
     
     /// Validate input data nếu nhận từ external (API, user, ...)
@@ -150,6 +173,7 @@ impl GrpcPlugin {
     }
 }
 
+#[async_trait]
 impl Plugin for GrpcPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -159,18 +183,47 @@ impl Plugin for GrpcPlugin {
         PluginType::Grpc
     }
     
-    fn start(&self) -> Result<bool, PluginError> {
-        // Mock: always return Ok(true)
+    async fn start(&self) -> Result<bool, PluginError> {
+        info!("[GrpcPlugin] Starting plugin");
+        
+        // Mô phỏng việc khởi động gRPC server (thay vì gọi start_server)
+        info!("[GrpcPlugin] Starting gRPC server on {}", self.addr);
+        
+        // Đây là logic mô phỏng, trong triển khai thực tế sẽ khởi động Tonic gRPC server
+        // và lưu server handle vào self.server
+        
+        // Giả lập thành công
+        info!("[GrpcPlugin] Successfully started gRPC server on {}", self.addr);
         Ok(true)
     }
     
-    fn stop(&self) -> Result<(), PluginError> {
-        // Mock: do nothing
-        Ok(())
+    async fn stop(&self) -> Result<(), PluginError> {
+        info!("[GrpcPlugin] Stopping plugin");
+        // Dừng gRPC server nếu đang chạy
+        if self.server.is_some() {
+            // Thực hiện shutdown
+            info!("[GrpcPlugin] Shutting down gRPC server");
+            // Giả lập shutdown thành công
+            Ok(())
+        } else {
+            // Trường hợp server chưa khởi động
+            debug!("[GrpcPlugin] No running server to stop");
+            Ok(())
+        }
     }
     
-    fn check_health(&self) -> Result<bool, PluginError> {
-        Ok(true)
+    async fn check_health(&self) -> Result<bool, PluginError> {
+        // Kiểm tra trạng thái gRPC server
+        if self.server.is_some() {
+            // Giả lập health check
+            Ok(true)
+        } else {
+            Err(PluginError::Other("Server not running".to_string()))
+        }
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -314,12 +367,17 @@ mod tests {
             ..Default::default()
         });
         
-        // Operation that fails twice then succeeds
-        let mut attempts = 0;
+        // Sử dụng Arc<AtomicUsize> để đếm lần thử lại một cách an toàn trong closure
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        
         let result = plugin.call_with_retry_and_timeout(
             || async {
-                attempts += 1;
-                if attempts <= 2 {
+                // Tăng biến đếm theo cách thread-safe
+                attempts_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let current = attempts_clone.load(std::sync::atomic::Ordering::SeqCst);
+                
+                if current <= 2 {
                     Err::<&str, _>("temporary failure")
                 } else {
                     Ok("success")
@@ -332,7 +390,7 @@ mod tests {
         
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "success");
-        assert_eq!(attempts, 3); // Should have attempted 3 times
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3); // Should have attempted 3 times
     }
 }
 

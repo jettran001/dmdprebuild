@@ -8,56 +8,65 @@
 //! # Cấu trúc Domain (thực tế)
 //! 
 //! network/
-//! ├── core/           # Engine, trait, logic chính
-//! │   ├── engine.rs   # NetworkEngine, Plugin, PluginType, PluginId, PluginStatus, NetworkMessage, MessageType
-//! │   └── utils.rs    # Utilities cho core
-//! ├── config/         # Cấu hình, validate, error, loader, types
-//! │   ├── mod.rs      # NetworkConfig tổng hợp, validate, load từ file/env
-//! │   ├── core.rs     # NetworkCoreConfig (cấu hình lõi cho engine)
-//! │   ├── types.rs    # Các types cấu hình plugin/service
-//! │   ├── loader.rs   # ConfigLoader: tải, validate, hợp nhất config
-//! │   └── error.rs    # ConfigError tập trung
-//! ├── infra/          # Trait chuẩn hóa, mock, pool, profile
-//! │   ├── service_traits.rs    # Định nghĩa trait chuẩn hóa cho service (Messaging, Node, Plugin, v.v.)
-//! │   ├── service_mocks.rs     # Mock service cho test/dev
-//! │   ├── redis_pool.rs        # Redis pool abstraction
-//! │   └── toml_profile.rs      # Đọc profile từ file toml
-//! ├── plugins/        # Các plugin mạng (implement trait Plugin)
-//! │   ├── pool.rs     # Connection pooling plugin
-//! │   ├── grpc.rs     # gRPC plugin
-//! │   ├── wasm.rs     # WebAssembly plugin
-//! │   ├── libp2p.rs   # P2P plugin
-//! │   ├── webrtc.rs   # WebRTC plugin
-//! │   ├── ws.rs       # WebSocket plugin
-//! │   ├── redis.rs    # Redis plugin
-//! │   └── libp2p_transport_example.rs # Ví dụ transport cho libp2p
-//! ├── security/       # Bảo mật: xác thực, validation, rate limit, JWT, token
-//! │   ├── input_validation.rs  # Trait Validator, Sanitizer, các hàm check_xss, check_sql_injection, validate input
-//! │   ├── auth_middleware.rs   # AuthService, AuthError, UserRole, JWT, API key, Simple token, middleware cho warp
-//! │   ├── api_validation.rs    # ApiValidator, FieldRule, các rule validation cho API endpoint
-//! │   ├── rate_limiter.rs      # RateLimiter, RateLimitConfig, các thuật toán giới hạn tốc độ
-//! │   ├── jwt.rs               # JwtService, JwtConfig
-//! │   └── token.rs             # TokenService, TokenConfig
-//! ├── node_manager/   # Quản lý node (Master/Slave/Discovery/Scheduler)
-//! │   ├── master.rs           # PartitionedMasterNodeService, trait, logic master node
-//! │   ├── slave.rs            # SlaveNodeService, trait, logic slave node
-//! │   ├── discovery.rs        # DefaultDiscoveryService, node discovery
-//! │   ├── scheduler.rs        # DefaultSchedulerService, task scheduling
-//! │   ├── node_classifier.rs  # Phân loại node
-//! │   └── execution_adapter.rs# Adapter cho thực thi task
-//! ├── messaging/      # Truyền tin (MQTT, Kafka)
-//! │   ├── mqtt.rs     # MessagingMqttService, implement trait, logic MQTT
-//! │   └── kafka.rs    # MessagingKafkaService, implement trait, logic Kafka
-//! ├── dispatcher/     # Điều phối task, event
-//! │   ├── dispatcher.rs      # Task dispatcher, trait, logic điều phối
-//! │   └── event_router.rs    # Event router, định tuyến sự kiện
-//! ├── logs/           # Logging, lưu trữ log
-//! │   └── mod.rs      # Logging utilities, tracing
-//! ├── errors.rs       # NetworkError, error tập trung toàn domain
-//! ├── api.rs          # Định nghĩa các route API, mapping tới service/engine
-//! ├── main.rs         # Entry point khởi động network engine
-//! ├── lib.rs          # Export các module chính
-//! └── manifest.rs     # Manifest mô tả domain
+//! ├── core/
+//! │   ├── engine.rs
+//! │   ├── utils.rs
+//! │   └── mod.rs
+//! ├── config/
+//! │   ├── core.rs
+//! │   ├── loader.rs
+//! │   ├── types.rs
+//! │   ├── error.rs
+//! │   └── mod.rs
+//! ├── infra/
+//! │   ├── redis_pool.rs
+//! │   ├── service_mocks.rs
+//! │   ├── service_traits.rs
+//! │   ├── toml_profile.rs
+//! │   ├── nginx.conf
+//! │   └── mod.rs
+//! ├── plugins/
+//! │   ├── wasm.rs
+//! │   ├── libp2p.rs
+//! │   ├── grpc.rs
+//! │   ├── webrtc.rs
+//! │   ├── redis.rs
+//! │   ├── ws.rs
+//! │   ├── pool.rs
+//! │   ├── libp2p_transport_example.rs
+//! │   └── mod.rs
+//! ├── security/
+//! │   ├── rate_limiter.rs
+//! │   ├── auth_middleware.rs
+//! │   ├── input_validation.rs
+//! │   ├── api_validation.rs
+//! │   ├── token.rs
+//! │   ├── jwt.rs
+//! │   ├── MERGE_PLAN.md
+//! │   └── mod.rs
+//! ├── node_manager/
+//! │   ├── discovery.rs
+//! │   ├── execution_adapter.rs
+//! │   ├── master.rs
+//! │   ├── node_classifier.rs
+//! │   ├── scheduler.rs
+//! │   ├── slave.rs
+//! │   └── mod.rs
+//! ├── messaging/
+//! │   ├── kafka.rs
+//! │   ├── mqtt.rs
+//! │   └── mod.rs
+//! ├── dispatcher/
+//! │   ├── dispatcher.rs
+//! │   ├── event_router.rs
+//! │   └── mod.rs
+//! ├── logs/
+//! │   └── mod.rs
+//! ├── api.rs
+//! ├── errors.rs
+//! ├── main.rs
+//! ├── lib.rs
+//! └── manifest.rs
 //!
 //! # Mô tả chức năng từng module
 //!

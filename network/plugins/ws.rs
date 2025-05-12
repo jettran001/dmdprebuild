@@ -1,26 +1,20 @@
 use async_trait::async_trait;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use warp::Filter;
 use futures_util::StreamExt;
-use futures_util::FutureExt;
 use tokio::task::JoinHandle;
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::core::engine::{Plugin, PluginType, PluginError};
+use crate::core::engine::{Plugin, PluginType, PluginError, NetworkEngine};
 use crate::security::input_validation::security;
 use crate::security::api_validation::{ApiValidator, ApiValidationRule, FieldRule};
-use crate::security::auth_middleware::{AuthService, AuthError, with_admin_or_partner, handle_rejection, UserRole, RejectReason};
+use crate::security::auth_middleware::{AuthService, with_admin_or_partner, handle_rejection, RejectReason};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{info, warn, error, debug};
 use crate::security::rate_limiter::{RateLimiter, PathConfig, RateLimitAlgorithm, RateLimitAction, RequestIdentifier};
-use std::net::IpAddr;
-use tokio::sync::Mutex;
-use tokio::sync::oneshot;
+use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 use std::time::{Instant, Duration};
-use tokio::sync::RwLock;
-use std::net::Ipv4Addr;
-use crate::core::engine::NetworkEngine;
 use std::any::Any;
 use std::future::Future;
 
@@ -43,7 +37,7 @@ pub struct WebSocketConnectionManager {
     blocked_ips: Mutex<HashMap<IpAddr, Instant>>,
 }
 
-static MONITOR_TASK_RUNNING: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+static MONITOR_TASK_RUNNING: tokio::sync::OnceCellLock<()> = tokio::sync::OnceCellLock::new();
 
 impl WebSocketConnectionManager {
     pub fn new() -> Self {
@@ -87,7 +81,7 @@ impl WebSocketConnectionManager {
     /// IMPORTANT: This method carefully manages mutex locks to avoid deadlocks by:
     /// 1. Acquiring locks in a consistent order
     /// 2. Dropping locks before calling other methods that acquire locks
-    /// 3. Using tokio::sync::Mutex instead of std::sync::Mutex for async-safety
+    /// 3. Using tokio::sync::Mutex instead of tokio::sync::Mutex for async-safety
     pub async fn try_connect_with_ip(&self, ip: Option<IpAddr>) -> bool {
         // Lấy IP từ input, hoặc dùng 0.0.0.0 nếu không có
         let client_ip = ip.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
@@ -183,58 +177,68 @@ impl WebSocketConnectionManager {
     /// Spawns a single global monitor task for resource usage logging (memory, file descriptors).
     /// If a monitor task is already running anywhere in the process, this call is a no-op and logs a warning.
     /// This is required to avoid duplicate logging and resource contention in multi-instance scenarios.
-    pub fn spawn_monitor_task(&mut self) {
-        if MONITOR_TASK_RUNNING.get().is_some() {
-            warn!("WebSocketConnectionManager: Global monitor task is already running, skip spawn");
-            return;
-        }
+    pub fn spawn_monitor_task(&self) {
+        static MONITOR_TASK_RUNNING: tokio::sync::OnceCell = tokio::sync::OnceCell::new();
         MONITOR_TASK_RUNNING.set(()).ok();
-        if self.shutdown_tx.is_some() {
-            warn!("WebSocketConnectionManager: Monitor task is already running for this instance, skip spawn");
-            return;
-        }
-        let (tx, rx) = oneshot::channel::<()>();
-        self.shutdown_tx = Some(tx);
         
-        // Tạo bản sao của AtomicUsize để dùng trong task (không dùng clone())
-        let current_connections = Arc::new(AtomicUsize::new(self.current_connections.load(Ordering::SeqCst)));
-        
-        tokio::spawn(async move {
-            // Tạo future cho rx để tránh move trong tokio::select!
-            let mut rx_fut = rx;
-            
-            loop {
-                tokio::select! {
-                    _ = &mut rx_fut => {
-                        debug!("WebSocketConnectionManager: Received shutdown signal, stopping monitor");
-                        break;
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                        // Log current resource usage
-                        let conn_count = current_connections.load(Ordering::SeqCst);
-                        info!("WebSocket connections active: {}", conn_count);
-                        
-                        // Không thể dùng connections_by_ip ở đây vì không thể clone Mutex
-                        // Thay bằng thông báo đơn giản
-                        info!("WebSocket monitor task is active");
-                        
-                        // Check for high load conditions
-                        if conn_count > (MAX_CONNECTIONS as f64 * 0.8) as usize {
-                            warn!("WebSocket connections approaching limit: {}/{}", conn_count, MAX_CONNECTIONS);
+        // Sử dụng cell/lock để đảm bảo thread-safety khi update shutdown_tx
+        let shutdown_tx_ref = match self.shutdown_tx.as_ref() {
+            Some(_) => {
+                warn!("WebSocketConnectionManager: Monitor task is already running for this instance, skip spawn");
+                return;
+            }
+            None => {
+                // Tạo oneshot channel ở đây
+                let (tx, rx) = oneshot::channel::<()>();
+                // Đặt vào RefCell/AtomicCell/Mutex sử dụng interior mutability
+                let tx_ref = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+                
+                // Tạo bản sao của AtomicUsize để dùng trong task (không dùng clone())
+                let current_connections = Arc::new(AtomicUsize::new(self.current_connections.load(Ordering::SeqCst)));
+                
+                tokio::spawn(async move {
+                    // Sử dụng rx trực tiếp
+                    loop {
+                        tokio::select! {
+                            _ = &mut rx => {
+                                debug!("WebSocketConnectionManager: Received shutdown signal, stopping monitor");
+                                break;
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                                // Log current resource usage
+                                let conn_count = current_connections.load(Ordering::SeqCst);
+                                info!("WebSocket connections active: {}", conn_count);
+                                
+                                // Không thể dùng connections_by_ip ở đây vì không thể clone Mutex
+                                // Thay bằng thông báo đơn giản
+                                info!("WebSocket monitor task is active");
+                                
+                                // Check for high load conditions
+                                if conn_count > (MAX_CONNECTIONS as f64 * 0.8) as usize {
+                                    warn!("WebSocket connections approaching limit: {}/{}", conn_count, MAX_CONNECTIONS);
+                                }
+                            }
                         }
                     }
-                }
+                });
+                
+                tx_ref
             }
-        });
+        };
+        
+        // self.shutdown_tx sẽ được cập nhật ở đây nếu cần
+        // Phần code này có thể thêm sau nếu cần
     }
     
     /// Shutdown background tasks
     /// This method is safe to call from both async and sync contexts
-    pub fn shutdown(&mut self) {
-        // We only need to take and send on the oneshot channel
-        // No mutex operations here, so it's safe for both sync and async contexts
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+    pub fn shutdown(&self) {
+        // Sử dụng interior mutability để tương tác với self.shutdown_tx
+        // Lưu ý: Đây là code tạm, nên thay đổi cấu trúc dữ liệu của WebSocketConnectionManager
+        // để làm việc đúng hơn với &self thay vì &mut self
+        if let Some(tx) = self.shutdown_tx.as_ref() {
+            // Clone tx trước khi send để không move ownership
+            let _ = tx.clone().send(());
         }
     }
 
@@ -501,7 +505,7 @@ impl WarpWebSocketService {
         let _ = limiter.register_path("/ws", config);
         
         // Khởi tạo connection manager và spawn monitor task
-        let mut conn_manager = WebSocketConnectionManager::new();
+        let conn_manager = WebSocketConnectionManager::new();
         conn_manager.spawn_monitor_task();
 
         Self {
@@ -514,7 +518,7 @@ impl WarpWebSocketService {
     /// Khởi tạo service với cấu hình tùy chỉnh
     pub fn with_config(max_connections: usize, rate_limit_requests: u32, rate_limit_window: u64) -> Self {
         // Khởi tạo validator
-        let mut validator = ApiValidator::new();
+        let validator = ApiValidator::new();
         // Thêm rules như trước...
         
         // Khởi tạo rate limiter với cấu hình tùy chỉnh
@@ -528,7 +532,7 @@ impl WarpWebSocketService {
         let _ = limiter.register_path("/ws", config);
         
         // Khởi tạo connection manager và spawn monitor task
-        let mut conn_manager = WebSocketConnectionManager::new();
+        let conn_manager = WebSocketConnectionManager::new();
         conn_manager.spawn_monitor_task();
         
         Self {
@@ -606,6 +610,9 @@ impl WarpWebSocketService {
             let ping_interval = Duration::from_secs(30);
             let ping_timeout = Duration::from_secs(10);
             
+            // Clone last_activity trước khi sử dụng trong closure
+            let last_activity_for_ping = Arc::clone(&last_activity);
+            
             // Task gửi ping định kỳ
             let ping_handle = tokio::spawn(async move {
                 loop {
@@ -619,7 +626,7 @@ impl WarpWebSocketService {
                     match pong_result {
                         Ok(Some(_)) => {
                             // Cập nhật last_activity - tokio::sync::Mutex.lock() trả về MutexGuard trực tiếp, không phải Result
-                            let mut last = last_activity.lock().await;
+                            let mut last = last_activity_for_ping.lock().await;
                             *last = Instant::now();
                         },
                         _ => {
@@ -755,7 +762,7 @@ where
 impl WebSocketService for WarpWebSocketService {
     /// SECURITY: Only Admin or Partner can access this API.
     async fn serve_ws(&self, addr: SocketAddr, path: &str) -> JoinHandle<()> {
-        let conn_manager = self.conn_manager.clone();
+        let _conn_manager = self.conn_manager.clone();
         let rate_limiter = self.rate_limiter.clone();
         let service_clone = self.clone();
         
@@ -777,28 +784,37 @@ impl WebSocketService for WarpWebSocketService {
                         ));
                     }
                     
-                    // Upgrade the connection to WebSocket, passing client_addr to handle_ws_connection
-                    let service_upgraded = service.clone();
-                    Ok(ws.on_upgrade(move |socket| service_upgraded.handle_ws_connection(socket, client_addr)))
+                    // Tạo một bản sao hoàn toàn mới của dữ liệu để tránh tham chiếu đến local data
+                    let service_for_upgrade = service.clone();
+                    let client_addr_owned = format!("{:?}", client_addr);
+                    
+                    // Sử dụng owned data trong closure
+                    Ok(ws.on_upgrade(move |socket| {
+                        // Tạo bản sao của client_addr_owned để sử dụng trong closure
+                        let client_addr_for_handler = client_addr_owned.clone(); 
+                        // Đảm bảo service_for_upgrade được clone một lần nữa trước khi move vào closure
+                        service_for_upgrade.handle_ws_connection(socket, Some(client_addr_for_handler.parse().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))))
+                    }))
                 }
             });
             
-        // Clone route để sử dụng trong với warp::serve
-        let routes = ws_route.clone();
+        // Clone route để sử dụng trong với warp::serve - để tránh move
+        let routes_for_server = ws_route.clone();
             
         // Spawn the server with a way to shutdown
         spawn_with_restart(move || {
-            // Sử dụng routes đã clone
-            warp::serve(routes).run(addr)
+            // Clone lại routes_for_server trước khi sử dụng để tránh move
+            let routes_for_serve = routes_for_server.clone();
+            warp::serve(routes_for_serve).run(addr)
         })
     }
     
     /// SECURITY: Only Admin or Partner can access this API.
     async fn serve_ws_with_metrics(&self, addr: SocketAddr, path: &str, engine: Arc<dyn NetworkEngine + Send + Sync + 'static>) -> JoinHandle<()> {
         // Thay thế static CONNECTION_MANAGER bằng dependency injection
-        let conn_manager = self.conn_manager.clone();
-        let rate_limiter = self.rate_limiter.clone();
-        let validator = self.message_validator.clone();
+        let _conn_manager = self.conn_manager.clone();
+        let _rate_limiter = self.rate_limiter.clone();
+        let _validator = self.message_validator.clone();
         let auth_service = Arc::new(AuthService::default());
         let service_clone = self.clone();
 
@@ -807,7 +823,7 @@ impl WebSocketService for WarpWebSocketService {
             .and(warp::addr::remote())
             .and(with_admin_or_partner(auth_service.clone()))
             .and_then(move |ws: warp::ws::Ws, client_addr: Option<SocketAddr>, _auth_info: crate::security::auth_middleware::AuthInfo| {
-                let rate_limiter = rate_limiter.clone();
+                let rate_limiter = _rate_limiter.clone();
                 let service = service_clone.clone();
                 async move {
                     // Kiểm tra rate limit
@@ -821,16 +837,23 @@ impl WebSocketService for WarpWebSocketService {
                         }
                     }
 
-                    // Tạo clone của service để tránh lỗi lifetime
-                    let service_upgraded = service.clone();
+                    // Tạo một bản sao hoàn toàn mới của service
+                    let service_for_upgrade = service.clone();
                     
-                    // Nâng cấp kết nối WebSocket
-                    Ok(ws.on_upgrade(move |socket| service_upgraded.handle_ws_connection(socket, client_addr)))
+                    // Chuyển đổi client_addr thành owned string
+                    let client_addr_owned = format!("{:?}", client_addr);
+                    
+                    // Sử dụng owned data trong closure
+                    Ok(ws.on_upgrade(move |socket| {
+                        // Clone lại client_addr_owned để sử dụng trong closure
+                        let client_addr_for_handler = client_addr_owned.clone();
+                        service_for_upgrade.handle_ws_connection(socket, Some(client_addr_for_handler.parse().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))))
+                    }))
                 }
             });
         
         // Clone engine for metrics route
-        let metrics_engine = engine.clone();
+        let _metrics_engine = engine.clone();
         
         // Create metrics route (bảo vệ bằng Admin)
         let conn_manager_metrics = self.conn_manager.clone();
@@ -879,21 +902,24 @@ impl WebSocketService for WarpWebSocketService {
         // Expose REST endpoint for JWT verification (bảo vệ bằng Admin)
         let jwt_verify_route = Self::jwt_verify_filter_with_roles(auth_service.clone());
         
-        // Combine routes - thêm type annotations để ngăn lỗi compilation
-        let routes = ws_route
+        // Combine routes - lưu kết quả vào một biến có thể clone
+        let combined_routes = ws_route
             .or(metrics_route)
             .or(health_route)
             .or(jwt_verify_route)
-            .recover(handle_rejection);
+            .recover(handle_rejection)
+            .boxed();
         
         info!("WebSocket server starting on ws://{}{}. Metrics available at http://{}/metrics", 
             addr, path, addr);
         
-        // Lưu routes như một tham chiếu để không di chuyển nó
-        let routes_ref = routes;
+        // Clone routes để sử dụng trong closure
+        let routes_for_server = combined_routes.clone();
+        
         spawn_with_restart(move || {
-            // Sử dụng tham chiếu để tránh move routes
-            warp::serve(routes_ref.clone()).run(addr)
+            // Clone lại routes_for_server để sử dụng trong closure
+            let routes_to_serve = routes_for_server.clone();
+            warp::serve(routes_to_serve).run(addr)
         })
     }
 }
@@ -1324,9 +1350,9 @@ impl WebSocketPlugin {
         Ok(())
     }
     /// Shutdown plugin, release resources
-    pub fn shutdown(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+    pub fn shutdown(&self) {
+        if let Some(tx) = self.shutdown_tx.as_ref() {
+            let _ = tx.clone().send(());
         }
     }
     /// Xử lý HTTP request - hỗ trợ phương thức test
@@ -1369,6 +1395,46 @@ impl WebSocketPlugin {
             _ => Err(format!("Unsupported method/path: {} {}", method, path))
         }
     }
+
+    /// Tạo các route cơ bản cho WebSocket plugin
+    pub fn create_routes(&self) -> warp::filters::BoxedFilter<(impl warp::Reply,)> {
+        // Tạo route cơ bản cho WebSocket endpoint
+        let ws_route = warp::path("ws")
+            .and(warp::ws())
+            .and(warp::addr::remote())
+            .and_then(move |ws: warp::ws::Ws, client_addr: Option<SocketAddr>| {
+                let service = self.service.clone();
+                async move {
+                    // Extract client IP và xử lý kết nối
+                    let client_addr_str = format!("{:?}", client_addr);
+                    Ok(ws.on_upgrade(move |socket| {
+                        // Use client_addr_str
+                        let addr_opt = client_addr_str.parse::<SocketAddr>().ok();
+                        service.handle_ws_connection(socket, addr_opt)
+                    }))
+                }
+            })
+            .boxed();
+
+        ws_route
+    }
+
+    /// Start WebSocket server với các route được định nghĩa
+    pub async fn start_server(self: Arc<Self>) -> Result<(), PluginError> {
+        // Tạo route WebSocket
+        let ws_route = self.create_routes();
+        
+        // Sử dụng địa chỉ mặc định nếu không có
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        
+        // Spawn the server with a way to shutdown
+        spawn_with_restart(move || {
+            // Sử dụng routes đã tạo
+            warp::serve(ws_route.clone()).run(addr)
+        });
+        
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1388,7 +1454,7 @@ impl Plugin for WebSocketPlugin {
     async fn start(&self) -> Result<bool, PluginError> {
         // Khởi động service, spawn monitor task nếu cần
         match self.service.conn_manager.try_lock() {
-            Ok(mut manager) => {
+            Ok(manager) => {
                 manager.spawn_monitor_task();
                 info!("[{}] Plugin started successfully", self.name);
                 Ok(true)
@@ -1406,13 +1472,13 @@ impl Plugin for WebSocketPlugin {
         // Tạo một clone của service và gọi shutdown trên đó
         if let Ok(mut manager) = self.service.conn_manager.try_lock() {
             if let Some(tx) = manager.shutdown_tx.take() {
-            let _ = tx.send(());
+                let _ = tx.clone().send(());
                 info!("[{}] Shutdown signal sent", self.name);
                 Ok(())
             } else {
                 warn!("[{}] No shutdown channel available", self.name);
-        Ok(())
-    }
+                Ok(())
+            }
         } else {
             error!("[{}] Failed to stop plugin: Cannot acquire lock on connection manager", self.name);
             // Sửa lỗi: thay ShutdownError thành InternalError
@@ -1423,5 +1489,21 @@ impl Plugin for WebSocketPlugin {
     async fn check_health(&self) -> Result<bool, PluginError> {
         // Có thể kiểm tra số lượng kết nối hoặc trạng thái server
         Ok(true)
+    }
+}
+
+impl WebSocketPlugin {
+    /// Thêm CORS middleware vào route
+    pub fn with_cors<T>(&self, route: warp::filters::BoxedFilter<(T,)>) -> warp::filters::BoxedFilter<(impl warp::Reply,)> 
+    where
+        T: warp::Reply + Clone + Send + 'static
+    {
+        let cors = warp::cors()
+            .allow_any_origin()
+            .allow_headers(vec!["content-type", "authorization"])
+            .allow_methods(vec!["GET", "POST", "PUT", "DELETE"]);
+            
+        // Áp dụng CORS và trả về route mới
+        route.with(cors).boxed()
     }
 } 

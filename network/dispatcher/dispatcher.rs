@@ -183,7 +183,7 @@ impl Dispatcher {
         
         // Đặt biến kết quả và finally block để đảm bảo finish_task được gọi
         let mut result: Vec<Task> = Vec::new();
-        let mut had_error = false;
+        let _had_error = false;
         
         // Try block để bắt error
         {

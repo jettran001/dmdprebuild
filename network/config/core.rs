@@ -53,7 +53,7 @@ pub enum NetworkProtocol {
     /// LibP2P
     LibP2P,
     /// gRPC
-    gRPC,
+    GRpc,
     /// WebSocket
     WebSocket,
     /// MQTT
@@ -202,7 +202,7 @@ impl Default for NetworkCoreConfig {
             },
             protocols: vec![
                 NetworkProtocol::LibP2P,
-                NetworkProtocol::gRPC,
+                NetworkProtocol::GRpc,
                 NetworkProtocol::MQTT,
             ],
             capabilities: vec![

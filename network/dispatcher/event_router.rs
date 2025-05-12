@@ -215,7 +215,7 @@ impl EventRouter {
         // Kiểm tra nếu router đang chạy
         let is_running = self.is_running.lock().await;
         if !*is_running {
-            return Err(NetworkError::event_error("EventRouter is not running".to_string()));
+            return Err(NetworkError::EventError("EventRouter is not running".to_string()));
         }
         
         // Sử dụng match thay vì unwrap để xử lý lỗi khi gửi event
@@ -262,56 +262,26 @@ impl EventRouter {
             
             // Lấy receiver từ mutex
             let mut receiver = event_receiver.lock().await;
+            let handlers = handlers;
             
             // Xử lý events cho đến khi nhận được tín hiệu shutdown
             loop {
                 tokio::select! {
-                    // Nhận event tiếp theo
+                    // Nhận event mới để xử lý
                     Some(event) = receiver.recv() => {
-                        // Tìm các handler cho loại sự kiện này
-                        let event_handlers = {
-                            // Lấy lock
-                            let handlers_map = handlers.lock().await;
-                            
-                            if let Some(h) = handlers_map.get(&event.event_type) {
-                                h.clone()
-                            } else {
-                                // Không có handler nào cho loại sự kiện này
-                                debug!("[EventRouter] No handlers for event type: {:?}", event.event_type);
-                                continue;
-                            }
-                        };
+                        debug!("[EventRouter] Received event: {:?}", event);
+                        let handlers_guard = handlers.lock().await;
                         
-                        // Xử lý event với timeout
-                        for handler in event_handlers {
-                            let event_clone = event.clone();
-                            let handler_clone = handler.clone();
-                            let timeout_ms = config.event_timeout_ms;
-                            
-                            // Spawn task mới để xử lý event
-                            let handle = tokio::spawn(async move {
-                                match tokio::time::timeout(Duration::from_millis(timeout_ms), 
-                                                         handler_clone.handle_event(event_clone.clone())).await {
-                                    Ok(result) => {
-                                        match result {
-                                            Ok(_) => {
-                                                debug!("[EventRouter] Successfully processed event: {:?}", event_clone.event_type);
-                                            },
-                                            Err(e) => {
-                                                error!("[EventRouter] Error processing event: {}", e);
-                                            }
-                                        }
-                                    },
-                                    Err(_) => {
-                                        error!("[EventRouter] Timeout processing event after {}ms: {:?}", 
-                                              timeout_ms, event_clone.event_type);
+                        // Tìm handlers cho event type
+                        if let Some(event_handlers) = handlers_guard.get(&event.event_type) {
+                            for handler in event_handlers {
+                                match handler.handle_event(event.clone()).await {
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        error!("[EventRouter] Handler error: {:?}", e);
                                     }
                                 }
-                            });
-                            
-                            // Lưu handle để cleanup sau này nếu cần
-                            let mut task_mgr = task_manager.lock().await;
-                            task_mgr.add_task(handle);
+                            }
                         }
                     },
                     // Nhận tín hiệu shutdown
@@ -335,22 +305,32 @@ impl EventRouter {
         let task_manager_clone = self.task_manager.clone();
         let cleanup_interval = self.config.cleanup_interval_ms;
         
+        // Tạo một kênh shutdown riêng cho cleanup task
+        let (cleanup_shutdown_tx, mut cleanup_shutdown_rx) = mpsc::channel::<()>(1);
+        
+        // Thêm cleanup_shutdown_tx vào task manager để có thể gửi signal khi cần shutdown
+        {
+            let mut task_manager = self.task_manager.lock().await;
+            task_manager.set_shutdown_sender(cleanup_shutdown_tx);
+        }
+        
         let cleanup_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(cleanup_interval));
             
             loop {
-                interval.tick().await;
-                
-                // Check shutdown signal
-                if shutdown_rx.try_recv().is_ok() {
-                    debug!("[EventRouter] Cleanup task received shutdown signal");
-                    break;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Implement resource cleaning if needed
+                        debug!("[EventRouter] Running periodic cleanup");
+                        
+                        // Additional cleanup logic can be added here
+                    }
+                    // Check shutdown signal
+                    _ = cleanup_shutdown_rx.recv() => {
+                        debug!("[EventRouter] Cleanup task received shutdown signal");
+                        break;
+                    }
                 }
-                
-                // Implement resource cleaning if needed
-                debug!("[EventRouter] Running periodic cleanup");
-                
-                // Additional cleanup logic can be added here
             }
             
             debug!("[EventRouter] Cleanup task stopped");

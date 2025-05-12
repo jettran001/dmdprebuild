@@ -55,6 +55,23 @@ impl ValidationErrors {
     pub fn get_errors(&self) -> &HashMap<String, Vec<String>> {
         &self.errors
     }
+
+    /// Format lỗi thành string
+    pub fn format_errors(&self) -> String {
+        if !self.has_errors() {
+            return "Validation passed".to_string();
+        }
+        
+        let mut result = format!("Validation failed with {} errors:\n", self.errors.len());
+            
+        for (field, errors) in &self.errors {
+            for error in errors {
+                result.push_str(&format!("  - {}: {}\n", field, error));
+            }
+        }
+        
+        result
+    }
 }
 
 /// Quy tắc validation cho các trường trong request
@@ -530,7 +547,7 @@ pub mod endpoint_validators {
             
             validator.add_string_validator(
                 FieldValidator::new("domain")
-                    .add_rule(string::one_of(vec!["network", "wallet", "snipebot", "common"]))
+                    .add_rule(string::one_of(&["network", "wallet", "snipebot", "common"]))
             );
             
             Self { validator }
@@ -539,12 +556,11 @@ pub mod endpoint_validators {
 
     impl LogDomainValidator {
         pub fn validate(&self, domain: &str) -> Result<(), NetworkError> {
-            let mut fields = HashMap::new();
-            fields.insert("domain", domain);
+            let fields = &[("domain", domain)];
             
-            let errors = self.validator.validate_fields(&fields);
+            let errors = self.validator.validate(fields);
             if errors.has_errors() {
-                return Err(NetworkError::ValidationError(errors.to_string()));
+                return Err(NetworkError::ValidationError(errors.format_errors()));
             }
             
             Ok(())
@@ -561,7 +577,7 @@ pub mod endpoint_validators {
             let mut validator = InputValidator::new();
             
             // Chuẩn hóa danh sách PluginType hợp lệ từ core::types::PluginType
-            let valid_plugin_types = vec![
+            let valid_plugin_types = &[
                 "WebSocket", "WebRTC", "Libp2p", "GRPC", "MQTT", "Kafka", "Redis", "IPFS", "WASM", "Unknown"
             ];
             
@@ -576,12 +592,11 @@ pub mod endpoint_validators {
 
     impl PluginTypeValidator {
         pub fn validate(&self, plugin_type: &str) -> Result<(), NetworkError> {
-            let mut fields = HashMap::new();
-            fields.insert("plugin_type", plugin_type);
+            let fields = &[("plugin_type", plugin_type)];
             
-            let errors = self.validator.validate_fields(&fields);
+            let errors = self.validator.validate(fields);
             if errors.has_errors() {
-                return Err(NetworkError::ValidationError(format!("Invalid plugin type: {}", errors)));
+                return Err(NetworkError::ValidationError(format!("Invalid plugin type: {}", errors.format_errors())));
             }
             
             Ok(())

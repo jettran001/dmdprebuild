@@ -16,6 +16,15 @@ use crate::security::api_validation::{
 /// Type alias cho API logs đơn giản
 pub type LogsApiFilter = warp::filters::BoxedFilter<(Box<dyn warp::Reply>,)>;
 
+/// Utility function để wrap một filter và kết quả của nó thành Box<dyn warp::Reply>
+fn with_boxed_reply<F, R>(filter: F) -> warp::filters::BoxedFilter<(Box<dyn warp::Reply>,)>
+where
+    F: warp::Filter<Extract = (R,), Error = warp::Rejection> + Clone + Send + Sync + 'static,
+    R: warp::Reply + 'static,
+{
+    filter.map(|reply| Box::new(reply) as Box<dyn warp::Reply>).boxed()
+}
+
 /// Tạo route API logs đơn giản
 /// 
 /// API này cho phép truy xuất log từ hệ thống, với các endpoint:
@@ -23,6 +32,7 @@ pub type LogsApiFilter = warp::filters::BoxedFilter<(Box<dyn warp::Reply>,)>;
 /// - GET /api/logs/{domain} - lấy log của một domain cụ thể (network, blockchain, wallet...)
 pub fn logs_api() -> LogsApiFilter {
     let (log_validator, _, _, _) = create_default_validators();
+    let log_validator = Arc::new(log_validator);
     
     // GET /api/logs
     let get_logs = warp::path("logs")
@@ -30,40 +40,48 @@ pub fn logs_api() -> LogsApiFilter {
         .and(warp::get())
         .map(|| {
             // Implement logic to retrieve all recent logs
-            let response = warp::reply::json(&vec![
-                "Latest log entries would be returned here",
-                "Implement actual log retrieval from your logging system"
-            ]);
-            Box::new(response) as Box<dyn warp::Reply>
+            warp::reply::json(&vec![
+                "Latest log entries would be returned here".to_string(),
+                "Implement actual log retrieval from your logging system".to_string()
+            ])
         });
     
     // GET /api/logs/{domain}
+    let log_validator_clone = log_validator.clone();
     let get_domain_logs = warp::path("logs")
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::get())
-        .and_then(move |domain: String| async move {
-            // Validate domain parameter
-            match log_validator.validate(&domain) {
-                Ok(_) => {
-                    // Implement logic to retrieve logs for specific domain
-                    let response = warp::reply::json(&vec![
-                        format!("Logs for domain: {}", domain),
-                        "Implement actual domain-specific log retrieval"
-                    ]);
-                    Ok(Box::new(response) as Box<dyn warp::Reply>)
-                },
-                Err(_) => Err(warp::reject::custom(NetworkError::ValidationError(
-                    format!("Invalid log domain: {}", domain)
-                )))
+        .and_then(move |domain: String| {
+            let validator = log_validator_clone.clone();
+            async move {
+                // Validate domain parameter
+                match validator.validate(&domain) {
+                    Ok(_) => {
+                        // Implement logic to retrieve logs for specific domain
+                        let response = warp::reply::json(&vec![
+                            format!("Logs for domain: {}", domain),
+                            "Implement actual domain-specific log retrieval".to_string()
+                        ]);
+                        Ok(response)
+                    },
+                    Err(_) => Err(warp::reject::custom(NetworkError::ValidationError(
+                        format!("Invalid log domain: {}", domain)
+                    )))
+                }
             }
         });
     
-    // Combine routes and box the filter
-    get_logs
-        .or(get_domain_logs)
-        .with(warp::cors().allow_any_origin())
-        .boxed()
+    // Áp dụng CORS trước khi bọc trong Box<dyn Reply>
+    let cors = warp::cors().allow_any_origin();
+    let get_logs_with_cors = get_logs.with(cors.clone());
+    let domain_logs_with_cors = get_domain_logs.with(cors);
+    
+    // Kết hợp các route
+    let combined = get_logs_with_cors.or(domain_logs_with_cors);
+    
+    // Wrap kết quả cuối cùng vào BoxedFilter có kiểu đúng theo LogsApiFilter
+    with_boxed_reply(combined)
 }
 
 #[async_trait]
@@ -81,19 +99,24 @@ pub trait NetworkApi: Send + Sync {
 pub struct DefaultNetworkApi {
     engine: Arc<dyn NetworkEngine + Send + Sync + 'static>,
     validators: (
-        LogDomainValidator,
-        PluginTypeValidator,
-        MetricsValidator,
-        HealthValidator
+        Arc<LogDomainValidator>,
+        Arc<PluginTypeValidator>,
+        Arc<MetricsValidator>,
+        Arc<HealthValidator>
     ),
 }
 
 impl DefaultNetworkApi {
     pub fn new(engine: Arc<dyn NetworkEngine + Send + Sync + 'static>) -> Self {
-        let validators = create_default_validators();
+        let (log_validator, plugin_type_validator, metrics_validator, health_validator) = create_default_validators();
         Self { 
             engine,
-            validators 
+            validators: (
+                Arc::new(log_validator),
+                Arc::new(plugin_type_validator),
+                Arc::new(metrics_validator),
+                Arc::new(health_validator)
+            )
         }
     }
 }
@@ -157,9 +180,11 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "plugin_status", plugin_type = %plugin_type, "Plugin status requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
-            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
-        })?;
+        // Xử lý chuyển đổi từ String sang PluginType thủ công thay vì dùng ?
+        let plugin_type = match plugin_type.parse::<PluginType>() {
+            Ok(pt) => pt,
+            Err(e) => return Err(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        };
         
         let statuses = self.engine.get_all_plugin_statuses().await
             .map_err(|e| {
@@ -183,9 +208,11 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "unregister_plugin", plugin_type = %plugin_type, "Plugin unregister requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
-            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
-        })?;
+        // Xử lý chuyển đổi từ String sang PluginType thủ công thay vì dùng ?
+        let plugin_type = match plugin_type.parse::<PluginType>() {
+            Ok(pt) => pt,
+            Err(e) => return Err(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        };
         
         self.engine.unregister_plugin(&plugin_type).await
             .map_err(|e| {
@@ -203,9 +230,11 @@ impl NetworkApi for DefaultNetworkApi {
         // Log request
         info!(endpoint = "check_plugin_health", plugin_type = %plugin_type, "Plugin health check requested");
         
-        let plugin_type = plugin_type.parse::<PluginType>().map_err(|e| {
-            warp::reject::custom(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
-        })?;
+        // Xử lý chuyển đổi từ String sang PluginType thủ công thay vì dùng ?
+        let plugin_type = match plugin_type.parse::<PluginType>() {
+            Ok(pt) => pt,
+            Err(e) => return Err(NetworkError::ValidationError(format!("Invalid plugin type: {}", e)))
+        };
         
         let healthy = self.engine.check_plugin_health(&plugin_type).await
             .map_err(|e| {

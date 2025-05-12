@@ -10,6 +10,8 @@ use crate::security::api_validation::{ApiValidator, ApiValidationRule, FieldRule
 use tracing::{warn, error, info};
 use tokio::time::sleep as async_sleep;
 use crate::security::rate_limiter::{RateLimiter, RateLimitAlgorithm, RateLimitAction, PathConfig};
+use std::any::Any;
+use async_trait::async_trait;
 
 /// Redis plugin implementation
 /// Plugin wrapper for RedisService trait
@@ -145,7 +147,7 @@ impl RedisPlugin {
                 algorithm: RateLimitAlgorithm::TokenBucket,
                 action: RateLimitAction::Reject,
             };
-            match rate_limiter.register_path(endpoint, config) {
+            match tokio::runtime::Handle::current().block_on(rate_limiter.register_path(endpoint, config)) {
                 Ok(_) => info!("[RedisPlugin] Rate limiter registered for endpoint: {}", endpoint),
                 Err(e) => warn!("[RedisPlugin] Failed to register rate limiter for endpoint {}: {}", endpoint, e),
             }
@@ -189,7 +191,7 @@ impl RedisPlugin {
                 }
             }
         });
-        let mut plugin = Self {
+        let plugin = Self {
             name: "redis".to_string(),
             service,
             config,
@@ -233,8 +235,18 @@ impl RedisPlugin {
     }
 
     /// Validate input key/value nếu nhận từ external source (API, user, ...)
-    #[deprecated(note = "Use ApiValidator or Validator trait instead")]
-    /// [DEPRECATED] Không sử dụng hàm này trong code xử lý chính. Hãy dùng ApiValidator hoặc trait Validator chuẩn.
+    /// 
+    /// # Deprecated
+    /// 
+    /// Hàm này sẽ bị xóa trong phiên bản tương lai. Thay vào đó, hãy sử dụng ApiValidator
+    /// và phương thức validate_and_sanitize_field.
+    /// 
+    /// Ví dụ:
+    /// ```
+    /// let validator = ApiValidator::new();
+    /// validator.validate_and_sanitize_field(key, "key", &key_rule);
+    /// ```
+    #[deprecated(note = "Use ApiValidator or Validator trait instead. This method will be removed in the next major version.")]
     pub fn validate_input(&self, key: &str, value: &str) -> Result<(), String> {
         let enable = env::var("PLUGIN_INPUT_VALIDATION").unwrap_or_else(|_| "on".to_string());
         if enable == "off" {
@@ -248,10 +260,32 @@ impl RedisPlugin {
     }
 
     /// Validate input key/value/url/username/password nếu nhận từ external source (API, user, ...)
-    #[deprecated(note = "Use ApiValidator or Validator trait instead")]
-    /// [DEPRECATED] Không sử dụng hàm này trong code xử lý chính. Hãy dùng ApiValidator hoặc trait Validator chuẩn.
+    /// 
+    /// # Deprecated
+    /// 
+    /// Hàm này sẽ bị xóa trong phiên bản tương lai. Thay vào đó, hãy sử dụng ApiValidator
+    /// và các rule validation cụ thể cho từng trường.
+    /// 
+    /// Ví dụ:
+    /// ```
+    /// let validator = ApiValidator::new();
+    /// validator.add_rule(ApiValidationRule {
+    ///     path: "/path".to_string(),
+    ///     method: "POST".to_string(),
+    ///     required_fields: vec!["key".to_string(), "value".to_string()],
+    ///     field_rules: field_rules,
+    /// });
+    /// validator.validate_request(method, path, &params);
+    /// ```
+    #[deprecated(note = "Use ApiValidator or Validator trait instead. This method will be removed in the next major version.")]
     pub fn validate_input_all(&self, key: &str, value: &str, url: &str, username: &Option<String>, password: &Option<String>) -> Result<(), String> {
-        self.validate_input(key, value)?;
+        // Thay thế gọi validate_input bằng gọi trực tiếp các hàm check
+        security::check_xss(key, "redis_key").map_err(|e| e.to_string())?;
+        security::check_sql_injection(key, "redis_key").map_err(|e| e.to_string())?;
+        security::check_xss(value, "redis_value").map_err(|e| e.to_string())?;
+        security::check_sql_injection(value, "redis_value").map_err(|e| e.to_string())?;
+        
+        // Kiểm tra url, username và password như trước
         crate::security::input_validation::security::check_xss(url, "redis_url").map_err(|e| e.to_string())?;
         crate::security::input_validation::security::check_sql_injection(url, "redis_url").map_err(|e| e.to_string())?;
         if let Some(u) = username {
@@ -266,7 +300,7 @@ impl RedisPlugin {
     }
 
     /// Set key-value với validate input và timeout (mock)
-    pub fn set_with_validate(&self, key: &str, value: &str) -> Result<(), String> {
+    pub async fn set_with_validate(&self, key: &str, value: &str) -> Result<(), String> {
         // Lấy field rules từ validator
         let key_rule = FieldRule {
             field_type: "string".to_string(),
@@ -291,30 +325,42 @@ impl RedisPlugin {
         let sanitized_value = self.validator.validate_and_sanitize_field(value, "value", &value_rule)?;
         
         // Giả lập timeout mạng
-        tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(50)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         
         // Thực hiện set thông qua service
-        self.service.set(&sanitized_key, &sanitized_value)?;
-        info!("Redis set: {} = {}", sanitized_key, sanitized_value);
-        
-        Ok(())
+        match self.service.set(&sanitized_key, &sanitized_value).await {
+            Ok(_) => {
+                info!("Redis set: {} = {}", sanitized_key, sanitized_value);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Redis set failed: {}", e);
+                Err(format!("Redis operation failed: {}", e))
+            }
+        }
     }
     
     /// Xử lý request từ endpoint API
-    pub fn handle_request(&self, method: &str, path: &str, params: &HashMap<String, String>) -> Result<String, String> {
-        // Validate request
-        let errors = self.validator.validate_request(method, path, params);
-        if errors.has_errors() {
-            error!("Redis validation failed: {:?}", errors);
-            return Err(format!("Validation failed: {:?}", errors));
+    pub async fn handle_request(&self, method: &str, path: &str, params: &HashMap<String, String>) -> Result<String, String> {
+        // Kiểm tra đầu vào với ApiValidator
+        let validation_result = self.validator.validate_request(method, path, params);
+        if validation_result.has_errors() {
+            error!("[RedisPlugin] API validation failed for {} {}: {}", method, path, validation_result.format_errors());
+            return Err(format!("API validation failed: {}", validation_result.format_errors()));
         }
         
-        // Sanitize request
-        let sanitized_params = self.validator.sanitize_request(method, path, params.clone());
+        // Sanitize params để bảo vệ khỏi tấn công
+        let sanitized_params: HashMap<String, String> = params.iter()
+            .map(|(k, v)| {
+                let sanitized = security::sanitize_html(v);
+                (k.clone(), sanitized)
+            })
+            .collect();
         
-        // Xử lý request dựa trên method và path
+        // Xử lý các endpoint cụ thể
         match (method, path) {
             ("POST", "/redis/set") => {
+                // Kiểm tra tham số
                 let key = match sanitized_params.get("key") {
                     Some(k) => k,
                     None => {
@@ -322,6 +368,7 @@ impl RedisPlugin {
                         return Err("Missing 'key' field".to_string());
                     }
                 };
+                
                 let value = match sanitized_params.get("value") {
                     Some(v) => v,
                     None => {
@@ -330,11 +377,41 @@ impl RedisPlugin {
                     }
                 };
                 
-                // Thực hiện set thông qua service - thay ? bằng match
-                match self.service.set(key, value) {
+                // Sử dụng validation chuẩn thay vì hàm deprecated
+                let key_rule = FieldRule {
+                    field_type: "string".to_string(),
+                    required: true,
+                    min_length: Some(1),
+                    max_length: Some(100),
+                    pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+                    sanitize: true,
+                };
+                
+                let value_rule = FieldRule {
+                    field_type: "string".to_string(),
+                    required: true,
+                    min_length: Some(1),
+                    max_length: Some(1024 * 1024), // 1MB
+                    pattern: None,
+                    sanitize: true,
+                };
+                
+                // Validate thêm một lần nữa và sanitize
+                let sanitized_key = match self.validator.validate_and_sanitize_field(key, "key", &key_rule) {
+                    Ok(k) => k,
+                    Err(e) => return Err(format!("Key validation failed: {}", e))
+                };
+                
+                let sanitized_value = match self.validator.validate_and_sanitize_field(value, "value", &value_rule) {
+                    Ok(v) => v,
+                    Err(e) => return Err(format!("Value validation failed: {}", e))
+                };
+                
+                // Thực hiện set thông qua service
+                match self.service.set(&sanitized_key, &sanitized_value).await {
                     Ok(_) => {
-                        info!("Redis set: {} = {}", key, value);
-                        Ok(format!("OK"))
+                        info!("Redis set: {} = {}", sanitized_key, sanitized_value);
+                        Ok("Success".to_string())
                     },
                     Err(e) => {
                         error!("Redis set failed: {}", e);
@@ -343,6 +420,7 @@ impl RedisPlugin {
                 }
             },
             ("GET", "/redis/get") => {
+                // Kiểm tra tham số
                 let key = match sanitized_params.get("key") {
                     Some(k) => k,
                     None => {
@@ -351,16 +429,32 @@ impl RedisPlugin {
                     }
                 };
                 
-                // Thực hiện get thông qua service - thay ? bằng match
-                match self.service.get(key) {
+                // Validate key theo cùng quy tắc
+                let key_rule = FieldRule {
+                    field_type: "string".to_string(),
+                    required: true,
+                    min_length: Some(1),
+                    max_length: Some(100),
+                    pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+                    sanitize: true,
+                };
+                
+                // Validate và sanitize
+                let sanitized_key = match self.validator.validate_and_sanitize_field(key, "key", &key_rule) {
+                    Ok(k) => k,
+                    Err(e) => return Err(format!("Key validation failed: {}", e))
+                };
+                
+                // Thực hiện get thông qua service
+                match self.service.get(&sanitized_key).await {
                     Ok(result) => {
                         match result {
                             Some(value) => {
-                                info!("Redis get: {} = {}", key, value);
+                                info!("Redis get: {} = {}", sanitized_key, value);
                                 Ok(value)
                             },
                             None => {
-                                info!("Redis get: {} = nil", key);
+                                info!("Redis get: {} = nil", sanitized_key);
                                 Ok("nil".to_string())
                             }
                         }
@@ -421,6 +515,7 @@ impl RedisPlugin {
     }
 }
 
+#[async_trait]
 impl Plugin for RedisPlugin {
     fn name(&self) -> &str {
         &self.name
@@ -430,11 +525,11 @@ impl Plugin for RedisPlugin {
         PluginType::Storage
     }
     
-    fn start(&self) -> Result<bool, PluginError> {
+    async fn start(&self) -> Result<bool, PluginError> {
         info!("[RedisPlugin] Starting...");
         
         // Connect to Redis
-        match self.service.connect_with_auth(&self.config.url, &self.config.username, &self.config.password) {
+        match self.service.connect_with_auth(&self.config.url, &self.config.username, &self.config.password).await {
             Ok(_) => {
                 info!("[RedisPlugin] Successfully connected to Redis at {}", self.config.url);
                 Ok(true)
@@ -446,18 +541,22 @@ impl Plugin for RedisPlugin {
         }
     }
     
-    fn stop(&self) -> Result<(), PluginError> {
+    async fn stop(&self) -> Result<(), PluginError> {
         info!("[RedisPlugin] Stopping...");
         // Không cần cleanup đặc biệt - Redis connection sẽ tự drop khi RedisPlugin bị drop
         Ok(())
     }
 
-    fn check_health(&self) -> Result<bool, PluginError> {
+    async fn check_health(&self) -> Result<bool, PluginError> {
         // Kiểm tra kết nối thực tế tới Redis
-        match self.service.ping() {
+        match self.service.ping().await {
             Ok(_) => Ok(true),
             Err(e) => Err(PluginError::Other(format!("Redis health check failed: {}", e))),
         }
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -475,28 +574,149 @@ mod tests {
     use crate::infra::service_mocks::DefaultRedisService;
     
     #[test]
-    fn test_validate_input_all_safe() {
+    fn test_validate_with_api_validator_safe() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
-        assert!(plugin.validate_input_all("valid_key", "valid_value", "redis://localhost:6379", &Some("user".to_string()), &Some("pass".to_string())).is_ok());
+        
+        // Tạo ApiValidator và thêm các rule
+        let mut validator = ApiValidator::new();
+        
+        // Rule cho key
+        let mut key_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(100),
+            pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+            sanitize: true,
+        };
+        
+        // Rule cho value
+        let mut value_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(1024 * 1024),
+            pattern: None,
+            sanitize: true,
+        };
+        
+        let mut field_rules = HashMap::new();
+        field_rules.insert("key".to_string(), key_rule);
+        field_rules.insert("value".to_string(), value_rule);
+        
+        validator.add_rule(ApiValidationRule {
+            path: "/redis/test".to_string(),
+            method: "POST".to_string(),
+            required_fields: vec!["key".to_string(), "value".to_string()],
+            field_rules,
+        });
+        
+        // Tạo params
+        let mut params = HashMap::new();
+        params.insert("key".to_string(), "valid_key".to_string());
+        params.insert("value".to_string(), "valid_value".to_string());
+        
+        // Kiểm tra kết quả validation
+        assert!(!validator.validate_request("POST", "/redis/test", &params).has_errors());
     }
     
     #[test]
-    fn test_validate_input_all_xss() {
+    fn test_validate_with_api_validator_xss() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
-        assert!(plugin.validate_input_all("valid_key", "<script>alert(1)</script>", "redis://localhost:6379", &Some("user".to_string()), &Some("pass".to_string())).is_err());
+        
+        // Tạo ApiValidator và thêm các rule
+        let mut validator = ApiValidator::new();
+        
+        // Rule cho key và value
+        let key_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(100),
+            pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+            sanitize: true,
+        };
+        
+        let value_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(1024 * 1024),
+            pattern: None,
+            sanitize: true,
+        };
+        
+        let mut field_rules = HashMap::new();
+        field_rules.insert("key".to_string(), key_rule);
+        field_rules.insert("value".to_string(), value_rule);
+        
+        validator.add_rule(ApiValidationRule {
+            path: "/redis/test".to_string(),
+            method: "POST".to_string(),
+            required_fields: vec!["key".to_string(), "value".to_string()],
+            field_rules,
+        });
+        
+        // Tạo params với XSS payload
+        let mut params = HashMap::new();
+        params.insert("key".to_string(), "valid_key".to_string());
+        params.insert("value".to_string(), "<script>alert(1)</script>".to_string());
+        
+        // XSS payload nên bị bắt bởi validator
+        assert!(validator.validate_request("POST", "/redis/test", &params).has_errors());
     }
     
     #[test]
-    fn test_validate_input_all_sql() {
+    fn test_validate_with_api_validator_sql() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
-        assert!(plugin.validate_input_all("valid_key", "value'; DROP TABLE users; --", "redis://localhost:6379", &Some("user".to_string()), &Some("pass".to_string())).is_err());
+        
+        // Tạo ApiValidator và thêm các rule
+        let mut validator = ApiValidator::new();
+        
+        // Rule cho key và value
+        let key_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(100),
+            pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+            sanitize: true,
+        };
+        
+        let value_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(1024 * 1024),
+            pattern: None,
+            sanitize: true,
+        };
+        
+        let mut field_rules = HashMap::new();
+        field_rules.insert("key".to_string(), key_rule);
+        field_rules.insert("value".to_string(), value_rule);
+        
+        validator.add_rule(ApiValidationRule {
+            path: "/redis/test".to_string(),
+            method: "POST".to_string(),
+            required_fields: vec!["key".to_string(), "value".to_string()],
+            field_rules,
+        });
+        
+        // Tạo params với SQL injection payload
+        let mut params = HashMap::new();
+        params.insert("key".to_string(), "valid_key".to_string());
+        params.insert("value".to_string(), "value'; DROP TABLE users; --".to_string());
+        
+        // SQL injection payload nên bị bắt bởi validator
+        assert!(validator.validate_request("POST", "/redis/test", &params).has_errors());
     }
     
-    #[test]
-    fn test_api_validator_request() {
+    #[tokio::test]
+    async fn test_api_validator_request() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
         
@@ -504,13 +724,48 @@ mod tests {
         params.insert("key".to_string(), "valid_key".to_string());
         params.insert("value".to_string(), "valid_value".to_string());
         
-        assert!(plugin.handle_request("POST", "/redis/set", &params).is_ok());
+        let result = plugin.handle_request("POST", "/redis/set", &params).await;
+        assert!(result.is_ok(), "Expected successful API validation but got error: {:?}", result.err());
     }
     
     #[test]
-    fn test_validate_input_all_xss_payloads() {
+    fn test_validate_with_api_validator_xss_payloads() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
+        
+        // Tạo ApiValidator và thêm các rule
+        let mut validator = ApiValidator::new();
+        
+        // Rule cho key và value
+        let key_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(100),
+            pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+            sanitize: true,
+        };
+        
+        let value_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(1024 * 1024),
+            pattern: None,
+            sanitize: true,
+        };
+        
+        let mut field_rules = HashMap::new();
+        field_rules.insert("key".to_string(), key_rule);
+        field_rules.insert("value".to_string(), value_rule);
+        
+        validator.add_rule(ApiValidationRule {
+            path: "/redis/test".to_string(),
+            method: "POST".to_string(),
+            required_fields: vec!["key".to_string(), "value".to_string()],
+            field_rules,
+        });
+        
         // Các payload XSS phổ biến
         let xss_payloads = vec![
             "<script>alert('XSS')</script>",
@@ -518,23 +773,71 @@ mod tests {
             "<svg/onload=alert(1)>",
             "<iframe src=javascript:alert(1)>",
         ];
+        
         for payload in xss_payloads {
-            assert!(plugin.validate_input_all("valid_key", payload, "redis://localhost:6379", &Some("user".to_string()), &Some("pass".to_string())).is_err());
+            let mut params = HashMap::new();
+            params.insert("key".to_string(), "valid_key".to_string());
+            params.insert("value".to_string(), payload.to_string());
+            
+            // XSS payload nên bị bắt bởi validator
+            assert!(validator.validate_request("POST", "/redis/test", &params).has_errors());
         }
     }
+    
     #[test]
-    fn test_validate_input_all_sql_payloads() {
+    fn test_validate_with_api_validator_sql_payloads() {
         let redis_service = Arc::new(DefaultRedisService::new());
         let plugin = RedisPlugin::new(redis_service, "redis://localhost:6379".to_string());
+        
+        // Tạo ApiValidator và thêm các rule
+        let mut validator = ApiValidator::new();
+        
+        // Rule cho key và value
+        let key_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(100),
+            pattern: Some(r"^[a-zA-Z0-9_:]+$".to_string()),
+            sanitize: true,
+        };
+        
+        let value_rule = FieldRule {
+            field_type: "string".to_string(),
+            required: true,
+            min_length: Some(1),
+            max_length: Some(1024 * 1024),
+            pattern: None,
+            sanitize: true,
+        };
+        
+        let mut field_rules = HashMap::new();
+        field_rules.insert("key".to_string(), key_rule);
+        field_rules.insert("value".to_string(), value_rule);
+        
+        validator.add_rule(ApiValidationRule {
+            path: "/redis/test".to_string(),
+            method: "POST".to_string(),
+            required_fields: vec!["key".to_string(), "value".to_string()],
+            field_rules,
+        });
+        
         // Các payload SQLi phổ biến
         let sqli_payloads = vec![
             "' OR '1'='1", "1; DROP TABLE users; --", "admin' --", "' UNION SELECT NULL--"
         ];
+        
         for payload in sqli_payloads {
-            assert!(plugin.validate_input_all("valid_key", payload, "redis://localhost:6379", &Some("user".to_string()), &Some("pass".to_string())).is_err());
+            let mut params = HashMap::new();
+            params.insert("key".to_string(), "valid_key".to_string());
+            params.insert("value".to_string(), payload.to_string());
+            
+            // SQL injection payload nên bị bắt bởi validator
+            assert!(validator.validate_request("POST", "/redis/test", &params).has_errors());
         }
     }
 }
 
 // WARNING: Nếu mở rộng RedisPlugin nhận input từ external (API, user command),
-// bắt buộc sử dụng ApiValidator hoặc gọi validate_input trước khi xử lý key/value để đảm bảo an toàn XSS/SQLi.
+// bắt buộc sử dụng ApiValidator và các phương thức validate_and_sanitize_field để đảm bảo an toàn XSS/SQLi.
+// KHÔNG sử dụng các phương thức validate_input và validate_input_all đã bị đánh dấu deprecated.

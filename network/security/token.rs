@@ -207,10 +207,13 @@ impl TokenService {
         
         Ok(AuthInfo {
             user_id: token_info.user_id.clone(),
+            name: None,
             role: token_info.role.clone(),
+            expires_at: Some(token_info.expires_at),
+            ip_address: None,
             token_type: crate::security::AuthType::Simple,
-            expires_at: token_info.expires_at,
             metadata: token_info.metadata.clone(),
+            additional: HashMap::new(),
         })
     }
     

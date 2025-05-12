@@ -2,22 +2,55 @@ use crate::core::engine::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
 use log::{info, warn, error, debug};
-use tokio::sync::oneshot;
 use async_trait::async_trait;
 use crate::infra::service_traits::{WasmService, ServiceError};
-use std::sync::Arc;
 use std::time::Duration;
+use std::any::Any;
 
 pub struct WasmPlugin {
     name: String,
+    config: WasmConfig,
+}
+
+pub struct WasmConfig {
+    pub module_path: String,
+    pub memory_limit_mb: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for WasmConfig {
+    fn default() -> Self {
+        Self {
+            module_path: String::new(),
+            memory_limit_mb: 128,
+            timeout_ms: 5000,
+        }
+    }
 }
 
 impl WasmPlugin {
-    pub fn new() -> Self {
-        debug!("[WasmPlugin] Creating new WasmPlugin instance");
+    pub fn new(name: String, config: WasmConfig) -> Self {
         Self {
-            name: "wasm".to_string(),
+            name,
+            config,
         }
+    }
+    
+    pub fn with_memory_limit(mut self, limit_mb: usize) -> Self {
+        self.config.memory_limit_mb = limit_mb;
+        self
+    }
+    
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.config.timeout_ms = timeout_ms;
+        self
+    }
+    
+    pub fn load_module(&self) -> Result<(), PluginError> {
+        // Implementation for loading WASM module
+        info!("[{}] Loading WASM module from {}", self.name, self.config.module_path);
+        // Placeholder for now
+        Ok(())
     }
     /// Validate input data nếu nhận từ external (API, user, ...)
     #[deprecated(note = "Use ApiValidator or Validator trait instead")]
@@ -50,22 +83,35 @@ impl WasmPlugin {
     }
 }
 
+#[async_trait]
 impl Plugin for WasmPlugin {
     fn name(&self) -> &str {
         &self.name
     }
+    
     fn plugin_type(&self) -> PluginType {
         PluginType::Wasm
     }
-    fn start(&self) -> Result<bool, PluginError> {
-        info!("[WasmPlugin] Starting plugin");
-        // Mock: always return Ok(true)
+    
+    async fn start(&self) -> Result<bool, PluginError> {
+        info!("[{}] Starting WASM plugin", self.name);
+        self.load_module()?;
         Ok(true)
     }
-    fn stop(&self) -> Result<(), PluginError> {
-        info!("[WasmPlugin] Stopping plugin");
-        // Mock: do nothing
+    
+    async fn stop(&self) -> Result<(), PluginError> {
+        info!("[{}] Stopping WASM plugin", self.name);
+        // Implementation for cleanup
         Ok(())
+    }
+    
+    async fn check_health(&self) -> Result<bool, PluginError> {
+        // Placeholder health check
+        Ok(true)
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -146,7 +192,11 @@ mod tests {
     use std::collections::HashMap;
     #[test]
     fn test_validate_api_input() {
-        let plugin = WasmPlugin::new();
+        let plugin = WasmPlugin::new("wasm".to_string(), WasmConfig {
+            module_path: String::new(),
+            memory_limit_mb: 128,
+            timeout_ms: 5000,
+        });
         let mut validator = ApiValidator::new();
         let mut field_rules = HashMap::new();
         field_rules.insert("data".to_string(), FieldRule {
@@ -171,7 +221,11 @@ mod tests {
     }
     #[test]
     fn test_validate_api_input_xss_payloads() {
-        let plugin = WasmPlugin::new();
+        let plugin = WasmPlugin::new("wasm".to_string(), WasmConfig {
+            module_path: String::new(),
+            memory_limit_mb: 128,
+            timeout_ms: 5000,
+        });
         let mut validator = ApiValidator::new();
         let mut field_rules = HashMap::new();
         field_rules.insert("data".to_string(), FieldRule {
@@ -202,7 +256,11 @@ mod tests {
     }
     #[test]
     fn test_validate_api_input_sql_payloads() {
-        let plugin = WasmPlugin::new();
+        let plugin = WasmPlugin::new("wasm".to_string(), WasmConfig {
+            module_path: String::new(),
+            memory_limit_mb: 128,
+            timeout_ms: 5000,
+        });
         let mut validator = ApiValidator::new();
         let mut field_rules = HashMap::new();
         field_rules.insert("data".to_string(), FieldRule {
@@ -232,31 +290,52 @@ mod tests {
 
 // The following code is for demonstration only. Move this into a function or test if needed.
 #[allow(dead_code)]
-fn spawn_resource_monitor() {
-let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-tokio::spawn(async move {
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
-                #[cfg(target_os = "linux")]
-                if let Ok(meminfo) = std::fs::read_to_string("/proc/self/status") {
-                    for line in meminfo.lines() {
-                        if line.starts_with("VmRSS") || line.starts_with("VmSize") {
-                            info!("[WasmPlugin][Resource] {}", line);
-                        }
-                    }
+fn spawn_resource_monitor() -> tokio::sync::oneshot::Sender<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    
+    // Tạo một hàm riêng biệt thay vì closure để đảm bảo Send
+    async fn resource_monitor_task(mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                    #[cfg(target_os = "linux")]
+                    check_memory_usage();
+                    
+                    #[cfg(target_os = "linux")]
+                    check_file_descriptors();
                 }
-                #[cfg(target_os = "linux")]
-                if let Ok(fds) = std::fs::read_dir("/proc/self/fd") {
-                    let count = fds.count();
-                    info!("[WasmPlugin][Resource] Open file descriptors: {}", count);
+                _ = &mut shutdown_rx => {
+                    info!("[WasmPlugin] Background resource task shutting down");
+                    break;
                 }
-            }
-            _ = &mut shutdown_rx => {
-                info!("[WasmPlugin] Background resource task shutting down");
-                break;
             }
         }
     }
-});
+    
+    #[cfg(target_os = "linux")]
+    fn check_memory_usage() {
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/self/status") {
+            for line in meminfo.lines() {
+                if line.starts_with("VmRSS") || line.starts_with("VmSize") {
+                    info!("[WasmPlugin][Resource] {}", line);
+                }
+            }
+        }
+    }
+    
+    #[cfg(target_os = "linux")]
+    fn check_file_descriptors() {
+        if let Ok(fds) = std::fs::read_dir("/proc/self/fd") {
+            let count = fds.count();
+            info!("[WasmPlugin][Resource] Open file descriptors: {}", count);
+        }
+    }
+    
+    // Spawn task với từ khóa 'static để đảm bảo Send
+    tokio::spawn(async move {
+        resource_monitor_task(shutdown_rx).await;
+    });
+    
+    shutdown_tx
 }
+

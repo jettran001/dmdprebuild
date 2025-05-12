@@ -3,7 +3,6 @@
 //! Hỗ trợ: kết nối qua NAT, mã hóa dữ liệu, và giao tiếp real-time
 
 use crate::core::engine::{Plugin, PluginType, PluginError};
-use std::env;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::collections::HashMap;
@@ -15,10 +14,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn, error};
 use async_trait::async_trait;
 use thiserror::Error;
-use rand;
 
 use crate::security::input_validation::security;
-use crate::infra::service_traits::{WebRtcConfig as ServiceWebRtcConfig, ServiceError};
+use crate::infra::service_traits::{ServiceError};
 
 /// Lỗi cụ thể cho WebRTC plugin
 #[derive(Error, Debug)]
@@ -559,11 +557,11 @@ impl Plugin for WebRtcPlugin {
     async fn stop(&self) -> Result<(), PluginError> {
         info!("[WebRTC] Stopping plugin...");
         
-        let service = self.service.clone();
+        let conn_manager = self.service.connection_manager.lock().await;
         
         // Spawn một task để đóng tất cả các kết nối
         tokio::spawn(async move {
-            match service.close_all_connections().await {
+            match conn_manager.close_all_connections().await {
                 Ok(count) => info!("[WebRTC] Closed {} connections", count),
                 Err(e) => error!("[WebRTC] Error closing connections: {}", e),
             }

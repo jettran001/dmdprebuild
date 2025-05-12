@@ -79,6 +79,8 @@ pub trait RedisService: Send + Sync + 'static {
     async fn ping_with_timeout(&self, timeout: Duration) -> Result<bool, ServiceError>;
     /// Ping Redis server (basic health check)
     async fn ping(&self) -> Result<(), ServiceError>;
+    /// Reconnect to Redis server
+    async fn reconnect(&self) -> Result<(), ServiceError>;
 }
 
 /// Trait cho IPFS service

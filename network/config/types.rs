@@ -24,6 +24,8 @@ pub struct RedisConfig {
     pub retry_delay_ms: u64,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub replication_mode: Option<String>,
+    pub persistence_mode: Option<String>,
 }
 
 impl RedisConfig {
@@ -75,6 +77,8 @@ impl Default for RedisConfig {
             retry_delay_ms: 500,
             username: None,
             password: None,
+            replication_mode: None,
+            persistence_mode: None,
         }
     }
 }

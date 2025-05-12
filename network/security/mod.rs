@@ -34,8 +34,7 @@ pub mod token;
 // Standard export của validation module (hợp nhất từ cả 3 module)
 pub use input_validation::{
     InputValidator, ValidationErrors, ValidationError, ValidationResult, 
-    FieldValidator, Sanitizer, Validate, sanitize_html, escape_sql, 
-    InputValidationService
+    FieldValidator, Sanitizer, Validate, sanitize_html, escape_sql
 };
 
 // Export các hàm kiểm tra bảo mật từ module security con của input_validation

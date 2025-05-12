@@ -216,7 +216,7 @@ impl RateLimiter {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 let mut map = states.lock().await;
                 let now = Instant::now();
-                let mut removed = 0;
+                let _removed = 0;
                 map.retain(|_, state| {
                     // Nếu không còn request nào hợp lệ trong 10 phút thì xóa
                     let last_activity = state.request_timestamps.last().copied().unwrap_or(state.window_start);
