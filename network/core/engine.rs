@@ -102,11 +102,11 @@ pub struct NetworkMessage {
 /// MessageType định nghĩa các loại message
 #[derive(Debug, Clone)]
 pub enum MessageType {
-    Heartbeat,
-    Data,
-    Control,
-    Discovery,
-    Sync,
+    HeartbeatMessage,
+    DataMessage,
+    ControlMessage,
+    DiscoveryMessage,
+    SyncMessage,
 }
 
 /// NetworkPlugin trait cho các plugin
@@ -576,54 +576,67 @@ impl NetworkEngine for DefaultNetworkEngine {
         Ok(())
     }
     
-    async fn register_plugin(&self, plugin: Box<dyn Plugin>) -> Result<PluginId> {
-        let plugin_type = plugin.plugin_type();
-        let plugin_name = plugin.name().to_string();
-        
-        if plugin_name.is_empty() {
-            return Err(anyhow::Error::msg("Plugin name cannot be empty"));
+    async fn register_plugin(&self, plugin_type: PluginType, plugin: Arc<dyn Plugin + Send + Sync>) -> Result<(), EngineError> {
+        if plugin.name().is_empty() {
+            warn!("Attempted to register plugin with empty name: {:?}", plugin_type);
+            return Err(EngineError::PluginNameEmpty);
         }
         
-        // Kiểm tra plugin có start được không
-        match plugin.start().await {
-            Ok(success) => {
-                if !success {
-                    return Err(anyhow::Error::msg(format!(
-                        "Failed to start plugin {} ({:?})",
-                        plugin_name, plugin_type
-                    )));
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match plugin.start().await {
+                Ok(true) => {
+                    info!("Plugin started and registered: {} ({:?})", plugin.name(), plugin_type);
+                    
+                    // Sử dụng scope độc lập cho mỗi lock để tránh deadlock
+                    // Lấy lock cho plugins
+                    {
+                        let mut plugins = self.plugins.write().await;
+                        plugins.insert(plugin_type.clone(), plugin.clone());
+                    } // drop plugins lock ở đây
+                    
+                    // Lấy lock cho plugin_status riêng biệt
+                    {
+                        let mut status = self.plugin_status.write().await;
+                        status.insert(plugin_type.clone(), PluginStatus::Active);
+                    } // drop status lock ở đây
+                    
+                    // Lấy lock cho plugin_last_update riêng biệt
+                    {
+                        let mut last_update = self.plugin_last_update.write().await;
+                        last_update.insert(plugin_type, std::time::Instant::now());
+                    } // drop last_update lock ở đây
+                    
+                    return Ok(());
+                },
+                Ok(false) => {
+                    warn!("Plugin started but reported failure: {} ({:?}) [attempt {}/3]", plugin.name(), plugin_type, attempt+1);
+                    last_err = Some(EngineError::PluginStartFailed(plugin.name().to_string()));
+                },
+                Err(e) => {
+                    error!("Plugin failed to start: {} ({:?}) [attempt {}/3]: {:?}", plugin.name(), plugin_type, attempt+1, e);
+                    last_err = Some(EngineError::PluginStartFailed(plugin.name().to_string()));
                 }
             }
-            Err(e) => {
-                return Err(anyhow::Error::msg(format!(
-                    "Error starting plugin {} ({:?}): {}",
-                    plugin_name, plugin_type, e
-                )));
-            }
+            
+            // Chờ một chút trước khi thử lại
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
         
-        // Đăng ký plugin vào registry
-        let mut plugins_guard = self.plugins.write().await;
-        
-        // Kiểm tra xem plugin đã tồn tại chưa
-        if plugins_guard.contains_key(&plugin_type) {
-            return Err(anyhow::Error::msg(format!(
-                "Plugin with type {:?} already registered",
-                plugin_type
-            )));
-        }
-        
-        // Chuyển từ Box sang Arc bằng cách wrap Box trong Arc
-        let plugin_arc: Arc<dyn Plugin + Send + Sync> = Arc::new(BoxPlugin(plugin));
-        plugins_guard.insert(plugin_type.clone(), plugin_arc);
-        
-        // Cập nhật trạng thái
+        // Nếu vẫn thất bại sau 3 lần
         let mut status = self.plugin_status.write().await;
-        status.insert(plugin_type, PluginStatus::Active);
         
-        let plugin_id = PluginId::new();
-        info!("Plugin registered successfully: {}", plugin_name);
-        Ok(plugin_id)
+        status.insert(plugin_type.clone(), PluginStatus::Failed);
+        
+        let mut last_update = self.plugin_last_update.write().await;
+        
+        last_update.insert(plugin_type, std::time::Instant::now());
+        
+        // Trả về lỗi sau khi đã thử nhiều lần
+        match last_err {
+            Some(err) => Err(err),
+            None => Err(EngineError::PluginStartFailed("Unknown error".to_string()))
+        }
     }
 
     async fn get_plugin(&self, _id: PluginId) -> Option<Box<dyn Plugin>> {
@@ -657,25 +670,39 @@ impl NetworkEngine for DefaultNetworkEngine {
     }
 
     async fn get_metrics(&self) -> Result<String, EngineError> {
-        // Sử dụng cách an toàn hơn để lấy read lock cho plugins
-        let plugins = self.plugins.read().await;
+        // Lấy dữ liệu từ các shared state, nhưng không giữ locks quá lâu
+        // Lấy dữ liệu từ plugins trước, trong scope riêng biệt
+        let plugin_count;
+        let plugin_types: Vec<PluginType>;
         
-        // Sử dụng cách an toàn để lấy plugin statuses
-        let statuses = self.get_all_plugin_statuses().await?;
+        {
+            let plugins = self.plugins.read().await;
+            plugin_count = plugins.len();
+            plugin_types = plugins.keys().cloned().collect();
+        } // drop plugins lock tại đây
+        
+        // Lấy dữ liệu từ plugin_status, trong scope riêng biệt
+        let statuses_clone;
+        
+        {
+            let statuses = self.plugin_status.read().await;
+            statuses_clone = statuses.clone();
+        } // drop statuses lock tại đây
         
         let mut metrics = String::new();
         
         // Add plugin count metrics
         metrics.push_str("# HELP network_plugin_count Number of registered plugins\n");
         metrics.push_str("# TYPE network_plugin_count gauge\n");
-        metrics.push_str(&format!("network_plugin_count {}\n\n", statuses.len()));
+        metrics.push_str(&format!("network_plugin_count {}\n\n", plugin_count));
         
         // Add plugin status metrics
         metrics.push_str("# HELP network_plugin_status Status of plugins (1 = active, 0 = inactive)\n");
         metrics.push_str("# TYPE network_plugin_status gauge\n");
         
         // Lặp qua từng cặp plugin_type và status để tạo metrics
-        for (plugin_type, status) in &statuses {
+        for plugin_type in plugin_types {
+            let status = statuses_clone.get(&plugin_type).unwrap_or(&PluginStatus::Unknown);
             let status_value = match status {
                 PluginStatus::Active => 1,
                 _ => 0,
@@ -691,7 +718,7 @@ impl NetworkEngine for DefaultNetworkEngine {
         let mut active_count = 0;
         let mut inactive_count = 0;
         
-        for (_, status) in &statuses {
+        for (_, status) in &statuses_clone {
             if *status == PluginStatus::Active {
                 active_count += 1;
             } else {
@@ -741,19 +768,19 @@ impl NetworkEngine for DefaultNetworkEngine {
         // Expose object count for plugin registry
         metrics.push_str("\n# HELP network_plugin_registry_object_count Số lượng plugin trong registry\n");
         metrics.push_str("# TYPE network_plugin_registry_object_count gauge\n");
-        metrics.push_str(&format!("network_plugin_registry_object_count {}\n", plugins.len()));
+        metrics.push_str(&format!("network_plugin_registry_object_count {}\n", plugin_count));
         
         // Thêm mock metrics cho các node
-            metrics.push_str("# HELP network_slave_node_count Số lượng slave node trong master\n");
-            metrics.push_str("# TYPE network_slave_node_count gauge\n");
+        metrics.push_str("# HELP network_slave_node_count Số lượng slave node trong master\n");
+        metrics.push_str("# TYPE network_slave_node_count gauge\n");
         metrics.push_str(&format!("network_slave_node_count {}\n", 0)); // Mock: 0 nodes
         
-            metrics.push_str("# HELP network_discovery_node_count Số lượng node discovery\n");
-            metrics.push_str("# TYPE network_discovery_node_count gauge\n");
+        metrics.push_str("# HELP network_discovery_node_count Số lượng node discovery\n");
+        metrics.push_str("# TYPE network_discovery_node_count gauge\n");
         metrics.push_str(&format!("network_discovery_node_count {}\n", 0)); // Mock: 0 nodes
         
-            metrics.push_str("# HELP network_task_node_count Số lượng node có task\n");
-            metrics.push_str("# TYPE network_task_node_count gauge\n");
+        metrics.push_str("# HELP network_task_node_count Số lượng node có task\n");
+        metrics.push_str("# TYPE network_task_node_count gauge\n");
         metrics.push_str(&format!("network_task_node_count {}\n", 0)); // Mock: 0 nodes
         
         Ok(metrics)
@@ -818,58 +845,6 @@ impl DefaultNetworkEngine {
             }
         }
         Ok(())
-    }
-
-    pub async fn register_plugin(&self, plugin_type: PluginType, plugin: Arc<dyn Plugin + Send + Sync>) -> Result<(), EngineError> {
-        if plugin.name().is_empty() {
-            warn!("Attempted to register plugin with empty name: {:?}", plugin_type);
-            return Err(EngineError::PluginNameEmpty);
-        }
-        
-        let mut last_err = None;
-        for attempt in 0..3 {
-            match plugin.start().await {
-                Ok(true) => {
-                    info!("Plugin started and registered: {} ({:?})", plugin.name(), plugin_type);
-                    let mut plugins = self.plugins.write().await;
-                    
-                    plugins.insert(plugin_type.clone(), plugin.clone());
-                    
-                    let mut status = self.plugin_status.write().await;
-                    
-                    status.insert(plugin_type.clone(), PluginStatus::Active);
-                    
-                    let mut last_update = self.plugin_last_update.write().await;
-                    
-                    last_update.insert(plugin_type, std::time::Instant::now());
-                    return Ok(());
-                },
-                Ok(false) => {
-                    warn!("Plugin started but reported failure: {} ({:?}) [attempt {}/3]", plugin.name(), plugin_type, attempt+1);
-                    last_err = Some(EngineError::PluginStartFailed(plugin.name().to_string()));
-                },
-                Err(e) => {
-                    error!("Plugin failed to start: {} ({:?}) [attempt {}/3]: {:?}", plugin.name(), plugin_type, attempt+1, e);
-                    last_err = Some(EngineError::PluginStartFailed(plugin.name().to_string()));
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-        
-        // Nếu vẫn thất bại sau 3 lần
-        let mut status = self.plugin_status.write().await;
-        
-        status.insert(plugin_type.clone(), PluginStatus::Failed);
-        
-        let mut last_update = self.plugin_last_update.write().await;
-        
-        last_update.insert(plugin_type, std::time::Instant::now());
-        
-        // Trả về lỗi sau khi đã thử nhiều lần
-        match last_err {
-            Some(err) => Err(err),
-            None => Err(EngineError::PluginStartFailed("Unknown error".to_string()))
-        }
     }
 
     pub async fn get_plugin(&self, plugin_type: &PluginType) -> Option<Arc<dyn Plugin + Send + Sync>> {

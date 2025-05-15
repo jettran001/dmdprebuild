@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use tokio::time::timeout;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{info, warn, error};
 
 /// Kết nối Redis được quản lý bởi pool
 pub struct PooledConnection {
@@ -177,20 +178,46 @@ impl ConnectionPool {
     /// Trả một kết nối về pool
     async fn return_connection(&self, conn: Connection) {
         let now = std::time::Instant::now();
-        let mut available_connections = self._available_connections.lock().await;
         
-        // Xóa các kết nối hết hạn (đã idle quá lâu)
-        while let Some((_, created_at)) = available_connections.front() {
-            if created_at.elapsed() > Duration::from_secs(self.config.idle_timeout_secs) {
-                available_connections.pop_front();
-                // Không cần release semaphore vì release được gọi khi connection bị drop
-            } else {
-                break;
+        // Sử dụng timeout khi lấy lock để tránh deadlock
+        let lock_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            self._available_connections.lock()
+        ).await;
+        
+        match lock_result {
+            Ok(mut available_connections) => {
+                // Giảm thiểu công việc trong khi giữ lock
+                // Chỉ kiểm tra xem có quá nhiều kết nối đang idle không
+                let should_clean_expired = available_connections.len() > (self.config.max_connections as usize / 2) &&
+                                          available_connections.front().map_or(false, |(_, time)| 
+                                          time.elapsed() > Duration::from_secs(self.config.idle_timeout_secs));
+                                          
+                if should_clean_expired {
+                    // Chỉ loại bỏ tối đa 1 kết nối cũ mỗi lần để tránh giữ lock quá lâu
+                    if let Some((_, time)) = available_connections.front() {
+                        if time.elapsed() > Duration::from_secs(self.config.idle_timeout_secs) {
+                            available_connections.pop_front();
+                        }
+                    }
+                }
+                
+                // Thêm kết nối hiện tại vào pool
+                available_connections.push_back((conn, now));
+                
+                // Nếu có quá nhiều kết nối, hãy lên lịch dọn dẹp bất đồng bộ
+                if should_clean_expired {
+                    let self_clone = self.clone();
+                    tokio::spawn(async move {
+                        self_clone.clean_expired_connections().await;
+                    });
+                }
+            },
+            Err(_) => {
+                // Nếu không thể lấy lock, không trả kết nối về pool mà để nó tự đóng
+                warn!("Không thể trả kết nối về pool do timeout khi lấy lock");
             }
         }
-        
-        available_connections.push_back((conn, now));
-        drop(available_connections);
     }
     
     /// Tạo một kết nối mới
@@ -229,13 +256,7 @@ impl ConnectionPool {
 #[async_trait]
 impl RedisPool for ConnectionPool {
     async fn get_connection(&self) -> Result<PooledConnection, PoolError> {
-        let lock_result = timeout(Duration::from_secs(1), self._available_connections.lock()).await;
-        let _available_connections = match lock_result {
-            Ok(guard) => guard,
-            Err(_) => return Err(PoolError::Timeout),
-        };
-        
-        // Lấy permit từ semaphore với timeout
+        // Lấy permit từ semaphore với timeout - thực hiện trong scope riêng
         let permit = match tokio::time::timeout(
             Duration::from_millis(self.config.connection_timeout_ms),
             self.semaphore.acquire(),
@@ -245,30 +266,44 @@ impl RedisPool for ConnectionPool {
             Err(_) => return Err(PoolError::Timeout),
         };
         
-        // Thử lấy kết nối từ pool
+        // Thử lấy kết nối từ pool trong scope riêng
         let connection = {
-            let mut available_connections = self._available_connections.lock().await;
-            
-            // Xóa các kết nối hết hạn
-            while let Some((_, created_at)) = available_connections.front() {
-                if created_at.elapsed() > Duration::from_secs(self.config.idle_timeout_secs) {
-                    available_connections.pop_front();
-                } else {
-                    break;
+            // Sử dụng scope riêng cho việc lock _available_connections
+            let connection_from_pool = {
+                // Timeout để tránh deadlock khi lấy lock
+                let lock_result = timeout(Duration::from_secs(1), self._available_connections.lock()).await;
+                let mut available_connections = match lock_result {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        // Nếu không lấy được lock, trả lại permit và báo lỗi
+                        drop(permit);
+                        return Err(PoolError::Timeout);
+                    }
+                };
+                
+                // Xóa các kết nối hết hạn
+                while let Some((_, created_at)) = available_connections.front() {
+                    if created_at.elapsed() > Duration::from_secs(self.config.idle_timeout_secs) {
+                        available_connections.pop_front();
+                    } else {
+                        break;
+                    }
                 }
-            }
+                
+                // Lấy kết nối từ pool nếu có
+                available_connections.pop_front().map(|(conn, _)| conn)
+            }; // drop available_connections lock ở đây
             
-            if let Some((conn, _)) = available_connections.pop_front() {
-                drop(available_connections);
+            // Tạo kết nối mới nếu không có sẵn trong pool - làm việc này ngoài lock để tránh giữ lock quá lâu
+            if let Some(conn) = connection_from_pool {
                 Ok(conn)
             } else {
-                drop(available_connections);
-                // Tạo kết nối mới
+                // Tạo kết nối mới - thực hiện ngoài lock để không block threads khác
                 self.create_connection().await.map_err(PoolError::Redis)
             }
         };
         
-        // Tạo PooledConnection với kết nối và permit
+        // Xử lý kết quả và trả về PooledConnection
         match connection {
             Ok(conn) => {
                 // Không giải phóng permit, nó sẽ được tự động giải phóng khi PooledConnection được drop

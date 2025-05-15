@@ -425,17 +425,29 @@ impl Plugin for Libp2pPlugin {
         info!("[Libp2p] Stopping plugin");
         // Attempt to shutdown service gracefully
         let service = self.service.clone();
-        tokio::spawn(async move {
-            match tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await {
-                Ok(result) => {
-                    match result {
-                        Ok(_) => info!("[Libp2p] Service shutdown complete"),
-                        Err(e) => warn!("[Libp2p] Error during service shutdown: {}", e)
+        let shutdown_result = tokio::time::timeout(
+            Duration::from_secs(5), 
+            service.shutdown()
+        ).await;
+        
+        match shutdown_result {
+            Ok(result) => {
+                match result {
+                    Ok(_) => info!("[Libp2p] Service shutdown complete"),
+                    Err(e) => {
+                        warn!("[Libp2p] Error during service shutdown: {}", e);
+                        // Trả về lỗi nếu shutdown dịch vụ thất bại
+                        return Err(PluginError::ShutdownError(format!("Service shutdown error: {}", e)));
                     }
-                },
-                Err(_) => error!("[Libp2p] Service shutdown timed out after 5s")
+                }
+            },
+            Err(_) => {
+                error!("[Libp2p] Service shutdown timed out after 5s");
+                // Trả về lỗi timeout thay vì bỏ qua
+                return Err(PluginError::ShutdownError("Service shutdown timed out after 5s".to_string()));
             }
-        });
+        }
+        
         // Shutdown all background tasks gracefully with timeout
         if let Ok(mut tasks) = self.background_tasks.try_lock() {
             for task in tasks.drain(..) {

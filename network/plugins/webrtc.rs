@@ -310,11 +310,16 @@ impl DefaultWebRtcService {
     
     /// Đóng tất cả các kết nối và trả về số lượng kết nối đã đóng
     pub fn close_all_connections_internal(&self) -> usize {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let mut conn_manager = self.connection_manager.lock().await;
-            conn_manager.close_all_connections()
-        })
+        match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(async {
+                let mut conn_manager = self.connection_manager.lock().await;
+                conn_manager.close_all_connections()
+            }),
+            Err(e) => {
+                error!("[WebRTC] Failed to create runtime for closing connections: {}", e);
+                0 // Trả về 0 kết nối đã đóng khi runtime không thể tạo được
+            }
+        }
     }
 }
 

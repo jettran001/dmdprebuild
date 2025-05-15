@@ -219,12 +219,18 @@ impl RateLimiter {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 let mut map = states.lock().await;
                 let now = Instant::now();
-                let _removed = 0;
+                let mut removed = 0;
                 map.retain(|_, state| {
                     // Nếu không còn request nào hợp lệ trong 10 phút thì xóa
                     let last_activity = state.request_timestamps.last().copied().unwrap_or(state.window_start);
-                    now.duration_since(last_activity) < std::time::Duration::from_secs(600)
+                    if now.duration_since(last_activity) >= std::time::Duration::from_secs(600) {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
                 });
+                debug!("[RateLimiter] Cleaned up {} stale rate limit states", removed);
             }
         });
     }
@@ -362,7 +368,7 @@ impl RateLimiter {
     
     /// Reset giới hạn cho một đường dẫn và identifier
     pub async fn reset_limit(&self, path: &str, identifier: RequestIdentifier) -> Result<(), RateLimitError> {
-        // Đọc cấu hình đường dẫn
+        // Kiểm tra cấu hình đường dẫn
         let configs = self.path_configs.read().await;
         
         let config = configs.get(path).ok_or_else(|| {

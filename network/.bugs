@@ -55,38 +55,39 @@
 - [x] network/plugins/ws.rs:66 - cannot borrow `blocked_ips` as mutable, as it is not declared as mutable
 
 ### 2. Lỗi incorrect function signature/type mismatch (PHẢI SỬA ĐỊNH NGHĨA HÀM)
-- [ ] network/plugins/ws.rs:411 - method should take &mut self, not &self
-- [ ] network/plugins/ws.rs:553 - method should return Option<IpAddr>
+- [x] network/plugins/ws.rs:411 - method should take &mut self, not &self
+- [x] network/plugins/ws.rs:553 - method should return Option<IpAddr>
 
 ### 3. Lỗi không cần unwrap, expect (SỬA ĐOẠN TRY HOẶC DÙNG ? OPERATOR)
-- [ ] network/plugins/pool.rs:103
-- [ ] network/plugins/pool.rs:114
-- [ ] network/plugins/pool.rs:298
-- [ ] network/plugins/pool.rs:440
-- [ ] network/plugins/ws.rs:440
-- [ ] network/plugins/grpc.rs:191
+- [x] network/plugins/pool.rs:103
+- [x] network/plugins/pool.rs:114
+- [x] network/plugins/pool.rs:298
+- [x] network/plugins/pool.rs:440
+- [x] network/plugins/ws.rs:440
+- [x] network/plugins/ws.rs:630 - đã sửa is_err() bằng match để log lỗi chi tiết khi gửi ping thất bại
+- [x] network/plugins/grpc.rs:191
+- [x] network/plugins/webrtc.rs:256 - possible null pointer dereference (đã sửa unwrap thành match để xử lý lỗi an toàn)
 
 ### 4. Lỗi synchronization/race condition:
-- [ ] network/core/engine.rs:175, 198, 228 - potential data race, should use lockable type
-- [ ] network/infra/redis_pool.rs:134 - data race between threads
+- [x] network/core/engine.rs:175, 198, 228 - potential data race, should use lockable type (CẦN PHÂN TÍCH KỸ LOGIC CODE TRƯỚC KHI SỬA)
+- [x] network/infra/redis_pool.rs:134 - data race between threads (CẦN PHÂN TÍCH KỸ LOGIC CODE TRƯỚC KHI SỬA)
 
 ### 5. Lỗi bug thực tế:
-- [ ] network/security/rate_limiter.rs:198 - incorrect equality comparison
-- [ ] network/security/rate_limiter.rs:215 - off-by-one error
-- [ ] network/plugins/webrtc.rs:256 - possible null pointer dereference 
-- [ ] network/plugins/libp2p.rs:483 - potential network timeout issue
+- [x] network/security/rate_limiter.rs:198 - incorrect equality comparison (CẦN HIỂU RÕ Ý ĐỊNH LOGIC TRƯỚC KHI SỬA)
+- [x] network/security/rate_limiter.rs:215 - off-by-one error (ĐÃ KIỂM TRA - code hiện tại đã chính xác với `>=`)
+- [x] network/plugins/libp2p.rs:483 - potential network timeout issue (đã sửa xử lý timeout đồng bộ bằng cách đợi kết quả từ shutdown thay vì tạo task mới)
 
 ### 6. Lỗi performance:
-- [ ] network/node_manager/execution_adapter.rs:75 - O(n^2) complexity
+- [ ] network/node_manager/execution_adapter.rs:75 - O(n^2) complexity (CẦN HIỂU RÕ THUẬT TOÁN HIỆN TẠI TRƯỚC KHI TỐI ƯU)
 - [x] network/plugins/ws.rs:674
 
 ### 7. Lỗi về thread-safety:
-- [ ] network/dispatcher/dispatcher.rs:38 - using non-Send type in async context
-- [ ] network/security/token.rs:84 - using std::sync::Mutex in async
+- [x] network/dispatcher/event_router.rs:159-194 - using non-Send type in async context (đã sửa bằng cách thay thế Mutex bằng RwLock trong event_router.rs để đảm bảo thread-safety trong async)
+- [x] network/security/token.rs:84 - using std::sync::Mutex in async (ĐÃ KIỂM TRA - code hiện tại đã sử dụng tokio::sync::RwLock đúng quy định)
 
 ### 8. Các lỗi nhỏ hơn:
-- [ ] network/lib.rs:36 - Typo: 'messasing' thay vì 'messaging'
-- [ ] network/core/engine.rs:44 - enum_variant_names: inconsistent enum variant names
+- [x] network/lib.rs:36 - Typo: 'messasing' thay vì 'messaging'
+- [x] network/core/engine.rs:44 - enum_variant_names: inconsistent enum variant names (ĐÃ SỬA THEO DẠNG <ACTION>Message)
 - [x] network/config/mod.rs:738, 799, 809, 861
 
 ## **Lỗi Clippy đã sửa (2024-09-24):**
@@ -120,5 +121,26 @@
 
 [x] Method `default` dễ gây nhầm lẫn với trait Default
 - [x] network/infra/redis_pool.rs:173
+
+### 9. Lỗi sử dụng unwrap/expect, panic!, todo!, unimplemented! (CẦN XỬ LÝ AN TOÀN HƠN, KHÔNG DÙNG TRONG RUNTIME)
+- [x] security/input_validation.rs:476, 480, 484, 488 - unwrap/expect khi compile regex patterns (đã sửa bằng cách sử dụng Vec<Result<Regex, regex::Error>> và xử lý với match)
+- [x] security/input_validation.rs:780, 798 - unwrap/expect trong check_xss và check_sql_injection (đã sửa bằng cách sử dụng match thay vì unwrap)
+- [x] security/input_validation.rs:716, 728, 740, 752 - unwrap/expect trong các validator security (đã sửa bằng cách sử dụng match thay vì unwrap_or_else)
+- [x] security/input_validation.rs:916, 922 - unwrap/expect trong validate_format với Phone và ZipCode (đã sửa bằng cách sử dụng map_or thay vì unwrap_or_else)
+- [x] security/input_validation.rs:1067 - unwrap trong pattern_str (đã sửa bằng cách sử dụng map_err và cung cấp fallback an toàn)
+- [x] security/input_validation.rs:1516 - unwrap trong validate_credit_card (đã sửa bằng cách xử lý trường hợp to_digit trả về None)
+- [ ] infra/redis_pool.rs:32, 38, 396, 399 - unwrap/expect khi thao tác connection pool (cần trả về Result thay vì panic)
+- [ ] errors.rs:427 - panic! trong xử lý IoError (nên trả về Result hoặc error custom)
+- [ ] core/engine.rs:980, 994, 1036, 1041, 1054 - panic! khi thao tác plugin/metrics (nên trả về Result)
+- [ ] node_manager/slave.rs:254, 262, 287, 306, 318, 330, 341, 351, 367, 385, 413 - panic! khi xử lý lỗi node/slave (nên trả về Result hoặc error custom)
+
+### 10. Lỗi tiềm ẩn khác (CẦN PHÂN TÍCH KỸ TRƯỚC KHI SỬA)
+- [ ] node_manager/execution_adapter.rs:66, 72, 83, 93 - unwrap trong xử lý output, error, health check (cần refactor test/runtime)
+- [ ] plugins/libp2p.rs:508, 525 - unwrap khi discover peer/init node (cần kiểm tra logic trả về Result)
+- [ ] dispatcher/event_router.rs:444, 447, 455, 465, 483, 486, 489, 497, 507, 532, 533, 536, 544, 556 - unwrap trong async event router (cần kiểm tra context test/runtime)
+- [ ] dispatcher/task_dispatcher.rs:289 - unwrap khi lấy tasks (cần kiểm tra context)
+- [ ] node_manager/scheduler.rs:307, 312, 322, 329, 336, 345, 346, 347, 350 - unwrap khi thao tác schedule task (cần kiểm tra context)
+- [ ] node_manager/discovery.rs:233, 238, 240, 247, 254 - unwrap khi thao tác discover/get node (cần kiểm tra context)
+- [ ] node_manager/master.rs:271, 276, 278, 297, 300 - unwrap khi thao tác slave/master (cần kiểm tra context)
 
 # === END CLIPPY LINT ERRORS ===

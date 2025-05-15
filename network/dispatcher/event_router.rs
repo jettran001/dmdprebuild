@@ -1,7 +1,7 @@
 use crate::errors::NetworkError;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn, error, debug};
 use std::time::Duration;
@@ -157,7 +157,7 @@ impl Drop for TaskManager {
 }
 
 /// Map chuỗi EventType đến danh sách các event handler
-pub type EventHandlerMap = Arc<Mutex<HashMap<EventType, Vec<Arc<dyn EventHandler>>>>>;
+pub type EventHandlerMap = Arc<RwLock<HashMap<EventType, Vec<Arc<dyn EventHandler>>>>>;
 
 /// EventRouter chịu trách nhiệm định tuyến các sự kiện đến các handler tương ứng
 pub struct EventRouter {
@@ -170,9 +170,9 @@ pub struct EventRouter {
     /// Cấu hình router
     config: EventRouterConfig,
     /// Task manager
-    task_manager: Arc<Mutex<TaskManager>>,
+    task_manager: Arc<RwLock<TaskManager>>,
     /// Đang chạy?
-    is_running: Arc<Mutex<bool>>,
+    is_running: Arc<RwLock<bool>>,
 }
 
 impl EventRouter {
@@ -186,19 +186,19 @@ impl EventRouter {
         let (event_sender, event_receiver) = mpsc::channel(config.channel_buffer_size);
         
         Self {
-            handlers: Arc::new(Mutex::new(HashMap::<EventType, Vec<Arc<dyn EventHandler>>>::new())),
+            handlers: Arc::new(RwLock::new(HashMap::<EventType, Vec<Arc<dyn EventHandler>>>::new())),
             event_sender,
             event_receiver: Arc::new(Mutex::new(event_receiver)),
             config,
-            task_manager: Arc::new(Mutex::new(TaskManager::new())),
-            is_running: Arc::new(Mutex::new(false)),
+            task_manager: Arc::new(RwLock::new(TaskManager::new())),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
     
     /// Đăng ký handler cho một loại sự kiện
     pub async fn register_handler(&self, event_type: EventType, handler: Arc<dyn EventHandler>) -> Result<(), NetworkError> {
         // Lấy lock cho handlers
-        let mut handlers = self.handlers.lock().await;
+        let mut handlers = self.handlers.write().await;
         
         handlers.entry(event_type.clone())
             .or_insert_with(Vec::<Arc<dyn EventHandler>>::new)
@@ -211,7 +211,7 @@ impl EventRouter {
     /// Hủy đăng ký handler cho một loại sự kiện
     pub async fn unregister_handler(&self, event_type: &EventType) -> Result<(), NetworkError> {
         // Lấy lock cho handlers
-        let mut handlers = self.handlers.lock().await;
+        let mut handlers = self.handlers.write().await;
         
         handlers.remove(event_type);
         
@@ -222,7 +222,7 @@ impl EventRouter {
     /// Gửi sự kiện mới vào router để xử lý
     pub async fn emit(&self, event: Event) -> Result<(), NetworkError> {
         // Kiểm tra nếu router đang chạy
-        let is_running = self.is_running.lock().await;
+        let is_running = self.is_running.read().await;
         if !*is_running {
             return Err(NetworkError::EventError("EventRouter is not running".to_string()));
         }
@@ -243,7 +243,7 @@ impl EventRouter {
     /// Khởi động router
     pub async fn start(&self) -> Result<(), NetworkError> {
         // Lấy lock cho is_running
-        let mut is_running_guard = self.is_running.lock().await;
+        let mut is_running_guard = self.is_running.write().await;
         
         if *is_running_guard {
             return Err(NetworkError::EventError("EventRouter is already running".to_string()));
@@ -256,7 +256,7 @@ impl EventRouter {
         
         // Thiết lập shutdown sender cho task manager
         {
-            let mut task_manager = self.task_manager.lock().await;
+            let mut task_manager = self.task_manager.write().await;
             task_manager.set_shutdown_sender(shutdown_tx.clone());
         }
         
@@ -279,7 +279,7 @@ impl EventRouter {
                     // Nhận event mới để xử lý
                     Some(event) = receiver.recv() => {
                         debug!("[EventRouter] Received event: {:?}", event);
-                        let handlers_guard = handlers.lock().await;
+                        let handlers_guard = handlers.read().await;
                         
                         // Tìm handlers cho event type
                         if let Some(event_handlers) = handlers_guard.get(&event.event_type) {
@@ -306,7 +306,7 @@ impl EventRouter {
         
         // Lưu worker task vào task manager
         {
-            let mut task_manager = self.task_manager.lock().await;
+            let mut task_manager = self.task_manager.write().await;
             task_manager.add_task(worker_handle);
         }
         
@@ -319,7 +319,7 @@ impl EventRouter {
         
         // Thêm cleanup_shutdown_tx vào task manager để có thể gửi signal khi cần shutdown
         {
-            let mut task_manager = self.task_manager.lock().await;
+            let mut task_manager = self.task_manager.write().await;
             task_manager.set_shutdown_sender(cleanup_shutdown_tx);
         }
         
@@ -347,7 +347,7 @@ impl EventRouter {
         
         // Lưu cleanup task vào task manager
         {
-            let mut task_manager = self.task_manager.lock().await;
+            let mut task_manager = self.task_manager.write().await;
             task_manager.add_task(cleanup_handle);
         }
         
@@ -358,7 +358,7 @@ impl EventRouter {
     /// Dừng router
     pub async fn stop(&self) -> Result<(), NetworkError> {
         // Lấy lock cho is_running
-        let mut is_running_guard = self.is_running.lock().await;
+        let mut is_running_guard = self.is_running.write().await;
         
         if !*is_running_guard {
             return Err(NetworkError::EventError("EventRouter is not running".to_string()));
@@ -367,7 +367,7 @@ impl EventRouter {
         *is_running_guard = false;
         
         // Cleanup tất cả các task
-        let mut task_manager = self.task_manager.lock().await;
+        let mut task_manager = self.task_manager.write().await;
         task_manager.cleanup().await;
         
         info!("[EventRouter] Stopped successfully");

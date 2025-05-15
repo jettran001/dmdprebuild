@@ -152,6 +152,7 @@ impl GrpcPlugin {
         E: std::fmt::Display + Send + Sync,
         T: Send,
     {
+        // Sử dụng các giá trị mặc định nếu không được cung cấp
         let max_retries = retries.unwrap_or(self.config.max_retries);
         let timeout_duration = timeout_ms.unwrap_or(self.config.default_timeout_ms);
         

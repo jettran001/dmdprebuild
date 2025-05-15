@@ -199,7 +199,7 @@ impl WebSocketConnectionManager {
         
         // Tạo oneshot channel mới chỉ khi shutdown_tx là None
         // Không thể sử dụng &mut self, nên ta không thể cập nhật self.shutdown_tx trực tiếp
-        let (_tx, mut rx) = oneshot::channel::<()>();
+        let (_, mut rx) = oneshot::channel::<()>();
         
         // Tạo bản sao của AtomicUsize để dùng trong task (không dùng clone())
         let current_connections = Arc::new(AtomicUsize::new(self.current_connections.load(Ordering::SeqCst)));
@@ -554,7 +554,7 @@ impl WarpWebSocketService {
     }
     
     /// Sử dụng rate limiter cho kết nối WebSocket 
-    async fn check_rate_limit(&self, addr: Option<SocketAddr>) -> Result<(), warp::Rejection> {
+    async fn check_rate_limit(&mut self, addr: Option<SocketAddr>) -> Result<(), warp::Rejection> {
         // Get client IP from socket address
         let client_ip = match addr {
             Some(socket_addr) => socket_addr.ip(),
@@ -628,10 +628,18 @@ impl WarpWebSocketService {
             let ping_handle = tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(ping_interval).await;
-                    if futures_util::SinkExt::send(&mut ws_tx, warp::ws::Message::ping(vec![])).await.is_err() {
-                        warn!("[WebSocket][{}] Gửi ping thất bại, đóng kết nối", correlation_id);
-                        break;
+                    
+                    // Sửa is_err() bằng match để xử lý lỗi đúng cách
+                    match futures_util::SinkExt::send(&mut ws_tx, warp::ws::Message::ping(vec![])).await {
+                        Ok(_) => {
+                            // Ping gửi thành công, tiếp tục xử lý
+                        },
+                        Err(e) => {
+                            warn!("[WebSocket][{}] Gửi ping thất bại, đóng kết nối: {}", correlation_id, e);
+                            break;
+                        }
                     }
+                    
                     // Chờ pong trong timeout
                     let pong_result = tokio::time::timeout(ping_timeout, pong_rx.recv()).await;
                     match pong_result {

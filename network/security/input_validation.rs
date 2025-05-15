@@ -473,47 +473,80 @@ impl<'a> InputValidator<'a> {
     /// Kiểm tra nội dung có an toàn hay không
     pub fn check_security(&self, content: &str) -> ValidationResult {
         // Compile regex patterns outside the loop
-        let xss_regex_list: Vec<Regex> = XSS_PATTERNS.iter()
-            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+        let xss_regex_list: Vec<Result<Regex, regex::Error>> = XSS_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern))
             .collect();
             
-        let sqli_regex_list: Vec<Regex> = SQLI_PATTERNS.iter()
-            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+        let sqli_regex_list: Vec<Result<Regex, regex::Error>> = SQLI_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern))
             .collect();
             
-        let cmdi_regex_list: Vec<Regex> = CMDI_PATTERNS.iter()
-            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+        let cmdi_regex_list: Vec<Result<Regex, regex::Error>> = CMDI_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern))
             .collect();
             
-        let path_traversal_regex_list: Vec<Regex> = PATH_TRAVERSAL_PATTERNS.iter()
-            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+        let path_traversal_regex_list: Vec<Result<Regex, regex::Error>> = PATH_TRAVERSAL_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern))
             .collect();
             
         // Kiểm tra XSS
-        for regex in &xss_regex_list {
-            if regex.is_match(content) {
-                return Err(ValidationError::Security("content".to_string(), "Phát hiện XSS".to_string()));
+        for regex_result in &xss_regex_list {
+            match regex_result {
+                Ok(regex) => {
+                    if regex.is_match(content) {
+                        return Err(ValidationError::Security("content".to_string(), "Phát hiện XSS".to_string()));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] XSS regex compilation error: {}", e);
+                    // Continue with other patterns instead of failing
+                    continue;
+                }
             }
         }
         
         // Kiểm tra SQLi
-        for regex in &sqli_regex_list {
-            if regex.is_match(content) {
-                return Err(ValidationError::Security("content".to_string(), "Phát hiện SQL Injection".to_string()));
+        for regex_result in &sqli_regex_list {
+            match regex_result {
+                Ok(regex) => {
+                    if regex.is_match(content) {
+                        return Err(ValidationError::Security("content".to_string(), "Phát hiện SQL Injection".to_string()));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] SQLi regex compilation error: {}", e);
+                    continue;
+                }
             }
         }
         
         // Kiểm tra Command Injection
-        for regex in &cmdi_regex_list {
-            if regex.is_match(content) {
-                return Err(ValidationError::Security("content".to_string(), "Phát hiện Command Injection".to_string()));
+        for regex_result in &cmdi_regex_list {
+            match regex_result {
+                Ok(regex) => {
+                    if regex.is_match(content) {
+                        return Err(ValidationError::Security("content".to_string(), "Phát hiện Command Injection".to_string()));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] Command Injection regex compilation error: {}", e);
+                    continue;
+                }
             }
         }
         
         // Kiểm tra Path Traversal
-        for regex in &path_traversal_regex_list {
-            if regex.is_match(content) {
-                return Err(ValidationError::Security("content".to_string(), "Phát hiện Path Traversal".to_string()));
+        for regex_result in &path_traversal_regex_list {
+            match regex_result {
+                Ok(regex) => {
+                    if regex.is_match(content) {
+                        return Err(ValidationError::Security("content".to_string(), "Phát hiện Path Traversal".to_string()));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] Path Traversal regex compilation error: {}", e);
+                    continue;
+                }
             }
         }
         
@@ -714,8 +747,16 @@ pub mod security {
     pub fn no_xss() -> impl Fn(&String) -> ValidationResult {
         move |value: &String| {
             for pattern in XSS_PATTERNS {
-                if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(value) {
-                    return Err(ValidationError::Security(String::new(), "Phát hiện XSS".to_string()));
+                match Regex::new(pattern) {
+                    Ok(regex) => {
+                        if regex.is_match(value) {
+                            return Err(ValidationError::Security(String::new(), "Phát hiện XSS".to_string()));
+                        }
+                    },
+                    Err(e) => {
+                        warn!("[InputValidator] Failed to compile XSS pattern '{}': {}", pattern, e);
+                        continue;
+                    }
                 }
             }
             Ok(())
@@ -726,8 +767,16 @@ pub mod security {
     pub fn no_sqli() -> impl Fn(&String) -> ValidationResult {
         move |value: &String| {
             for pattern in SQLI_PATTERNS {
-                if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(value) {
-                    return Err(ValidationError::Security(String::new(), "Phát hiện SQL Injection".to_string()));
+                match Regex::new(pattern) {
+                    Ok(regex) => {
+                        if regex.is_match(value) {
+                            return Err(ValidationError::Security(String::new(), "Phát hiện SQL Injection".to_string()));
+                        }
+                    },
+                    Err(e) => {
+                        warn!("[InputValidator] Failed to compile SQLi pattern '{}': {}", pattern, e);
+                        continue;
+                    }
                 }
             }
             Ok(())
@@ -738,8 +787,16 @@ pub mod security {
     pub fn no_cmdi() -> impl Fn(&String) -> ValidationResult {
         move |value: &String| {
             for pattern in CMDI_PATTERNS {
-                if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(value) {
-                    return Err(ValidationError::Security(String::new(), "Phát hiện Command Injection".to_string()));
+                match Regex::new(pattern) {
+                    Ok(regex) => {
+                        if regex.is_match(value) {
+                            return Err(ValidationError::Security(String::new(), "Phát hiện Command Injection".to_string()));
+                        }
+                    },
+                    Err(e) => {
+                        warn!("[InputValidator] Failed to compile Command Injection pattern '{}': {}", pattern, e);
+                        continue;
+                    }
                 }
             }
             Ok(())
@@ -750,8 +807,16 @@ pub mod security {
     pub fn no_path_traversal() -> impl Fn(&String) -> ValidationResult {
         move |value: &String| {
             for pattern in PATH_TRAVERSAL_PATTERNS {
-                if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(value) {
-                    return Err(ValidationError::Security(String::new(), "Phát hiện Path Traversal".to_string()));
+                match Regex::new(pattern) {
+                    Ok(regex) => {
+                        if regex.is_match(value) {
+                            return Err(ValidationError::Security(String::new(), "Phát hiện Path Traversal".to_string()));
+                        }
+                    },
+                    Err(e) => {
+                        warn!("[InputValidator] Failed to compile Path Traversal pattern '{}': {}", pattern, e);
+                        continue;
+                    }
                 }
             }
             Ok(())
@@ -779,8 +844,18 @@ pub mod security {
     /// * `Result<(), String>` - Ok nếu không có XSS, Err với thông báo lỗi nếu phát hiện XSS
     pub fn check_xss(input: &str, field_name: &str) -> Result<(), String> {
         for pattern in XSS_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(input) {
-                return Err(format!("XSS detected in {}: {}", field_name, pattern));
+            // Sử dụng match thay vì unwrap để xử lý lỗi khi compile regex
+            match Regex::new(pattern) {
+                Ok(regex) => {
+                    if regex.is_match(input) {
+                        return Err(format!("XSS detected in {}: {}", field_name, pattern));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] Failed to compile XSS pattern '{}': {}", pattern, e);
+                    // Tiếp tục với pattern khác thay vì panic
+                    continue;
+                }
             }
         }
         Ok(())
@@ -796,8 +871,18 @@ pub mod security {
     /// * `Result<(), String>` - Ok nếu không có SQL Injection, Err với thông báo lỗi nếu phát hiện SQL Injection
     pub fn check_sql_injection(input: &str, field_name: &str) -> Result<(), String> {
         for pattern in SQLI_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(input) {
-                return Err(format!("SQL Injection detected in {}: {}", field_name, pattern));
+            // Sử dụng match thay vì unwrap để xử lý lỗi khi compile regex
+            match Regex::new(pattern) {
+                Ok(regex) => {
+                    if regex.is_match(input) {
+                        return Err(format!("SQL Injection detected in {}: {}", field_name, pattern));
+                    }
+                },
+                Err(e) => {
+                    warn!("[InputValidator] Failed to compile SQLi pattern '{}': {}", pattern, e);
+                    // Tiếp tục với pattern khác thay vì panic
+                    continue;
+                }
             }
         }
         Ok(())
@@ -913,16 +998,12 @@ pub fn validate_format(value: &str, format: Format) -> bool {
             }
         },
         Format::Phone => {
-            let re = get_or_create_regex(r"^\+?[0-9]{7,15}$").unwrap_or_else(|| {
-                get_or_create_regex(r"^$").unwrap()
-            });
-            re.is_match(value)
+            get_or_create_regex(r"^\+?[0-9]{7,15}$")
+                .map_or(false, |re| re.is_match(value))
         },
         Format::ZipCode => {
-            let re = get_or_create_regex(r"^[0-9]{5}(-[0-9]{4})?$").unwrap_or_else(|| {
-                get_or_create_regex(r"^$").unwrap()
-            });
-            re.is_match(value)
+            get_or_create_regex(r"^[0-9]{5}(-[0-9]{4})?$")
+                .map_or(false, |re| re.is_match(value))
         },
         Format::Custom(_, pattern) => {
             get_or_create_regex(pattern)
@@ -1065,7 +1146,12 @@ impl StringValidator {
     }
     
     pub fn pattern_str(mut self, pattern: &str) -> Self {
-        self.pattern = Some(Regex::new(pattern).expect("Invalid regex pattern"));
+        self.pattern = Regex::new(pattern)
+            .map_err(|e| {
+                warn!("[StringValidator] Invalid regex pattern '{}': {}", pattern, e);
+                Regex::new(r".*").unwrap()
+            })
+            .ok();
         self
     }
     
@@ -1511,11 +1597,19 @@ fn validate_datetime(value: &str) -> bool {
 /// Validate credit card number using Luhn algorithm
 fn validate_credit_card(value: &str) -> bool {
     // Luhn algorithm for credit card validation
-    let digits: Vec<u32> = value
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .map(|c| c.to_digit(10).unwrap())
-        .collect();
+    let mut digits = Vec::new();
+    
+    // Lọc các ký tự số và chuyển thành digit, xử lý an toàn khi to_digit trả về None
+    for c in value.chars().filter(|c| c.is_ascii_digit()) {
+        match c.to_digit(10) {
+            Some(digit) => digits.push(digit),
+            None => {
+                // Nếu không chuyển được sang digit (không thể xảy ra với is_ascii_digit nhưng để đảm bảo an toàn)
+                warn!("[validate_credit_card] Failed to convert char '{}' to digit", c);
+                return false;
+            }
+        }
+    }
     
     if digits.len() < 13 || digits.len() > 19 {
         return false;
