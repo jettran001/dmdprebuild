@@ -2,10 +2,6 @@ use crate::core::engine::{Plugin, PluginType, PluginError};
 use std::env;
 use crate::security::input_validation::security;
 use libp2p::{identity, PeerId};
-use libp2p::noise;
-use libp2p::tcp;
-use libp2p::yamux;
-use std::error::Error;
 use std::time::Duration;
 use tracing::{info, warn, error, debug};
 use tokio::sync::{Mutex, oneshot};
@@ -13,12 +9,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 use uuid;
-use tokio::time::sleep;
 use tokio::task::JoinHandle;
-use tokio::sync::mpsc;
-use serde::{Serialize, Deserialize};
 use std::any::Any;
-use std::future::Future;
 
 #[derive(Error, Debug, Clone)]
 pub enum Libp2pError {
@@ -106,6 +98,12 @@ pub trait Libp2pService: Send + Sync {
 pub struct DefaultLibp2pService {
     config: Libp2pConfig,
     shutdown_signal: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl Default for DefaultLibp2pService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -291,6 +289,12 @@ pub struct Libp2pPlugin {
     config: Libp2pConfig,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Default for Libp2pPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Libp2pPlugin {

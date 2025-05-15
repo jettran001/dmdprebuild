@@ -11,13 +11,11 @@
 //! - Kiểm tra và phòng chống các lỗ hổng bảo mật
 
 use std::collections::HashMap;
-use thiserror::Error;
 use regex;
-use crate::security::{ValidationResult, ValidationError, Validate, Sanitizer, ValidationErrors as InputValidationResult, check_xss, check_sql_injection, sanitize_html};
+use crate::security::sanitize_html;
+use crate::security::input_validation::security::{check_xss, check_sql_injection};
 use serde::{Serialize, Deserialize};
-use tracing::{warn, error, debug};
-use std::net::IpAddr;
-use crate::errors::NetworkError;
+use tracing::warn;
 
 /// Cấu trúc lưu trữ lỗi validation đảm bảo định dạng chuẩn, dễ chuyển đổi thành JSON
 /// hoặc các định dạng khác để trả về cho client.
@@ -42,7 +40,7 @@ impl ValidationErrors {
     pub fn add_error(&mut self, field: &str, message: &str) {
         self.errors
             .entry(field.to_string())
-            .or_insert_with(|| Vec::<String>::new())
+            .or_default()
             .push(message.to_string());
     }
 
@@ -184,10 +182,10 @@ impl ApiValidator {
                     }
 
                     // Kiểm tra XSS và SQL injection
-                    if let Err(e) = crate::security::check_xss(value, field) {
+                    if let Err(e) = check_xss(value, field) {
                         errors.add_error(field, &format!("XSS: {}", e));
                     }
-                    if let Err(e) = crate::security::check_sql_injection(value, field) {
+                    if let Err(e) = check_sql_injection(value, field) {
                         errors.add_error(field, &format!("SQL Injection: {}", e));
                     }
                 }
@@ -216,7 +214,7 @@ impl ApiValidator {
             for (field, value) in params {
                 if let Some(field_rule) = rule.field_rules.get(&field) {
                     if field_rule.sanitize {
-                        let sanitized_value = crate::security::sanitize_html(&value);
+                        let sanitized_value = sanitize_html(&value);
                         sanitized.insert(field, sanitized_value);
                     } else {
                         sanitized.insert(field, value);
@@ -271,15 +269,21 @@ impl ApiValidator {
         }
 
         // Kiểm tra XSS và SQL injection
-        crate::security::check_xss(value, field_name).map_err(|e| e.to_string())?;
-        crate::security::check_sql_injection(value, field_name).map_err(|e| e.to_string())?;
+        check_xss(value, field_name).map_err(|e| e.to_string())?;
+        check_sql_injection(value, field_name).map_err(|e| e.to_string())?;
 
         // Làm sạch nếu cần
         if rules.sanitize {
-            Ok(crate::security::sanitize_html(value))
+            Ok(sanitize_html(value))
         } else {
             Ok(value.to_string())
         }
+    }
+}
+
+impl Default for ApiValidator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -530,10 +534,8 @@ mod integration_examples {
 
 /// Module cung cấp các validator đặc thù cho các endpoint API
 pub mod endpoint_validators {
-    use std::collections::HashMap;
-    use crate::security::input_validation::{InputValidator, FieldValidator, ValidationError};
+    use crate::security::input_validation::{InputValidator, FieldValidator};
     use crate::security::input_validation::string;
-    use crate::security::input_validation::number;
     use crate::errors::NetworkError;
 
     /// Validator cho endpoint /logs/{domain}
@@ -604,13 +606,8 @@ pub mod endpoint_validators {
     }
 
     /// Validator cho endpoint /metrics (không cần tham số)
+    #[derive(Default)]
     pub struct MetricsValidator {}
-
-    impl Default for MetricsValidator {
-        fn default() -> Self {
-            Self {}
-        }
-    }
 
     impl MetricsValidator {
         pub fn validate(&self) -> Result<(), NetworkError> {
@@ -620,13 +617,8 @@ pub mod endpoint_validators {
     }
 
     /// Validator cho endpoint /health (không cần tham số)
+    #[derive(Default)]
     pub struct HealthValidator {}
-
-    impl Default for HealthValidator {
-        fn default() -> Self {
-            Self {}
-        }
-    }
 
     impl HealthValidator {
         pub fn validate(&self) -> Result<(), NetworkError> {

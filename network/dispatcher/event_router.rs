@@ -123,6 +123,12 @@ impl TaskManager {
     }
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for TaskManager {
     fn drop(&mut self) {
         // Sử dụng tokio runtime hiện tại nếu có
@@ -150,10 +156,13 @@ impl Drop for TaskManager {
     }
 }
 
+/// Map chuỗi EventType đến danh sách các event handler
+pub type EventHandlerMap = Arc<Mutex<HashMap<EventType, Vec<Arc<dyn EventHandler>>>>>;
+
 /// EventRouter chịu trách nhiệm định tuyến các sự kiện đến các handler tương ứng
 pub struct EventRouter {
     /// Map từ EventType -> Vec<Arc<dyn EventHandler>>
-    handlers: Arc<Mutex<HashMap<EventType, Vec<Arc<dyn EventHandler>>>>>,
+    handlers: EventHandlerMap,
     /// Kênh gửi event
     event_sender: mpsc::Sender<Event>,
     /// Kênh nhận event
@@ -192,7 +201,7 @@ impl EventRouter {
         let mut handlers = self.handlers.lock().await;
         
         handlers.entry(event_type.clone())
-            .or_insert_with(|| Vec::<Arc<dyn EventHandler>>::new())
+            .or_insert_with(Vec::<Arc<dyn EventHandler>>::new)
             .push(handler);
             
         debug!("[EventRouter] Registered handler for event type: {:?}", event_type);
@@ -226,7 +235,7 @@ impl EventRouter {
             },
             Err(e) => {
                 error!("[EventRouter] Failed to emit event: {}", e);
-                return Err(NetworkError::EventError(format!("Failed to emit event: {}", e)));
+                Err(NetworkError::EventError(format!("Failed to emit event: {}", e)))
             }
         }
     }
@@ -254,8 +263,8 @@ impl EventRouter {
         // Khởi động worker task
         let handlers = self.handlers.clone();
         let event_receiver = self.event_receiver.clone();
-        let config = self.config.clone();
-        let task_manager = self.task_manager.clone();
+        let _config = self.config.clone();
+        let _task_manager = self.task_manager.clone();
         
         let worker_handle = tokio::spawn(async move {
             info!("[EventRouter] Starting event processing worker");
@@ -302,7 +311,7 @@ impl EventRouter {
         }
         
         // Khởi động task dọn dẹp định kỳ
-        let task_manager_clone = self.task_manager.clone();
+        let _task_manager_clone = self.task_manager.clone();
         let cleanup_interval = self.config.cleanup_interval_ms;
         
         // Tạo một kênh shutdown riêng cho cleanup task
@@ -363,6 +372,12 @@ impl EventRouter {
         
         info!("[EventRouter] Stopped successfully");
         Ok(())
+    }
+}
+
+impl Default for EventRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

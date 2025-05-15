@@ -4,8 +4,7 @@ use tracing::{info, warn, error};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
-use tokio::time;
+use tokio::sync::RwLock;
 
 // Cập nhật import để sử dụng NodeProfile từ node_manager::mod.rs
 use crate::node_manager::NodeProfile;
@@ -46,7 +45,14 @@ pub struct PartitionedMasterNodeService {
     cleanup_notify: Arc<tokio::sync::Notify>,
 }
 
+impl Default for PartitionedMasterNodeService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PartitionedMasterNodeService {
+    /// Tạo mới một PartitionedMasterNodeService
     pub fn new() -> Self {
         let cleanup_notify = Arc::new(tokio::sync::Notify::new());
         

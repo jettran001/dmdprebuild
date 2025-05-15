@@ -4,7 +4,7 @@
 //! Chuyển từ network/core/config.rs.
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn, error};
+use tracing::{debug, warn};
 use crate::config::error::ConfigError;
 
 /// NodeType định nghĩa loại node

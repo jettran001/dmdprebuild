@@ -4,7 +4,7 @@
 //! Module này thay thế network/infra/config_types.rs.
 
 use serde::{Serialize, Deserialize};
-use tracing::{info, warn, error, debug};
+use tracing::{warn, error, debug};
 use crate::config::error::ConfigError;
 
 /// Redis configuration

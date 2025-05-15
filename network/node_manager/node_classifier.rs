@@ -1,5 +1,5 @@
 use crate::node_manager::{NodeProfile, NodeRole};
-use crate::dispatcher::dispatcher::{Dispatcher, Task};
+use crate::dispatcher::task_dispatcher::{Dispatcher, Task};
 use rand::Rng;
 use tracing::{info, warn};
 

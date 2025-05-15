@@ -8,7 +8,6 @@ use std::future::Future;
 use tracing::{info, warn, error, debug};
 use std::sync::Arc;
 use std::any::Any;
-use std::sync::atomic::AtomicUsize;
 
 /// Cấu hình cho GrpcPlugin
 pub struct GrpcConfig {
@@ -38,6 +37,12 @@ pub struct GrpcPlugin {
     config: GrpcConfig,
     addr: String,
     server: Option<Arc<tokio::sync::Mutex<()>>>, // Mock server handle
+}
+
+impl Default for GrpcPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GrpcPlugin {
@@ -431,6 +436,12 @@ fn spawn_resource_monitor() {
 // GrpcClient struct với shutdown capabilities
 pub struct GrpcClient {
     shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Default for GrpcClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GrpcClient {

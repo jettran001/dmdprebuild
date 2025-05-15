@@ -11,8 +11,8 @@
 
 use jsonwebtoken::{encode, decode, Header, EncodingKey, DecodingKey, Validation, Algorithm};
 use serde::{Serialize, Deserialize};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use crate::security::AuthError;
+use std::time::{SystemTime, UNIX_EPOCH};
+use crate::security::auth_middleware::AuthError;
 use std::sync::Arc;
 use std::fs;
 
@@ -156,7 +156,7 @@ impl JwtService {
             &claims,
             encoding_key,
         )
-        .map_err(|e| AuthError::JwtError(e))
+        .map_err(AuthError::JwtError)
     }
     
     /// Xác thực JWT token

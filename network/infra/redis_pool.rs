@@ -85,7 +85,7 @@ pub struct ConnectionPool {
     /// Semaphore để giới hạn số lượng kết nối
     semaphore: Semaphore,
     /// Danh sách các kết nối sẵn sàng
-    available_connections: Mutex<VecDeque<(Connection, std::time::Instant)>>,
+    _available_connections: Mutex<VecDeque<(Connection, std::time::Instant)>>,
     /// Cấu hình cho pool
     config: RedisPoolConfig,
     /// Cờ dừng background cleanup
@@ -147,7 +147,7 @@ impl ConnectionPool {
         let pool = Arc::new(ConnectionPool {
             client,
             semaphore: Semaphore::new(config.max_connections as usize),
-            available_connections: Mutex::new(VecDeque::with_capacity(config.max_connections as usize)),
+            _available_connections: Mutex::new(VecDeque::with_capacity(config.max_connections as usize)),
             config,
             stop_cleanup: Arc::new(AtomicBool::new(false)),
             notify_cleanup: Arc::new(Notify::new()),
@@ -177,7 +177,7 @@ impl ConnectionPool {
     /// Trả một kết nối về pool
     async fn return_connection(&self, conn: Connection) {
         let now = std::time::Instant::now();
-        let mut available_connections = self.available_connections.lock().await;
+        let mut available_connections = self._available_connections.lock().await;
         
         // Xóa các kết nối hết hạn (đã idle quá lâu)
         while let Some((_, created_at)) = available_connections.front() {
@@ -214,7 +214,7 @@ impl ConnectionPool {
     
     /// Loại bỏ các kết nối đã hết hạn
     async fn clean_expired_connections(&self) -> usize {
-        let mut available_connections = self.available_connections.lock().await;
+        let mut available_connections = self._available_connections.lock().await;
         let before_len = available_connections.len();
         
         // Xóa các kết nối idle quá lâu
@@ -222,16 +222,15 @@ impl ConnectionPool {
             created_at.elapsed() <= Duration::from_secs(self.config.idle_timeout_secs)
         });
         
-        let removed = before_len - available_connections.len();
-        removed
+        before_len - available_connections.len()
     }
 }
 
 #[async_trait]
 impl RedisPool for ConnectionPool {
     async fn get_connection(&self) -> Result<PooledConnection, PoolError> {
-        let lock_result = timeout(Duration::from_secs(1), self.available_connections.lock()).await;
-        let mut available_connections = match lock_result {
+        let lock_result = timeout(Duration::from_secs(1), self._available_connections.lock()).await;
+        let _available_connections = match lock_result {
             Ok(guard) => guard,
             Err(_) => return Err(PoolError::Timeout),
         };
@@ -248,7 +247,7 @@ impl RedisPool for ConnectionPool {
         
         // Thử lấy kết nối từ pool
         let connection = {
-            let mut available_connections = self.available_connections.lock().await;
+            let mut available_connections = self._available_connections.lock().await;
             
             // Xóa các kết nối hết hạn
             while let Some((_, created_at)) = available_connections.front() {
@@ -294,7 +293,7 @@ impl RedisPool for ConnectionPool {
         T: Send + 'static,
     {
         let mut conn = self.get_connection().await?;
-        f(&mut conn).map_err(|e| PoolError::Redis(e))
+        f(&mut conn).map_err(PoolError::Redis)
     }
     
     async fn health_check(&self) -> Result<(), PoolError> {
@@ -304,13 +303,13 @@ impl RedisPool for ConnectionPool {
     }
     
     async fn metrics(&self) -> PoolMetrics {
-        let available = self.available_connections.lock().await;
+        let available = self._available_connections.lock().await;
         let idle_count = available.len();
         drop(available);
         
         let max = self.config.max_connections as usize;
         let active = max - self.semaphore.available_permits();
-        let waiting = if active > max { active - max } else { 0 };
+        let waiting = active.saturating_sub(max);
         
         PoolMetrics {
             active_connections: active,
@@ -323,7 +322,7 @@ impl RedisPool for ConnectionPool {
     async fn shutdown(&self) {
         self.stop_cleanup.store(true, Ordering::SeqCst);
         self.notify_cleanup.notify_waiters();
-        let mut available_connections = self.available_connections.lock().await;
+        let mut available_connections = self._available_connections.lock().await;
         available_connections.clear();
     }
 }
@@ -333,7 +332,7 @@ impl Clone for ConnectionPool {
         ConnectionPool {
             client: self.client.clone(),
             semaphore: Semaphore::new(self.config.max_connections as usize),
-            available_connections: Mutex::new(VecDeque::with_capacity(self.config.max_connections as usize)),
+            _available_connections: Mutex::new(VecDeque::with_capacity(self.config.max_connections as usize)),
             config: self.config.clone(),
             stop_cleanup: Arc::new(AtomicBool::new(false)),
             notify_cleanup: Arc::new(Notify::new()),

@@ -207,17 +207,12 @@ pub mod loader;
 pub mod error;
 
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::default::Default;
-use tracing::{info, warn, error, debug};
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use dotenv::dotenv;
+use tracing::debug;
+use std::collections::HashMap;
+use std::path::Path;
 use crate::config::error::ConfigError;
 
-use crate::config::types::*;
 use crate::config::core::NetworkCoreConfig;
 use crate::config::loader::ConfigLoader;
 
@@ -271,21 +266,27 @@ pub struct PluginsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitoringConfig {
     /// Bật/tắt metrics
+    #[serde(default = "default_true")]
     pub enable_metrics: bool,
     
     /// Cổng metrics
+    #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     
     /// Đường dẫn metrics
+    #[serde(default = "default_metrics_path")]
     pub metrics_path: String,
     
     /// Bật/tắt health check
+    #[serde(default = "default_true")]
     pub enable_health_checks: bool,
     
     /// Cổng health check
+    #[serde(default = "default_health_port")]
     pub health_port: u16,
     
     /// Đường dẫn health check
+    #[serde(default = "default_health_path")]
     pub health_path: String,
 }
 
@@ -293,27 +294,35 @@ pub struct MonitoringConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Đường dẫn chứng chỉ TLS
+    #[serde(default)]
     pub tls_cert_path: Option<String>,
     
     /// Đường dẫn khóa TLS
+    #[serde(default)]
     pub tls_key_path: Option<String>,
     
     /// Bật/tắt xác thực
+    #[serde(default)]
     pub enable_auth: bool,
     
     /// Endpoint xác thực token
+    #[serde(default)]
     pub auth_endpoint: Option<String>,
     
     /// Cấu hình rate limit
+    #[serde(default)]
     pub rate_limit: RateLimitConfig,
     
     /// Cấu hình CORS
+    #[serde(default)]
     pub cors: CorsConfig,
 
     /// Cấu hình xác thực chi tiết từ auth.yaml
+    #[serde(default)]
     pub auth: Option<AuthConfig>,
     
     /// Cấu hình validation đầu vào từ input_validation.yaml
+    #[serde(default)]
     pub input_validation: Option<InputValidationConfig>,
 }
 
@@ -441,49 +450,63 @@ pub struct TokenManagement {
     pub allow_multiple_logins: bool,
 }
 
-/// Cấu hình rate limit
+/// Rate limit config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     /// Bật/tắt rate limit
+    #[serde(default)]
     pub enabled: bool,
     
     /// Số request tối đa trong một khoảng thời gian
+    #[serde(default = "default_max_requests")]
     pub max_requests: usize,
     
     /// Khoảng thời gian tính bằng giây
+    #[serde(default = "default_window_seconds")]
     pub window_seconds: u64,
     
     /// Thuật toán mặc định
+    #[serde(default)]
     pub default_algorithm: Option<String>,
     
     /// Hành động mặc định khi vượt quá giới hạn
+    #[serde(default)]
     pub default_action: Option<String>,
     
     /// HTTP status code khi reject
+    #[serde(default)]
     pub reject_status_code: Option<u16>,
     
     /// Thông báo khi reject
+    #[serde(default)]
     pub reject_message: Option<String>,
     
     /// Bao gồm các header trong response
+    #[serde(default)]
     pub include_headers: Option<bool>,
     
     /// Header số request còn lại
+    #[serde(default)]
     pub remaining_header: Option<String>,
     
     /// Header giới hạn request
+    #[serde(default)]
     pub limit_header: Option<String>,
     
     /// Header thời gian reset
+    #[serde(default)]
     pub reset_header: Option<String>,
     
     /// Cấu hình chi tiết cho từng đường dẫn API
+    #[serde(default)]
     pub paths: Option<Vec<RateLimitPath>>,
     
     /// Cách xác định client
+    #[serde(default)]
     pub identifier: Option<RateLimitIdentifier>,
     
     /// Cấu hình lưu trữ trạng thái
+    #[serde(default)]
     pub storage: Option<RateLimitStorage>
 }
 
@@ -545,18 +568,23 @@ pub struct RateLimitStorage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorsConfig {
     /// Bật/tắt CORS
+    #[serde(default = "default_true")]
     pub enabled: bool,
     
     /// Các nguồn được phép (để trống = tất cả)
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
     
     /// Các phương thức được phép
+    #[serde(default = "default_http_methods")]
     pub allowed_methods: Vec<String>,
     
     /// Các header được phép
+    #[serde(default = "default_http_headers")]
     pub allowed_headers: Vec<String>,
     
     /// Cho phép credentials
+    #[serde(default)]
     pub allow_credentials: bool,
 }
 
@@ -719,7 +747,7 @@ pub struct ValidationSecurityConfig {
     pub sensitive_data: SecurityDetectionConfig,
 }
 
-/// Cấu hình phát hiện bảo mật
+/// Security detection config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityDetectionConfig {
     /// Bật/tắt
@@ -734,6 +762,21 @@ pub struct SecurityDetectionConfig {
     /// Danh sách pattern
     pub patterns: Vec<String>,
 }
+
+// Helper functions for default values
+fn default_max_requests() -> usize { 100 }
+fn default_window_seconds() -> u64 { 60 }
+fn default_true() -> bool { true }
+fn default_http_methods() -> Vec<String> {
+    vec!["GET".to_string(), "POST".to_string(), "PUT".to_string(), "DELETE".to_string()]
+}
+fn default_http_headers() -> Vec<String> {
+    vec!["Content-Type".to_string(), "Authorization".to_string()]
+}
+fn default_metrics_port() -> u16 { 9090 }
+fn default_metrics_path() -> String { "/metrics".to_string() }
+fn default_health_port() -> u16 { 8080 }
+fn default_health_path() -> String { "/health".to_string() }
 
 impl Default for SecurityConfig {
     fn default() -> Self {

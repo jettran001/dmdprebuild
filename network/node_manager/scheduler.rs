@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
-use tokio::sync::Mutex;
 
 /// Timeout cho các hoạt động scheduling
 const SCHEDULER_TIMEOUT_MS: u64 = 3000; // 3 giây
@@ -26,9 +25,9 @@ pub trait SchedulerService: Send + Sync {
 
 /// Default implementation of SchedulerService (async, thread-safe)
 pub struct DefaultSchedulerService {
-    tasks: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    tasks: Arc<tokio::sync::Mutex<HashMap<String, Vec<String>>>>,
     /// Thời điểm cập nhật cuối cùng của mỗi node/task
-    task_last_update: Arc<Mutex<HashMap<String, Instant>>>,
+    task_last_update: Arc<tokio::sync::Mutex<HashMap<String, Instant>>>,
     /// Flag để dừng cleanup task khi cần
     cleanup_running: Arc<tokio::sync::watch::Sender<bool>>,
 }
@@ -37,8 +36,8 @@ impl Default for DefaultSchedulerService {
     fn default() -> Self {
         // Tạo channel để gửi tín hiệu dừng cleanup task
         let (cleanup_tx, cleanup_rx) = tokio::sync::watch::channel(false);
-        let tasks: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::new(Mutex::new(HashMap::new()));
-        let task_last_update: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tasks: Arc<tokio::sync::Mutex<HashMap<String, Vec<String>>>> = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let task_last_update: Arc<tokio::sync::Mutex<HashMap<String, Instant>>> = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         
         // Spawn cleanup task
         let tasks_clone = tasks.clone();
@@ -282,11 +281,7 @@ impl SchedulerService for DefaultSchedulerService {
 /// Get total number of task-node pairs in the scheduler service (async version)
 pub async fn get_task_node_count(service: &impl SchedulerService) -> Result<usize, String> {
     // Lấy danh sách các node có task
-    let mut node_ids = Vec::new();
-    
-    // Mock implementation - Trong implementation thực tế, cần lấy danh sách nodes từ một source khác
-    node_ids.push("node-1".to_string());
-    node_ids.push("node-2".to_string());
+    let node_ids = vec!["node-1".to_string(), "node-2".to_string()];
     
     let mut total_tasks = 0;
     

@@ -35,8 +35,6 @@
 //!
 //! Mọi module trong domain network đều nên sử dụng error type này thay vì định nghĩa riêng.
 
-use std::fmt;
-use std::error::Error as StdError;
 use std::io;
 use serde::{Serialize, Deserialize};
 use thiserror::Error;

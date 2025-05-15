@@ -19,8 +19,7 @@
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::time::{timeout, Duration};
-use std::sync::Arc;
+use tokio::time::Duration;
 use serde::{Serialize, Deserialize};
 
 #[derive(Error, Debug, Serialize, Deserialize)]

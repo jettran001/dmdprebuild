@@ -4,7 +4,6 @@ use crate::security::input_validation::security;
 use log::{info, warn, error, debug};
 use async_trait::async_trait;
 use crate::infra::service_traits::{WasmService, ServiceError};
-use std::time::Duration;
 use std::any::Any;
 
 pub struct WasmPlugin {
@@ -128,6 +127,12 @@ impl DefaultWasmService {
             initialized: false,
             modules: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl Default for DefaultWasmService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

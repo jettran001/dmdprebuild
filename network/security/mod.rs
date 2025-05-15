@@ -1,112 +1,183 @@
-//! Module bảo mật (Security) cho hệ thống network
-//!
-//! Module này cung cấp các tính năng bảo mật như:
-//! - Xác thực và ủy quyền (Authentication and Authorization)
-//! - Giới hạn tốc độ truy cập (Rate limiting)
-//! - Xác thực đầu vào (Input validation)
-//! - Kiểm tra bảo mật (Security checks)
-//! - Middleware bảo mật (Security middleware)
-//!
-//! ## Module chuẩn hóa sau quá trình hợp nhất
-//!
-//! - `auth_middleware.rs`: Xử lý xác thực và ủy quyền người dùng, hỗ trợ JWT, API key và simple token
-//! - `rate_limiter.rs`: Giới hạn tốc độ truy cập các endpoint API dựa trên IP, user hoặc các tham số khác
-//! - `input_validation.rs`: Xử lý validation đầu vào chung, hỗ trợ string, number, boolean, array
-//! - `api_validation.rs`: Validation đặc biệt cho các API endpoint, tương tác với input_validation
-//! - `jwt.rs`: Dịch vụ xử lý JWT token riêng biệt
-//! - `token.rs`: Dịch vụ quản lý token đơn giản
+// Copyright 2024 Diamond Chain Network
+// Bảo mật - các cơ chế kiểm soát bảo mật, xác thực, phân quyền, và kiểm tra đầu vào
+
+use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 pub mod auth_middleware;
-pub mod rate_limiter;
 pub mod input_validation;
 pub mod api_validation;
+pub mod rate_limiter;
 pub mod jwt;
 pub mod token;
-
-// =====================================================================
-// CHÚ Ý: CÁC MODULE ĐÃ BỊ TRÙNG LẶP ĐÃ ĐƯỢC HỢP NHẤT VÀ XÓA
-// =====================================================================
-// * auth.rs -> ĐÃ XÓA, mọi tính năng đã nằm trong auth_middleware.rs
-// * validation.rs -> ĐÃ XÓA, mọi tính năng đã hợp nhất vào input_validation.rs
-// * input_validator.rs -> ĐÃ XÓA, mọi tính năng đã hợp nhất vào input_validation.rs
-// =====================================================================
 
 // Standard export của validation module (hợp nhất từ cả 3 module)
 pub use input_validation::{
     InputValidator, ValidationErrors, ValidationError, ValidationResult, 
-    FieldValidator, Sanitizer, Validate, sanitize_html, escape_sql
+    FieldValidator, Sanitizer, Validate
 };
 
-// Export các hàm kiểm tra bảo mật từ module security con của input_validation
-pub use input_validation::security::{check_xss, check_sql_injection, no_xss, no_sqli, no_cmdi, no_path_traversal, all_security_checks};
+/// Hàm utility để sanitize HTML input
+pub fn sanitize_html(input: &str) -> String {
+    // Phiên bản đơn giản, chỉ loại bỏ các tag nguy hiểm
+    input
+        .replace("<script", "&lt;script")
+        .replace("</script>", "&lt;/script&gt;")
+        .replace("<iframe", "&lt;iframe")
+        .replace("</iframe>", "&lt;/iframe&gt;")
+        .replace("<object", "&lt;object")
+        .replace("</object>", "&lt;/object&gt;")
+        .replace("<embed", "&lt;embed")
+        .replace("</embed>", "&lt;/embed&gt;")
+        .replace("javascript:", "")
+        .replace("data:", "")
+        .replace("vbscript:", "")
+}
 
-// Standard export của auth module
-pub use auth_middleware::{AuthService, AuthError, UserRole, AuthInfo, AuthType, Auth, Claims};
+/// Hàm utility để escape SQL input
+pub fn escape_sql(input: &str) -> String {
+    // Phiên bản đơn giản, chỉ escape các ký tự đặc biệt trong SQL
+    input
+        .replace("'", "''")
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+}
 
-// Standard export của api_validation module
-pub use api_validation::{
-    ApiValidator, ValidationErrors as ApiValidationErrors, FieldRule, ApiValidationRule,
-    // Validators cho các endpoint cụ thể
-    LogDomainValidator, PluginTypeValidator, MetricsValidator, HealthValidator, create_default_validators
-};
-
-// Các export khác
-pub use rate_limiter::{RateLimiter, RateLimitError, RateLimitAlgorithm, RateLimitAction, RateLimitResult};
-pub use jwt::{JwtService, JwtConfig};
-pub use token::{TokenService, TokenConfig};
-
-/// Cấu hình cho security module
-#[derive(Debug, Clone)]
+/// General security configuration
 pub struct SecurityConfig {
+    /// Cấu hình auth
     pub auth: AuthConfig,
+    /// Cấu hình rate limit
     pub rate_limit: RateLimitConfig,
-    pub input_validation: InputValidationConfig,
-    pub jwt: JwtConfig,
-    pub token: TokenConfig,
-}
-    
-/// Cấu hình cho auth
-#[derive(Debug, Clone)]
-pub struct AuthConfig {
-    pub enabled: bool,
-    pub jwt_secret: String,
-    pub jwt_algorithm: String,
-    pub jwt_expires_in_seconds: u64,
-    pub api_key_enabled: bool,
-    pub rsa_private_key_path: Option<String>,
-    pub rsa_public_key_path: Option<String>,
-}
-    
-/// Cấu hình cho rate limit
-#[derive(Debug, Clone)]
-pub struct RateLimitConfig {
-    pub enabled: bool,
-    pub default_limit: u32,
-    pub default_window_seconds: u32,
-    pub redis_url: Option<String>,
-    pub in_memory_capacity: usize,
-}
-    
-/// Cấu hình cho input validation
-#[derive(Debug, Clone)]
-pub struct InputValidationConfig {
-    pub enabled: bool,
-    pub max_body_size: usize,
-    pub max_uri_length: usize,
-    pub max_header_count: usize,
-    pub max_header_size: usize,
-    pub max_query_params: usize,
-    pub allowed_content_types: Vec<String>,
+    /// Cấu hình validation
+    pub validation: InputValidationConfig,
+    /// Flags bảo mật
+    pub security_flags: SecurityFlags,
 }
 
-impl Default for SecurityConfig {
+/// Security flags
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityFlags {
+    /// Cho phép bypass auth trong dev mode
+    #[serde(default)]
+    pub allow_auth_bypass: bool,
+    /// Cho phép ip nào được bypass rate limit
+    #[serde(default)]
+    pub rate_limit_bypass_ip: Vec<String>,
+    /// Cho phép dev account
+    #[serde(default)]
+    pub allow_dev_accounts: bool,
+    /// Yêu cầu 2FA
+    #[serde(default)]
+    pub require_2fa: bool,
+}
+
+/// Auth config
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// JWT secret key
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
+    /// JWT expiration time (seconds)
+    #[serde(default = "default_jwt_expiration")]
+    pub jwt_expiration: u64,
+    /// API key expiration time (days)
+    #[serde(default = "default_api_key_expiration")]
+    pub api_key_expiration_days: u32,
+    /// Simple token expiration time (hours)
+    #[serde(default = "default_simple_token_expiration")]
+    pub simple_token_expiration_hours: u32,
+    /// Refresh token expiration time (days)
+    #[serde(default = "default_refresh_token_expiration")]
+    pub refresh_token_expiration_days: u32,
+    /// Rate limit failed login attempts
+    #[serde(default = "default_max_failed_login_attempts")]
+    pub max_failed_login_attempts: u32,
+    /// Rate limit window (minutes)
+    #[serde(default = "default_failed_login_window")]
+    pub failed_login_window_minutes: u32,
+}
+
+// Helper functions for default values in AuthConfig
+fn default_jwt_secret() -> String { "change-me-in-production".to_string() }
+fn default_jwt_expiration() -> u64 { 3600 * 24 } // 1 day
+fn default_api_key_expiration() -> u32 { 30 }
+fn default_simple_token_expiration() -> u32 { 24 }
+fn default_refresh_token_expiration() -> u32 { 30 }
+fn default_max_failed_login_attempts() -> u32 { 5 }
+fn default_failed_login_window() -> u32 { 15 }
+
+/// Input validation config
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputValidationConfig {
+    /// Max field length
+    #[serde(default = "default_max_field_length")]
+    pub max_field_length: usize,
+    /// Min password length
+    #[serde(default = "default_min_password_length")]
+    pub min_password_length: usize,
+    /// Max password length
+    #[serde(default = "default_max_password_length")]
+    pub max_password_length: usize,
+    /// Các input field bị blocked
+    #[serde(default)]
+    pub blocked_input: Vec<String>,
+    /// Có check XSS không
+    #[serde(default = "default_true")]
+    pub enable_xss_protection: bool,
+    /// Có check SQL injection không
+    #[serde(default = "default_true")]
+    pub enable_sqli_protection: bool,
+    /// Có check command injection không
+    #[serde(default = "default_true")]
+    pub enable_cmdi_protection: bool,
+    /// Có sanitize tất cả input không
+    #[serde(default = "default_true")]
+    pub sanitize_all_input: bool,
+}
+
+// Helper functions for default values in InputValidationConfig
+fn default_max_field_length() -> usize { 1000 }
+fn default_min_password_length() -> usize { 8 }
+fn default_max_password_length() -> usize { 128 }
+fn default_true() -> bool { true }
+
+/// Rate limit config
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Enable rate limiting
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Global rate limit (requests per minute)
+    #[serde(default = "default_global_rate")]
+    pub global_rate: u32,
+    /// Endpoint specific rate limits
+    #[serde(default)]
+    pub endpoint_rates: HashMap<String, u32>,
+    /// IP whitelist for rate limiting
+    #[serde(default = "default_ip_whitelist")]
+    pub ip_whitelist: Vec<String>,
+    /// Block time after exceeding rate limit (minutes)
+    #[serde(default = "default_block_time")]
+    pub block_time_minutes: u32,
+    /// Use custom headers for rate limit info
+    #[serde(default = "default_true")]
+    pub use_custom_headers: bool,
+}
+
+// Helper functions for default values in RateLimitConfig
+fn default_global_rate() -> u32 { 60 }
+fn default_ip_whitelist() -> Vec<String> { vec!["127.0.0.1".to_string()] }
+fn default_block_time() -> u32 { 15 }
+
+impl Default for SecurityFlags {
     fn default() -> Self {
         Self {
-            auth: AuthConfig::default(),
-            rate_limit: RateLimitConfig::default(),
-            input_validation: InputValidationConfig::default(),
-            jwt: JwtConfig::default(),
-            token: TokenConfig::default(),
+            allow_auth_bypass: false,
+            rate_limit_bypass_ip: vec![],
+            allow_dev_accounts: false,
+            require_2fa: false,
         }
     }
 }
@@ -114,13 +185,28 @@ impl Default for SecurityConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            jwt_secret: "default_jwt_secret_for_development_only".to_string(),
-            jwt_algorithm: "HS256".to_string(),
-            jwt_expires_in_seconds: 3600,
-            api_key_enabled: true,
-            rsa_private_key_path: None,
-            rsa_public_key_path: None,
+            jwt_secret: "change-me-in-production".to_string(),
+            jwt_expiration: 3600 * 24, // 1 day
+            api_key_expiration_days: 30,
+            simple_token_expiration_hours: 24,
+            refresh_token_expiration_days: 30,
+            max_failed_login_attempts: 5,
+            failed_login_window_minutes: 15,
+        }
+    }
+}
+
+impl Default for InputValidationConfig {
+    fn default() -> Self {
+        Self {
+            max_field_length: 1000,
+            min_password_length: 8,
+            max_password_length: 128,
+            blocked_input: vec![],
+            enable_xss_protection: true,
+            enable_sqli_protection: true,
+            enable_cmdi_protection: true,
+            sanitize_all_input: true,
         }
     }
 }
@@ -129,29 +215,22 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            default_limit: 100,
-            default_window_seconds: 60,
-            redis_url: None,
-            in_memory_capacity: 10000,
+            global_rate: 60,
+            endpoint_rates: HashMap::new(),
+            ip_whitelist: vec!["127.0.0.1".to_string()],
+            block_time_minutes: 15,
+            use_custom_headers: true,
         }
     }
 }
 
-impl Default for InputValidationConfig {
+impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            max_body_size: 1024 * 1024, // 1MB
-            max_uri_length: 8192,
-            max_header_count: 50,
-            max_header_size: 8192,
-            max_query_params: 30,
-            allowed_content_types: vec![
-                "application/json".to_string(),
-                "application/x-www-form-urlencoded".to_string(),
-                "multipart/form-data".to_string(),
-                "text/plain".to_string(),
-            ],
+            auth: AuthConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            validation: InputValidationConfig::default(),
+            security_flags: SecurityFlags::default(),
         }
     }
 } 

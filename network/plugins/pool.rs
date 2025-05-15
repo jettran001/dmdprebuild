@@ -2,18 +2,21 @@ use std::sync::Arc;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use crate::infra::service_traits::RedisService;
-use crate::core::engine::{Plugin, PluginType, PluginError};
+use crate::core::engine::{PluginError};
 use tracing::{info, warn, error, debug};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::oneshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::task::JoinHandle;
 use tokio::sync::Mutex;
+use once_cell::sync::OnceCell;
+
+/// Type alias cho danh sách kết nối trong pool để giảm type complexity
+type ConnectionQueue<T> = VecDeque<(T, Instant)>;
 
 /// Trạng thái monitor task toàn cục, đảm bảo thread safety tuyệt đối khi drop nhiều pool đồng thời.
 fn get_pool_monitor_flag() -> &'static Arc<AtomicBool> {
-    use tokio::sync::OnceCellLock;
-    static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    static FLAG: OnceCell<Arc<AtomicBool>> = OnceCell::new();
     FLAG.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
@@ -33,7 +36,7 @@ fn get_pool_monitor_flag() -> &'static Arc<AtomicBool> {
 /// ```
 pub struct ConnectionPool<T: Send + Sync + Clone + 'static> {
     /// Pool chứa các kết nối và thời điểm last activity
-    pool: TokioMutex<VecDeque<(T, Instant)>>,
+    pool: TokioMutex<ConnectionQueue<T>>,
     /// Số lượng kết nối tối đa trong pool
     max_size: usize,
     /// Thời gian timeout cho mỗi kết nối (giây)
@@ -243,7 +246,7 @@ impl<T> ConnectionValidator<T> for ConnectionPool<T>
 where 
     T: Clone + Send + Sync + 'static,
 {
-    fn check_connection_active(&self, conn: &T) -> Option<bool> {
+    fn check_connection_active(&self, _conn: &T) -> Option<bool> {
         // Kiểm tra kết nối còn active không, mặc định là active
         Some(true)
     }
@@ -689,7 +692,7 @@ impl<T: Send + Sync + Clone + 'static> ConnectionPool<T> {
     /// 
     /// # Returns
     /// `bool` - true nếu kết nối được đóng thành công, false nếu không tìm thấy
-    pub fn close_connection(&self, key: &str) -> bool {
+    pub fn close_connection(&self, _key: &str) -> bool {
         // Implementation
         false
     }
@@ -764,14 +767,12 @@ impl RedisConnectionPool {
         let service = Arc::new(DefaultRedisService::new());
         
         // Circuit breaker: kiểm tra trạng thái trước khi kết nối
-        {
-            let mut cb = match self.circuit_breaker.lock().await {
-                cb => cb,
-            };
-            if !cb.can_attempt() {
-                error!("[CircuitBreaker] Circuit is OPEN, reject connection attempt");
-                return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
-            }
+        let cb = self.circuit_breaker.lock().await;
+        let mut cb = cb;
+        
+        if !cb.can_attempt() {
+            error!("[CircuitBreaker] Circuit is OPEN, reject connection attempt");
+            return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
         }
         
         // Try to connect with retries
@@ -782,11 +783,7 @@ impl RedisConnectionPool {
                         info!("[Redis] Connection established after {} retries", attempt);
                     }
                     // Circuit breaker: reset on success
-                    match self.circuit_breaker.lock().await {
-                        mut cb => {
-                            cb.on_success();
-                        }
-                    }
+                    cb.on_success();
                     return Ok(service);
                 }
                 Err(e) => {
@@ -796,11 +793,7 @@ impl RedisConnectionPool {
                     } else {
                         error!("[Redis] Connection failed after {} retries: {}", self.max_retries, e);
                         // Circuit breaker: tăng failure
-                        match self.circuit_breaker.lock().await {
-                            mut cb => {
-                                cb.on_failure();
-                            }
-                        }
+                        cb.on_failure();
                         return Err(PluginError::Other(e.to_string()));
                     }
                 }
@@ -823,14 +816,12 @@ impl RedisConnectionPool {
     /// - Sử dụng circuit breaker để ngăn cascade failure
     pub async fn get_connection(&self) -> Result<Arc<dyn RedisService>, PluginError> {
         // Circuit breaker: kiểm tra trạng thái trước khi lấy kết nối
-        {
-            let mut cb = match self.circuit_breaker.lock().await {
-                cb => cb,
-            };
-            if !cb.can_attempt() {
-                error!("[CircuitBreaker] Circuit is OPEN, reject get_connection");
-                return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
-            }
+        let cb = self.circuit_breaker.lock().await;
+        let mut cb = cb;
+        
+        if !cb.can_attempt() {
+            error!("[CircuitBreaker] Circuit is OPEN, reject get_connection");
+            return Err(PluginError::Other("Circuit breaker is OPEN, please retry later".to_string()));
         }
         
         // Try to get from pool first
@@ -895,7 +886,7 @@ impl RedisConnectionPool {
     /// * `Ok(usize)` - Số lượng kết nối trong pool
     /// * `Err(PluginError)` - Lỗi khi lấy kích thước
     pub async fn pool_size(&self) -> Result<usize, PluginError> {
-        self.inner.size().await.map_err(|e| PluginError::Other(e))
+        self.inner.size().await.map_err(PluginError::Other)
     }
     
     /// Xóa tất cả kết nối trong pool.
@@ -904,7 +895,7 @@ impl RedisConnectionPool {
     /// * `Ok(())` - Nếu thao tác thành công
     /// * `Err(PluginError)` - Lỗi khi xóa
     pub async fn clear_pool(&self) -> Result<(), PluginError> {
-        self.inner.clear().await.map_err(|e| PluginError::Other(e))
+        self.inner.clear().await.map_err(PluginError::Other)
     }
     
     /// Force đóng tất cả các kết nối Redis.

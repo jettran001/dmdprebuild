@@ -5,7 +5,6 @@ use thiserror::Error;
 use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex};
-use lazy_static::lazy_static;
 use rand::Rng;
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -18,7 +17,7 @@ use tracing::{info, warn, error, debug};
 use std::env;
 use tokio;
 use uuid::Uuid;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 /// # Authentication và Authorization Middleware
 ///
@@ -269,19 +268,21 @@ impl AuthService {
     /// Tạo mới service xác thực
     pub fn new(jwt_secret: String) -> Self {
         debug!("[Auth] Creating new AuthService instance with custom JWT secret");
-        let mut service = Self::default();
-        service.jwt_secret = jwt_secret;
-        service
+        Self {
+            jwt_secret,
+            ..Self::default()
+        }
     }
     
     /// Khởi tạo AuthService với thuật toán RS256 (khuyến nghị cho môi trường production)
     pub fn with_rs256(private_key: String, public_key: String) -> Self {
         info!("[Auth] Creating new AuthService instance with RS256 algorithm");
-        let mut service = Self::default();
-        service.jwt_algorithm = Algorithm::RS256;
-        service.rsa_private_key = Some(private_key);
-        service.rsa_public_key = Some(public_key);
-        service
+        Self {
+            jwt_algorithm: Algorithm::RS256,
+            rsa_private_key: Some(private_key),
+            rsa_public_key: Some(public_key),
+            ..Self::default()
+        }
     }
     
     /// Lấy encoding key dựa vào thuật toán
@@ -362,8 +363,10 @@ impl AuthService {
             additional: additional.unwrap_or_default(),
         };
         
-        let mut header = Header::default();
-        header.alg = self.jwt_algorithm;
+        let header = Header {
+            alg: self.jwt_algorithm,
+            ..Header::default()
+        };
         
         let encoding_key = match self.get_encoding_key() {
             Ok(key) => key,
@@ -1026,15 +1029,13 @@ impl AuthService {
             loop {
                 debug!("Running scheduled key rotation check");
                 
-                // Kiểm tra và xoay vòng API key
-                match AuthService::check_and_rotate_api_keys(auth_service_clone.as_ref(), max_age_days).await {
-                    () => debug!("Completed API key rotation check"),
-                }
+                // Chạy kiểm tra và quay vòng API keys
+                let () = AuthService::check_and_rotate_api_keys(auth_service_clone.as_ref(), max_age_days).await;
+                debug!("Completed API key rotation check");
                 
-                // Kiểm tra và xoay vòng simple token
-                match AuthService::check_and_rotate_simple_tokens(auth_service_clone.as_ref(), max_age_days).await {
-                    () => debug!("Completed simple token rotation check"),
-                }
+                // Chạy kiểm tra và quay vòng simple tokens
+                let () = AuthService::check_and_rotate_simple_tokens(auth_service_clone.as_ref(), max_age_days).await;
+                debug!("Completed simple token rotation check");
                 
                 // Đợi đến lượt kiểm tra tiếp theo
                 tokio::time::sleep(check_interval).await;
@@ -1194,7 +1195,7 @@ async fn check_api_key_rotation_internal(auth_service: &AuthService, max_age: Du
             
             // Thêm key mới, xóa key cũ
             let expires_at = api_keys.get(&key).and_then(|info| info.expires_at);
-            let ip_address = api_keys.get(&key).and_then(|info| info.ip_address.clone());
+            let ip_address = api_keys.get(&key).and_then(|info| info.ip_address);
             api_keys.insert(new_key.clone(), AuthInfo {
                 user_id: user_id.clone(),
                 name: name.clone(),
@@ -1254,7 +1255,7 @@ async fn check_simple_token_rotation_internal(auth_service: &AuthService, max_ag
             
             // Thêm token mới, xóa token cũ
             let expires_at = simple_tokens.get(&token).and_then(|info| info.expires_at);
-            let ip_address = simple_tokens.get(&token).and_then(|info| info.ip_address.clone());
+            let ip_address = simple_tokens.get(&token).and_then(|info| info.ip_address);
             simple_tokens.insert(new_token.clone(), AuthInfo {
                 user_id: user_id.clone(),
                 name: name.clone(),
@@ -1298,16 +1299,16 @@ pub fn extract_auth_from_header(headers: &HeaderMap<HeaderValue>) -> Result<(Str
         })?;
         
     // Xác định kiểu xác thực
-    if auth_str.starts_with("Bearer ") {
-        let token = auth_str[7..].to_string();
+    if let Some(token_str) = auth_str.strip_prefix("Bearer ") {
+        let token = token_str.to_string();
         debug!("[Auth] Found Bearer token");
         Ok((token, AuthType::Jwt))
-    } else if auth_str.starts_with("ApiKey ") {
-        let token = auth_str[7..].to_string();
+    } else if let Some(token_str) = auth_str.strip_prefix("ApiKey ") {
+        let token = token_str.to_string();
         debug!("[Auth] Found API key");
         Ok((token, AuthType::ApiKey))
-    } else if auth_str.starts_with("Simple ") {
-        let token = auth_str[7..].to_string();
+    } else if let Some(token_str) = auth_str.strip_prefix("Simple ") {
+        let token = token_str.to_string();
         debug!("[Auth] Found Simple token");
         Ok((token, AuthType::Simple))
     } else {
@@ -1526,27 +1527,23 @@ pub fn has_sufficient_role(user_role: &UserRole, required_role: &UserRole) -> bo
     }
 }
 
-/// Hàm helper để tạo API key
+/// Generate a standard format API key (uuid-based with prefix)
 fn generate_api_key() -> String {
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
-    use base64::Engine;
+    let uuid = Uuid::new_v4().to_string();
+    let prefix = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect::<String>()
+        .to_uppercase();
     
-    // 32 bytes ngẫu nhiên
-    let random_bytes: Vec<u8> = (0..32)
-        .map(|_| rand::thread_rng().gen::<u8>())
-        .collect();
-        
-    // Mã hóa base64
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes)
+    format!("DM-{}-{}", prefix, uuid)
 }
 
 /// Hàm helper để tạo simple token
 fn generate_simple_token() -> String {
-    use rand::distributions::Alphanumeric;
-    
     rand::thread_rng()
-        .sample_iter(&Alphanumeric)
+        .sample_iter(&rand::distributions::Alphanumeric)
         .take(32)
         .map(char::from)
         .collect()
@@ -1665,7 +1662,7 @@ pub fn allow_admin_or_partner(auth_info: &AuthInfo) -> bool {
     matches!(auth_info.role, UserRole::Admin | UserRole::Partner)
 }
 
-static AUTH_FAIL_RATE_LIMIT: Lazy<Mutex<HashMap<IpAddr, (u32, Instant)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static AUTH_FAIL_RATE_LIMIT: Lazy<tokio::sync::Mutex<HashMap<IpAddr, (u32, Instant)>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 const AUTH_FAIL_LIMIT: u32 = 5;
 const AUTH_FAIL_WINDOW_SECS: u64 = 60;
 

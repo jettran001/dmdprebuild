@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use tracing::{info, warn, error};
+use tracing::{info, error};
 
 #[async_trait]
 pub trait ExecutionAdapter: Send + Sync {
@@ -10,13 +10,9 @@ pub trait ExecutionAdapter: Send + Sync {
     async fn health_check(&self) -> Result<bool, String>;
 }
 
+/// Default implementation of ExecutionAdapter
+#[derive(Default)]
 pub struct DefaultExecutionAdapter;
-
-impl Default for DefaultExecutionAdapter {
-    fn default() -> Self {
-        Self {}
-    }
-}
 
 #[async_trait]
 impl ExecutionAdapter for DefaultExecutionAdapter {

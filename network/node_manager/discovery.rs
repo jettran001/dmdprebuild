@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
-use tokio::sync::Mutex;
 
 // Cập nhật import để sử dụng NodeProfile từ node_manager::mod.rs
 use crate::node_manager::NodeProfile;
@@ -29,9 +28,9 @@ pub trait DiscoveryService: Send + Sync {
 
 /// Default implementation of DiscoveryService (async, thread-safe)
 pub struct DefaultDiscoveryService {
-    nodes: Arc<Mutex<HashMap<String, NodeProfile>>>,
+    nodes: Arc<tokio::sync::Mutex<HashMap<String, NodeProfile>>>,
     /// Thời điểm cập nhật cuối cùng của mỗi node
-    node_last_update: Arc<Mutex<HashMap<String, Instant>>>,
+    node_last_update: Arc<tokio::sync::Mutex<HashMap<String, Instant>>>,
     /// Flag để dừng cleanup task khi cần
     cleanup_running: Arc<tokio::sync::watch::Sender<bool>>,
 }
@@ -40,8 +39,8 @@ impl Default for DefaultDiscoveryService {
     fn default() -> Self {
         // Tạo channel để gửi tín hiệu dừng cleanup task
         let (cleanup_tx, cleanup_rx) = tokio::sync::watch::channel(false);
-        let nodes: Arc<Mutex<HashMap<String, NodeProfile>>> = Arc::new(Mutex::new(HashMap::new()));
-        let node_last_update: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let nodes: Arc<tokio::sync::Mutex<HashMap<String, NodeProfile>>> = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let node_last_update: Arc<tokio::sync::Mutex<HashMap<String, Instant>>> = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         
         // Spawn cleanup task
         let nodes_clone = nodes.clone();
@@ -65,9 +64,8 @@ impl Default for DefaultDiscoveryService {
                         let mut nodes_to_remove: Vec<String> = Vec::new();
                         
                         // Lấy lock node_last_update trước
-                        let mut last_update = match node_last_update_clone.lock().await {
-                            last_update => last_update,
-                        };
+                        let last_update = node_last_update_clone.lock().await;
+                        let mut last_update = last_update;
                         
                         // Xác định các node cần xóa
                         for (node_id, last_active) in last_update.iter() {
@@ -78,9 +76,8 @@ impl Default for DefaultDiscoveryService {
                         
                         // Lấy lock nodes sau khi đã xác định những gì cần xóa
                         if !nodes_to_remove.is_empty() {
-                            let mut nodes = match nodes_clone.lock().await {
-                                nodes => nodes,
-                            };
+                            let nodes = nodes_clone.lock().await;
+                            let mut nodes = nodes;
                             
                             // Xóa các node không hoạt động
                             for node_id in &nodes_to_remove {

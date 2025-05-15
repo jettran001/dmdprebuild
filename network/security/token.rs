@@ -16,9 +16,7 @@ use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
 use std::collections::HashMap;
-use crate::security::AuthError;
-use crate::security::AuthInfo;
-use crate::security::UserRole;
+use crate::security::auth_middleware::{AuthError, AuthInfo, UserRole, AuthType};
 
 /// Cấu hình cho Token Service
 #[derive(Debug, Clone)]
@@ -211,7 +209,7 @@ impl TokenService {
             role: token_info.role.clone(),
             expires_at: Some(token_info.expires_at),
             ip_address: None,
-            token_type: crate::security::AuthType::Simple,
+            token_type: AuthType::Simple,
             metadata: token_info.metadata.clone(),
             additional: HashMap::new(),
         })
@@ -247,7 +245,7 @@ impl TokenService {
         let user_tokens_guard = self.user_tokens.read().await;
         
         user_tokens_guard.get(user_id)
-            .map(|tokens| tokens.clone())
+            .cloned()
             .unwrap_or_default()
     }
     

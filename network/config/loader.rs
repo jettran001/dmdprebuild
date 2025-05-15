@@ -7,17 +7,13 @@ use std::path::Path;
 use std::fs::File;
 use std::io::Read;
 use std::env;
-use std::str::FromStr;
-use std::collections::HashMap;
-use tracing::{info, debug, warn, error};
+use tracing::{info, debug, error};
 use serde::de::DeserializeOwned;
 
 use crate::config::NetworkConfig;
 use crate::config::error::ConfigError;
-use crate::config::{
-    AuthConfig, InputValidationConfig, RateLimitConfig, 
-    RateLimitPath, RateLimitIdentifier, RateLimitStorage
-};
+use crate::config::AuthConfig;
+use crate::config::InputValidationConfig;
 
 /// Các định dạng file cấu hình được hỗ trợ
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,6 +69,12 @@ impl Default for ConfigLoaderOptions {
 /// ConfigLoader tải cấu hình từ nhiều nguồn
 pub struct ConfigLoader {
     options: ConfigLoaderOptions,
+}
+
+impl Default for ConfigLoader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfigLoader {
@@ -499,7 +501,6 @@ impl ConfigLoader {
         
         // Tải từ biến môi trường
         if self.options.load_env {
-            let env_config = self.load_from_env()?;
             // Ghi đè các giá trị đã được cấu hình từ env
             self.override_from_env(&mut config)?;
         }

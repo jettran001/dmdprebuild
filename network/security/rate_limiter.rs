@@ -1,11 +1,8 @@
 //! All locking in this file uses tokio::sync::{Mutex, RwLock} for async context, as required by .cursorrc. Do NOT use std::sync::* for any state/config.
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
 use thiserror::Error;
-use tokio::time::timeout;
 use tokio::sync::{Mutex, RwLock};
 use serde::{Serialize, Deserialize};
 
@@ -154,6 +151,12 @@ pub struct RateLimiter {
     path_configs: RwLock<HashMap<String, PathConfig>>,
     /// Trạng thái rate limit
     states: Arc<Mutex<HashMap<(String, RequestIdentifier), RateLimitState>>>,
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RateLimiter {

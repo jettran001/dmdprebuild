@@ -307,6 +307,15 @@ impl DefaultWebRtcService {
         
         Ok(())
     }
+    
+    /// Đóng tất cả các kết nối và trả về số lượng kết nối đã đóng
+    pub fn close_all_connections_internal(&self) -> usize {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut conn_manager = self.connection_manager.lock().await;
+            conn_manager.close_all_connections()
+        })
+    }
 }
 
 #[async_trait]
@@ -327,7 +336,7 @@ impl WebRtcService for DefaultWebRtcService {
         Ok(())
     }
     
-    async fn create_peer_connection(&self, config: &WebRtcConfig) -> Result<String, ServiceError> {
+    async fn create_peer_connection(&self, _config: &WebRtcConfig) -> Result<String, ServiceError> {
         let connection_id = format!("webrtc-{}", uuid::Uuid::new_v4());
         debug!("[WebRTC] Creating peer connection: {}", connection_id);
         
@@ -363,7 +372,7 @@ impl WebRtcService for DefaultWebRtcService {
         }
         
         // Check connection exists
-        let mut conn_manager = self.connection_manager.lock().await;
+        let conn_manager = self.connection_manager.lock().await;
         if !conn_manager.connections.contains_key(connection_id) {
             return Err(ServiceError::NotFoundError(format!("Connection {} not found", connection_id)));
         }
@@ -497,6 +506,23 @@ impl WebRtcPlugin {
         
         Ok(handle)
     }
+    
+    /// Đóng tất cả các kết nối nếu service là DefaultWebRtcService
+    pub fn close_all_connections(&self) -> usize {
+        match self.service.as_any().downcast_ref::<DefaultWebRtcService>() {
+            Some(default_service) => default_service.close_all_connections_internal(),
+            None => {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                match rt.block_on(self.service.close_all_connections()) {
+                    Ok(count) => count,
+                    Err(e) => {
+                        error!("[WebRTC] Failed to close connections: {}", e);
+                        0
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -524,7 +550,7 @@ impl Plugin for WebRtcPlugin {
         let config = self.config.clone();
         
         // Spawn task để khởi tạo service và xử lý message
-        let handle = tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             match service.init().await {
                 Ok(_) => info!("[WebRTC] Service initialized successfully"),
                 Err(e) => error!("[WebRTC] Failed to initialize service: {}", e),
@@ -557,15 +583,9 @@ impl Plugin for WebRtcPlugin {
     async fn stop(&self) -> Result<(), PluginError> {
         info!("[WebRTC] Stopping plugin...");
         
-        let conn_manager = self.service.connection_manager.lock().await;
-        
-        // Spawn một task để đóng tất cả các kết nối
-        tokio::spawn(async move {
-            match conn_manager.close_all_connections().await {
-                Ok(count) => info!("[WebRTC] Closed {} connections", count),
-                Err(e) => error!("[WebRTC] Error closing connections: {}", e),
-            }
-        });
+        // Đóng tất cả kết nối
+        let closed_count = self.close_all_connections();
+        info!("[WebRTC] Closed {} connections", closed_count);
         
         // Send shutdown signal
         tokio::spawn(async {
@@ -593,13 +613,13 @@ impl Drop for WebRtcPlugin {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             if let Some(tx) = self.shutdown_tx.lock().await.take() {
-                let _ = tx.send(());
+                tx.send(());
             }
             
             // Đợi các background task hoàn thành
             let mut tasks = self.background_tasks.lock().await;
             while let Some(task) = tasks.pop() {
-                let _ = task.abort();
+                task.abort();
             }
             
             info!("[WebRTC] Plugin resources cleaned up");

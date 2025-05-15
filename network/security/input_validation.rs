@@ -70,16 +70,13 @@
 //! - InputValidationService quản lý đăng ký và sử dụng nhiều validator
 
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use thiserror::Error;
-use std::fmt::{self, Display};
 use std::net::IpAddr;
 use lazy_static::lazy_static;
 use serde::{Serialize, Deserialize};
 use std::marker::PhantomData;
-use std::str::FromStr;
-use std::any::Any;
-use tracing::debug;
+use std::sync::Mutex;
 
 /// Version của các pattern validation, để dễ dàng theo dõi khi cập nhật
 pub const PATTERN_VERSION: &str = "2024.09.01.1";
@@ -213,8 +210,13 @@ pub enum ValidationError {
     Custom(String),
 }
 
-/// Kết quả của validator
+/// Các type alias để giảm type complexity
+pub type FormatValidationFn = fn(&str) -> bool;
+pub type StringRuleFn = Box<dyn Fn(&str) -> ValidationResult + Send + Sync>;
+pub type NumberRuleFn<T> = Box<dyn Fn(&T) -> ValidationResult + Send + Sync>;
+pub type ValidatorList<T> = Vec<Box<dyn Validator<T> + Send + Sync>>;
 pub type ValidationResult = Result<(), ValidationError>;
+pub type CustomValidatorFn<'a> = Box<dyn Fn(&[(&str, &str)]) -> ValidationResult + Send + Sync + 'a>;
 
 /// Kết quả của nhiều validators
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -243,7 +245,7 @@ impl ValidationErrors {
     pub fn add(&mut self, field: &str, error: ValidationError) {
         self.has_errors = true;
         self.is_valid = false;
-        self.errors.entry(field.to_string()).or_insert_with(Vec::new).push(error);
+        self.errors.entry(field.to_string()).or_default().push(error);
     }
     
     /// Kiểm tra xem có lỗi không
@@ -376,7 +378,7 @@ pub struct InputValidator<'a> {
     number_validators: HashMap<&'a str, FieldValidator<'a, i64>>,
     ip_validators: HashMap<&'a str, FieldValidator<'a, IpAddr>>,
     bool_validators: HashMap<&'a str, FieldValidator<'a, bool>>,
-    custom_validators: Vec<Box<dyn Fn(&[(&str, &str)]) -> ValidationResult + Send + Sync + 'a>>,
+    custom_validators: Vec<CustomValidatorFn<'a>>,
 }
 
 impl<'a> InputValidator<'a> {
@@ -470,30 +472,47 @@ impl<'a> InputValidator<'a> {
     
     /// Kiểm tra nội dung có an toàn hay không
     pub fn check_security(&self, content: &str) -> ValidationResult {
+        // Compile regex patterns outside the loop
+        let xss_regex_list: Vec<Regex> = XSS_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+            .collect();
+            
+        let sqli_regex_list: Vec<Regex> = SQLI_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+            .collect();
+            
+        let cmdi_regex_list: Vec<Regex> = CMDI_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+            .collect();
+            
+        let path_traversal_regex_list: Vec<Regex> = PATH_TRAVERSAL_PATTERNS.iter()
+            .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()))
+            .collect();
+            
         // Kiểm tra XSS
-        for pattern in XSS_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(content) {
+        for regex in &xss_regex_list {
+            if regex.is_match(content) {
                 return Err(ValidationError::Security("content".to_string(), "Phát hiện XSS".to_string()));
             }
         }
         
         // Kiểm tra SQLi
-        for pattern in SQLI_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(content) {
+        for regex in &sqli_regex_list {
+            if regex.is_match(content) {
                 return Err(ValidationError::Security("content".to_string(), "Phát hiện SQL Injection".to_string()));
             }
         }
         
         // Kiểm tra Command Injection
-        for pattern in CMDI_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(content) {
+        for regex in &cmdi_regex_list {
+            if regex.is_match(content) {
                 return Err(ValidationError::Security("content".to_string(), "Phát hiện Command Injection".to_string()));
             }
         }
         
         // Kiểm tra Path Traversal
-        for pattern in PATH_TRAVERSAL_PATTERNS {
-            if Regex::new(pattern).unwrap_or_else(|_| Regex::new(r"^$").unwrap()).is_match(content) {
+        for regex in &path_traversal_regex_list {
+            if regex.is_match(content) {
                 return Err(ValidationError::Security("content".to_string(), "Phát hiện Path Traversal".to_string()));
             }
         }
@@ -784,39 +803,22 @@ pub mod security {
         Ok(())
     }
     
-    /// Sanitize HTML input
+    /// Hàm utility để sanitize HTML input
     pub fn sanitize_html(input: &str) -> String {
-        super::sanitize_html(input)
+        // Phiên bản đơn giản, chỉ loại bỏ các tag nguy hiểm
+        input
+            .replace("<script", "&lt;script")
+            .replace("</script>", "&lt;/script&gt;")
+            .replace("<iframe", "&lt;iframe")
+            .replace("</iframe>", "&lt;/iframe&gt;")
+            .replace("<object", "&lt;object")
+            .replace("</object>", "&lt;/object&gt;")
+            .replace("<embed", "&lt;embed")
+            .replace("</embed>", "&lt;/embed&gt;")
+            .replace("javascript:", "")
+            .replace("data:", "")
+            .replace("vbscript:", "")
     }
-}
-
-/// Hàm utility để sanitize HTML input
-pub fn sanitize_html(input: &str) -> String {
-    // Phiên bản đơn giản, chỉ loại bỏ các tag nguy hiểm
-    let sanitized = input
-        .replace("<script", "&lt;script")
-        .replace("</script>", "&lt;/script&gt;")
-        .replace("<iframe", "&lt;iframe")
-        .replace("</iframe>", "&lt;/iframe&gt;")
-        .replace("<object", "&lt;object")
-        .replace("</object>", "&lt;/object&gt;")
-        .replace("<embed", "&lt;embed")
-        .replace("</embed>", "&lt;/embed&gt;")
-        .replace("javascript:", "")
-        .replace("data:", "")
-        .replace("vbscript:", "");
-        
-    sanitized
-}
-
-/// Hàm utility để escape SQL input
-pub fn escape_sql(input: &str) -> String {
-    // Phiên bản đơn giản, chỉ escape các ký tự đặc biệt trong SQL
-    input
-        .replace("'", "''")
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
 }
 
 /// Định dạng để validate
@@ -842,6 +844,8 @@ pub enum Format {
     ZipCode,
     #[serde(with = "serde_custom_format")]
     Custom(&'static str, &'static str),
+    /// Format được đặt tên dựa trên pattern có sẵn
+    Named(&'static str),
 }
 
 /// Chuyển đổi Format sang chuỗi mô tả
@@ -866,6 +870,7 @@ pub fn format_to_string(format: Format) -> String {
         Format::Phone => "phone number".to_string(),
         Format::ZipCode => "zip code".to_string(),
         Format::Custom(name, _) => format!("custom format: {}", name),
+        Format::Named(pattern_name) => format!("named format: {}", pattern_name),
     }
 }
 
@@ -873,111 +878,82 @@ pub fn format_to_string(format: Format) -> String {
 pub fn validate_format(value: &str, format: Format) -> bool {
     match format {
         Format::Email => {
-            // Dùng pattern đã định nghĩa trước đó
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == "email") {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            if let Some(regex) = get_format_regex("email") {
+                regex.is_match(value)
             } else {
                 false
             }
         },
         Format::URL => {
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == "url") {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            if let Some(regex) = get_format_regex("url") {
+                regex.is_match(value)
             } else {
                 false
             }
-        },
-        Format::IP => {
-            value.parse::<IpAddr>().is_ok()
         },
         Format::UUID => {
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == "uuid") {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            if let Some(regex) = get_format_regex("uuid") {
+                regex.is_match(value)
             } else {
                 false
             }
         },
-        Format::Alpha => {
-            value.chars().all(|c| c.is_alphabetic())
-        },
-        Format::Alphanumeric => {
-            value.chars().all(|c| c.is_alphanumeric())
-        },
-        Format::Numeric => {
-            value.chars().all(|c| c.is_numeric())
-        },
-        Format::Integer => {
-            value.parse::<i64>().is_ok()
-        },
-        Format::Float => {
-            value.parse::<f64>().is_ok()
-        },
-        Format::Boolean => {
-            matches!(value.to_lowercase().as_str(), "true" | "false" | "1" | "0" | "yes" | "no")
-        },
         Format::Base64 => {
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == "base64") {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            if let Some(regex) = get_format_regex("base64") {
+                regex.is_match(value)
             } else {
                 false
             }
         },
         Format::Hex => {
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == "hex") {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            if let Some(regex) = get_format_regex("hex") {
+                regex.is_match(value)
             } else {
                 false
             }
         },
-        Format::CreditCard => {
-            // Luhn algorithm for credit card validation
-            let digits: Vec<u32> = value
-                .chars()
-                .filter(|c| c.is_digit(10))
-                .map(|c| c.to_digit(10).unwrap())
-                .collect();
-            
-            if digits.len() < 13 || digits.len() > 19 {
-                return false;
-            }
-            
-            let sum = digits.iter().rev().enumerate().fold(0, |acc, (i, &digit)| {
-                if i % 2 == 1 {
-                    let doubled = digit * 2;
-                    acc + if doubled > 9 { doubled - 9 } else { doubled }
-                } else {
-                    acc + digit
-                }
-            });
-            
-            sum % 10 == 0
-        },
         Format::Phone => {
-            // Simple pattern for international phone numbers
-            let re = Regex::new(r"^\+?[0-9]{7,15}$").unwrap_or_else(|_| Regex::new(r"^$").unwrap());
+            let re = get_or_create_regex(r"^\+?[0-9]{7,15}$").unwrap_or_else(|| {
+                get_or_create_regex(r"^$").unwrap()
+            });
             re.is_match(value)
         },
         Format::ZipCode => {
-            // Simple pattern for common zip code formats
-            let re = Regex::new(r"^[0-9]{5}(-[0-9]{4})?$").unwrap_or_else(|_| Regex::new(r"^$").unwrap());
+            let re = get_or_create_regex(r"^[0-9]{5}(-[0-9]{4})?$").unwrap_or_else(|| {
+                get_or_create_regex(r"^$").unwrap()
+            });
             re.is_match(value)
         },
         Format::Custom(_, pattern) => {
-            Regex::new(pattern).map_or(false, |re| re.is_match(value))
+            get_or_create_regex(pattern)
+                .map_or(false, |re| re.is_match(value))
         },
-        Format::Date | Format::Time | Format::DateTime => {
-            // Basic pattern matching for date/time formats
-            let pattern_name = match format {
-                Format::Date => "date",
-                Format::Time => "time",
-                Format::DateTime => "datetime",
-                _ => unreachable!(),
-            };
-            
-            if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == pattern_name) {
-                Regex::new(pattern).map_or(false, |re| re.is_match(value))
+        Format::Named(pattern_name) => {
+            if let Some(regex) = get_format_regex(pattern_name) {
+                regex.is_match(value)
+            } else if let Some(&(_, pattern)) = FORMAT_PATTERNS.iter().find(|&&(name, _)| name == pattern_name) {
+                get_or_create_regex(pattern)
+                    .map_or(false, |regex| regex.is_match(value))
             } else {
                 false
+            }
+        },
+        // Đối với các format khác sử dụng logic không liên quan đến Regex
+        _ => {
+            // Xử lý các trường hợp còn lại không đổi
+            match format {
+                Format::IP => validate_ip(value),
+                Format::Date => validate_date(value),
+                Format::Time => validate_time(value),
+                Format::DateTime => validate_datetime(value),
+                Format::Alpha => value.chars().all(|c| c.is_alphabetic()),
+                Format::Alphanumeric => value.chars().all(|c| c.is_alphanumeric()),
+                Format::Numeric => value.chars().all(|c| c.is_numeric()),
+                Format::Integer => value.parse::<i64>().is_ok(),
+                Format::Float => value.parse::<f64>().is_ok(),
+                Format::Boolean => value == "true" || value == "false" || value == "0" || value == "1",
+                Format::CreditCard => validate_credit_card(value),
+                _ => unreachable!(), // Các trường hợp khác đã được xử lý ở phía trên
             }
         }
     }
@@ -985,8 +961,7 @@ pub fn validate_format(value: &str, format: Format) -> bool {
 
 /// Helper module để serialize và deserialize Format::Custom
 mod serde_custom_format {
-    use super::Format;
-    use serde::{Deserialize, Deserializer, Serializer, Serialize};
+    use serde::{Deserializer, Serializer, Serialize};
     use serde::de::Visitor;
     use std::fmt;
 
@@ -1219,6 +1194,7 @@ impl Validator<String> for StringValidator {
                 Format::Phone => "phone number",
                 Format::ZipCode => "zip code",
                 Format::Custom(name, _) => name,
+                Format::Named(name) => name,
             };
             
             desc.push(format!("format: {}", format_str));
@@ -1455,4 +1431,104 @@ impl Validate for UserRegistration {
             Ok(())
         }
     }
+}
+
+lazy_static! {
+    /// Cache lưu trữ các Regex đã biên dịch để tránh phải tạo mới trong vòng lặp
+    static ref REGEX_CACHE: Mutex<HashMap<String, Regex>> = Mutex::new(HashMap::new());
+    
+    /// Các Regex được biên dịch sẵn từ FORMAT_PATTERNS
+    static ref FORMAT_REGEX: HashMap<&'static str, Regex> = {
+        let mut map = HashMap::new();
+        for &(name, pattern) in FORMAT_PATTERNS {
+            if let Ok(regex) = Regex::new(pattern) {
+                map.insert(name, regex);
+            }
+        }
+        map
+    };
+}
+
+/// Hàm lấy hoặc tạo mới Regex từ cache
+fn get_or_create_regex(pattern: &str) -> Option<Regex> {
+    let pattern_key = pattern.to_string();
+    
+    // Trước tiên, kiểm tra xem Regex đã có trong cache chưa
+    {
+        let cache = REGEX_CACHE.lock().unwrap();
+        if let Some(regex) = cache.get(&pattern_key) {
+            return Some(regex.clone());
+        }
+    }
+    
+    // Nếu chưa có, tạo mới và thêm vào cache
+    if let Ok(regex) = Regex::new(pattern) {
+        let mut cache = REGEX_CACHE.lock().unwrap();
+        cache.insert(pattern_key, regex.clone());
+        Some(regex)
+    } else {
+        None
+    }
+}
+
+/// Hàm lấy Regex đã cache cho format chuẩn
+fn get_format_regex(format_name: &str) -> Option<Regex> {
+    FORMAT_REGEX.get(format_name).cloned()
+}
+
+/// Validate IP address
+fn validate_ip(value: &str) -> bool {
+    value.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Validate date format
+fn validate_date(value: &str) -> bool {
+    if let Some(regex) = get_format_regex("date") {
+        regex.is_match(value)
+    } else {
+        false
+    }
+}
+
+/// Validate time format
+fn validate_time(value: &str) -> bool {
+    if let Some(regex) = get_format_regex("time") {
+        regex.is_match(value)
+    } else {
+        false
+    }
+}
+
+/// Validate datetime format
+fn validate_datetime(value: &str) -> bool {
+    if let Some(regex) = get_format_regex("datetime") {
+        regex.is_match(value)
+    } else {
+        false
+    }
+}
+
+/// Validate credit card number using Luhn algorithm
+fn validate_credit_card(value: &str) -> bool {
+    // Luhn algorithm for credit card validation
+    let digits: Vec<u32> = value
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .map(|c| c.to_digit(10).unwrap())
+        .collect();
+    
+    if digits.len() < 13 || digits.len() > 19 {
+        return false;
+    }
+    
+    let sum = digits.iter().rev().enumerate().fold(0, |acc, (i, &digit)| {
+        if i % 2 == 1 {
+            let doubled = digit * 2;
+            acc + if doubled > 9 { doubled - 9 } else { doubled }
+        } else {
+            acc + digit
+        }
+    });
+    
+    sum % 10 == 0
 } 

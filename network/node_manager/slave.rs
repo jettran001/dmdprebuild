@@ -1,11 +1,9 @@
 // SlaveNodeService trait: manage slave node logic in the network
 use async_trait::async_trait;
 use tracing::{info, warn, error};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
-use tokio::sync::Mutex;
 use thiserror::Error;
 
 // Cập nhật import để sử dụng NodeProfile từ node_manager::mod.rs
@@ -67,19 +65,19 @@ pub trait SlaveNodeService: Send + Sync {
 
 /// Default implementation of SlaveNodeService (async, thread-safe)
 pub struct DefaultSlaveNodeService {
-    master_id: Arc<Mutex<Option<String>>>,
-    profile: Arc<Mutex<Option<NodeProfile>>>,
-    last_status: Arc<Mutex<Option<String>>>,
-    last_heartbeat: Arc<Mutex<Option<Instant>>>,
+    master_id: Arc<tokio::sync::Mutex<Option<String>>>,
+    profile: Arc<tokio::sync::Mutex<Option<NodeProfile>>>,
+    last_status: Arc<tokio::sync::Mutex<Option<String>>>,
+    last_heartbeat: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
 impl Default for DefaultSlaveNodeService {
     fn default() -> Self {
         Self {
-            master_id: Arc::new(Mutex::new(None)),
-            profile: Arc::new(Mutex::new(None)),
-            last_status: Arc::new(Mutex::new(None)),
-            last_heartbeat: Arc::new(Mutex::new(None)),
+            master_id: Arc::new(tokio::sync::Mutex::new(None)),
+            profile: Arc::new(tokio::sync::Mutex::new(None)),
+            last_status: Arc::new(tokio::sync::Mutex::new(None)),
+            last_heartbeat: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }
@@ -124,10 +122,7 @@ impl SlaveNodeService for DefaultSlaveNodeService {
         let profile_lock = self.profile.lock().await;
         
         // Clone một cách an toàn - chỉ clone khi có dữ liệu
-        let result = match &*profile_lock {
-            Some(profile) => Some(profile.clone()),
-            None => None
-        };
+        let result = (*profile_lock).clone();
         
         // Drop mutex lock trước khi return
         drop(profile_lock);

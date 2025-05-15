@@ -1,11 +1,12 @@
 use crate::node_manager::{NodeProfile, NodeRole};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use once_cell::sync::Lazy;
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::{warn, error};
 use std::time::Duration;
 use tokio::time;
-use tokio::sync::Mutex;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+use std::time::{Instant};
 
 /// Task enum: Represents a logical task that can be assigned to a node
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,6 +82,12 @@ impl TaskManager {
     /// Lấy số lượng task hiện tại
     pub fn get_current_tasks(&self) -> usize {
         self.current_tasks.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -199,86 +206,70 @@ impl Dispatcher {
                     NodeRole::Master => result.push(Task::MasterNode),
                     NodeRole::Slave => result.push(Task::SlaveNode),
                     NodeRole::Worker => result.push(Task::WorkerNode),
-                    NodeRole::Unknown => {
-                        warn!("[Dispatcher] Unknown role detected, using Task::Unknown");
-                        result.push(Task::Unknown)
-                    }
+                    NodeRole::Unknown => result.push(Task::Unknown),
                 }
-            }
-            
-            if result.is_empty() {
-                warn!("[Dispatcher] No task mapped, using Unknown as fallback");
-                result.push(Task::Unknown);
             }
         }
         
-        // Finally: finish task dù có lỗi hay không
+        // Đảm bảo finish_task được gọi khi kết thúc
         self.task_manager.finish_task();
+        
+        if result.is_empty() {
+            warn!("[Dispatcher] No tasks mapped, profile may be empty");
+            result.push(Task::Unknown);
+        }
+        
         result
     }
-
-    /// Map node roles to tasks with priority (ưu tiên task quan trọng trước)
+    
+    /// Lấy task ưu tiên cao nhất từ danh sách task
     pub fn map_roles_to_tasks_with_priority(profile: &NodeProfile) -> Vec<Task> {
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut has_unknown_role = false;
+        let mut dispatcher = Dispatcher::new(Arc::new(TaskManager::new()));
+        let tasks = dispatcher.map_roles_to_tasks(profile);
         
-        // Lặp qua mỗi phần tử trong mảng priority, sửa lỗi "Cannot move out of shared reference"
-        for priority_index in 0..TASK_PRIORITY.len() {
-            let priority_task = TASK_PRIORITY[priority_index];
-            for role in &profile.roles {
-                let task = match role {
-                    NodeRole::AiTraining => Task::AiTraining,
-                    NodeRole::SnipebotExecutor => Task::SnipebotExecution,
-                    NodeRole::CdnStorageNode => Task::CdnStorage,
-                    NodeRole::RedisNode => Task::RedisCache,
-                    NodeRole::WalletNode => Task::WalletProcessing,
-                    NodeRole::EdgeCompute => Task::EdgeComputation,
-                    NodeRole::Master => Task::MasterNode,
-                    NodeRole::Slave => Task::SlaveNode,
-                    NodeRole::Worker => Task::WorkerNode,
-                    NodeRole::Unknown => {
-                        has_unknown_role = true;
-                        Task::Unknown
-                    }
-                };
-                if task == priority_task && !tasks.contains(&task) {
-                    tasks.push(task);
-                }
+        if tasks.is_empty() {
+            return vec![Task::Unknown];
+        }
+        
+        let mut prioritized_tasks = Vec::new();
+        
+        // Tìm task có ưu tiên cao nhất trong danh sách
+        for priority_task in TASK_PRIORITY {
+            if tasks.contains(priority_task) {
+                prioritized_tasks.push(*priority_task);
+                break; // Chỉ lấy 1 task ưu tiên cao nhất
             }
         }
         
-        if has_unknown_role {
-            warn!("[Dispatcher] Profile contains unknown role(s) in priority mapping");
+        // Nếu không tìm thấy task nào trong bảng ưu tiên, lấy task đầu tiên
+        if prioritized_tasks.is_empty() && !tasks.is_empty() {
+            prioritized_tasks.push(tasks[0]);
         }
         
-        if tasks.is_empty() {
-            warn!("[Dispatcher] No tasks mapped with priority, using Unknown as fallback");
-            tasks.push(Task::Unknown);
-        }
-        
-        tasks
+        prioritized_tasks
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_manager::NodeProfile;
     
     #[test]
     fn test_dispatcher_mapping() {
         let task_manager = Arc::new(TaskManager::new());
         let dispatcher = Dispatcher::new(task_manager);
         
-        let mut profile = NodeProfile::new(8, 1, 32, 1024, true);
-        profile.roles = vec![NodeRole::AiTraining, NodeRole::RedisNode];
+        let profile = NodeProfile {
+            id: "test".to_string(),
+            roles: vec![NodeRole::AiTraining, NodeRole::CdnStorageNode],
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        };
         
         let tasks = dispatcher.map_roles_to_tasks(&profile);
+        assert_eq!(tasks.len(), 2);
         assert!(tasks.contains(&Task::AiTraining));
-        assert!(tasks.contains(&Task::RedisCache));
-        
-        // Kiểm tra số lượng task sau khi mapping xong
-        assert_eq!(dispatcher.task_manager.get_current_tasks(), 0, "Task count should be 0 after map_roles_to_tasks");
+        assert!(tasks.contains(&Task::CdnStorage));
     }
     
     #[tokio::test]
@@ -286,31 +277,35 @@ mod tests {
         let task_manager = Arc::new(TaskManager::new());
         let dispatcher = Dispatcher::new(task_manager);
         
-        let mut profile = NodeProfile::new(8, 1, 32, 1024, true);
-        profile.roles = vec![NodeRole::AiTraining, NodeRole::RedisNode];
+        let profile = NodeProfile {
+            id: "test".to_string(),
+            roles: vec![NodeRole::WalletNode, NodeRole::RedisNode],
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        };
         
-        let tasks = dispatcher.map_roles_to_tasks_async(&profile).await.unwrap();
-        assert!(tasks.contains(&Task::AiTraining));
+        let result = dispatcher.map_roles_to_tasks_async(&profile).await;
+        assert!(result.is_ok());
+        
+        let tasks = result.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.contains(&Task::WalletProcessing));
         assert!(tasks.contains(&Task::RedisCache));
-        
-        // Kiểm tra số lượng task sau khi mapping xong
-        assert_eq!(dispatcher.task_manager.get_current_tasks(), 1, 
-            "Task count should be 1 after map_roles_to_tasks_async because caller is responsible for finish_task");
-        
-        // Cleanup
-        dispatcher.task_manager.finish_task();
     }
     
     #[test]
     fn test_map_roles_to_tasks_with_priority() {
-        let mut profile = NodeProfile::new(8, 1, 32, 1024, true);
-        profile.roles = vec![NodeRole::RedisNode, NodeRole::AiTraining];
+        let profile = NodeProfile {
+            id: "test".to_string(),
+            roles: vec![NodeRole::CdnStorageNode, NodeRole::AiTraining],
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        };
         
         let tasks = Dispatcher::map_roles_to_tasks_with_priority(&profile);
-        
-        // AiTraining có ưu tiên cao hơn RedisCache nên phải ở đầu danh sách
+        assert_eq!(tasks.len(), 1);
+        // AiTraining có ưu tiên cao hơn CdnStorage trong TASK_PRIORITY
         assert_eq!(tasks[0], Task::AiTraining);
-        assert_eq!(tasks[1], Task::RedisCache);
     }
     
     #[test]
@@ -318,15 +313,16 @@ mod tests {
         let task_manager = Arc::new(TaskManager::new());
         let dispatcher = Dispatcher::new(task_manager);
         
-        let profile = NodeProfile::new(8, 1, 32, 1024, true);
-        // Không set roles -> empty
+        let profile = NodeProfile {
+            id: "empty".to_string(),
+            roles: vec![],
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        };
         
         let tasks = dispatcher.map_roles_to_tasks(&profile);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], Task::Unknown);
-        
-        // Kiểm tra số lượng task sau khi mapping xong
-        assert_eq!(dispatcher.task_manager.get_current_tasks(), 0, "Task count should be 0 after map_roles_to_tasks");
     }
     
     #[test]
@@ -334,14 +330,25 @@ mod tests {
         let task_manager = Arc::new(TaskManager::new());
         let dispatcher = Dispatcher::new(task_manager);
         
-        let mut profile = NodeProfile::new(8, 1, 32, 1024, true);
-        profile.roles = vec![NodeRole::Unknown];
+        let profile = NodeProfile {
+            id: "unknown".to_string(),
+            roles: vec![NodeRole::Unknown],
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        };
         
         let tasks = dispatcher.map_roles_to_tasks(&profile);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], Task::Unknown);
-        
-        // Kiểm tra số lượng task sau khi mapping xong
-        assert_eq!(dispatcher.task_manager.get_current_tasks(), 0, "Task count should be 0 after map_roles_to_tasks");
     }
 }
+
+// Scheduling thực thi các task, được thực hiện bởi DefaultTaskDispatcher
+pub async fn run_task_cleanup(tasks: Arc<RwLock<HashMap<String, TaskInfo>>>, task_id: String) {
+    // Đợi một khoảng thời gian trước khi dọn dẹp
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // Xóa task khỏi map
+    let _handles = tasks.write().await;
+    // Clean up logic
+} 

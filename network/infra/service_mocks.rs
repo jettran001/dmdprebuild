@@ -16,12 +16,10 @@
 //! redis_service.connect("redis://localhost:6379").expect("Failed to connect");
 //! ```
 
-use crate::infra::service_traits::{WebRtcService, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, MasterNodeService, SlaveNodeService, SchedulerService, DiscoveryService, WebRtcConfig};
-use crate::config::types::{RedisConfig, IpfsConfig, WasmConfig};
-use std::sync::{Arc, Mutex};
+use crate::infra::service_traits::{WebRtcService, ServiceError, RedisService, IpfsService, WasmService, MessagingKafkaService, MessagingMqttService, ExecutionAdapter, AiAdapter, WebRtcConfig};
+use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{info, warn, error};
-use async_trait::async_trait;
+use tracing::info;
 
 /// Macro để tạo implementation cơ bản cho các method của một trait
 #[macro_export]
@@ -42,7 +40,7 @@ pub struct DefaultRedisService {
     /// Status of connection
     pub is_connected: bool,
     /// Mock Redis storage
-    pub storage: Arc<Mutex<HashMap<String, String>>>,
+    pub storage: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
 }
 
 impl DefaultRedisService {
@@ -50,8 +48,14 @@ impl DefaultRedisService {
     pub fn new() -> Self {
         Self {
             is_connected: false,
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for DefaultRedisService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -67,7 +71,7 @@ impl RedisService for DefaultRedisService {
         if let Some(username) = username {
             info!("[DefaultRedisService] Using username: {}", username);
         }
-        if let Some(_) = password {
+        if password.is_some() {
             info!("[DefaultRedisService] Using password: [REDACTED]");
         }
         Ok(())
@@ -121,7 +125,7 @@ pub struct DefaultIpfsService {
     /// Status of connection
     pub is_connected: bool,
     /// Mock IPFS storage (CID -> Data)
-    pub storage: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    pub storage: Arc<tokio::sync::Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl DefaultIpfsService {
@@ -129,7 +133,7 @@ impl DefaultIpfsService {
     pub fn new() -> Self {
         Self {
             is_connected: false,
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
     
@@ -138,6 +142,12 @@ impl DefaultIpfsService {
         // Simple mock CID generator 
         let random_part = uuid::Uuid::new_v4().to_string();
         format!("Qm{}", &random_part[..20])
+    }
+}
+
+impl Default for DefaultIpfsService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -201,7 +211,7 @@ pub struct DefaultWebRtcService {
     /// Status of WebRTC initialization
     pub is_initialized: bool,
     /// Mock peer connections (ID -> Config)
-    pub connections: Arc<Mutex<HashMap<String, WebRtcConfig>>>,
+    pub connections: Arc<tokio::sync::Mutex<HashMap<String, WebRtcConfig>>>,
 }
 
 impl DefaultWebRtcService {
@@ -209,8 +219,14 @@ impl DefaultWebRtcService {
     pub fn new() -> Self {
         Self {
             is_initialized: false,
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for DefaultWebRtcService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -236,15 +252,16 @@ impl WebRtcService for DefaultWebRtcService {
         }
     }
     
-    async fn add_ice_candidate(&self, connection_id: &str, candidate: &str) -> Result<(), ServiceError> {
-        info!("[DefaultWebRtcService] Adding ICE candidate for connection: {}", connection_id);
+    async fn add_ice_candidate(&self, connection_id: &str, _candidate: &str) -> Result<(), ServiceError> {
+        info!("[DefaultWebRtcService] Adding ICE candidate to connection: {}", connection_id);
         
+        // Check if connection exists
         match self.connections.lock() {
             Ok(connections) => {
                 if connections.contains_key(connection_id) {
                     Ok(())
                 } else {
-                    Err(ServiceError::NotFoundError(format!("Connection ID not found: {}", connection_id)))
+                    Err(ServiceError::NotFoundError(format!("Connection not found: {}", connection_id)))
                 }
             },
             Err(_) => Err(ServiceError::InternalError("Failed to acquire connections lock during add_ice_candidate".to_string())),
@@ -304,7 +321,7 @@ pub struct DefaultWasmService {
     /// Status of Wasm runtime initialization
     pub is_initialized: bool,
     /// Mock loaded modules (ID -> Size)
-    pub modules: Arc<Mutex<HashMap<String, usize>>>,
+    pub modules: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
 impl DefaultWasmService {
@@ -312,8 +329,14 @@ impl DefaultWasmService {
     pub fn new() -> Self {
         Self {
             is_initialized: false,
-            modules: Arc::new(Mutex::new(HashMap::new())),
+            modules: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for DefaultWasmService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -375,12 +398,18 @@ impl WasmService for DefaultWasmService {
     }
 }
 
+/// Type alias cho subscription map cho Kafka service
+pub type KafkaSubscriptionMap = Arc<tokio::sync::Mutex<HashMap<String, (String, usize)>>>;
+
+/// Type alias cho subscription map cho MQTT service
+pub type MqttSubscriptionMap = Arc<tokio::sync::Mutex<HashMap<String, (String, u8, usize)>>>;
+
 /// Default implementation của MessagingKafkaService
 pub struct DefaultMessagingKafkaService {
     /// Status of connection
     pub is_connected: bool,
     /// Mock subscriptions (ID -> (Topic, Callback count))
-    pub subscriptions: Arc<Mutex<HashMap<String, (String, usize)>>>,
+    pub subscriptions: KafkaSubscriptionMap,
 }
 
 impl DefaultMessagingKafkaService {
@@ -388,8 +417,14 @@ impl DefaultMessagingKafkaService {
     pub fn new() -> Self {
         Self {
             is_connected: false,
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for DefaultMessagingKafkaService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -407,7 +442,7 @@ pub struct DefaultMessagingMqttService {
     /// Status of connection
     pub is_connected: bool,
     /// Mock subscriptions (ID -> (Topic, QoS, Callback count))
-    pub subscriptions: Arc<Mutex<HashMap<String, (String, u8, usize)>>>,
+    pub subscriptions: MqttSubscriptionMap,
 }
 
 impl DefaultMessagingMqttService {
@@ -415,8 +450,14 @@ impl DefaultMessagingMqttService {
     pub fn new() -> Self {
         Self {
             is_connected: false,
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for DefaultMessagingMqttService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
