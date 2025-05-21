@@ -1,0 +1,89 @@
+
+# - Unibot: https://unibot.ai/
+# - Maestro: https://maestro.ai/
+# - BananaGun: https://bananagun.io/
+# - MEV bots: https://github.com/flashbots/mev-inspect
+
+# Kế hoạch cải tiến logic smart_trade.rs (SnipeBot)
+# Tham khảo: TokenSniffer, GoPlus, StaySafu, RugDoc, DYOR, Unibot, Maestro, BananaGun, MEV bots
+
+## 1. Phân tích token nâng cao trước khi trade
+- [ ] **Honeypot detection**
+  - Mô tả: Kiểm tra khả năng bán token (simulate sell, check transfer restriction)
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_honeypot)
+- [ ] **Tax/fee detection**
+  - Mô tả: Phát hiện tax ẩn, tax dynamic, tax tăng bất thường
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_dynamic_tax)
+- [ ] **Blacklist/anti-bot/anti-whale**
+  - Mô tả: Phát hiện contract có blacklist, anti-bot, anti-whale, max tx, max wallet
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_blacklist, detect_anti_bot)
+- [ ] **Proxy/upgradeable detection**
+  - Mô tả: Phát hiện contract có thể upgrade, owner có quyền upgrade
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_proxy)
+- [ ] **Liquidity event risk**
+  - Mô tả: Theo dõi pool lock/unlock, phát hiện pool bị rút thanh khoản
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_liquidity_risk)
+- [ ] **Owner privilege analysis**
+  - Mô tả: Phát hiện owner có quyền mint, blacklist, set fee, disable trading
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_owner_privilege)
+- [ ] **External call detection**
+  - Mô tả: Phát hiện contract gọi external contract (có thể bị rug)
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status.rs, smart_trade.rs (hàm detect_external_call)
+
+## 2. Tối ưu hóa chiến lược giao dịch
+- [ ] **Trailing stop động**
+  - Mô tả: Điều chỉnh trailing stop theo volatility (ATR, Bollinger Band)
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade.rs (hàm dynamic_trailing_stop)
+- [ ] **Dynamic take profit/stop loss**
+  - Mô tả: Tự động điều chỉnh TP/SL theo biến động giá, volume, on-chain event
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade.rs (hàm dynamic_tp_sl)
+- [ ] **Auto sell khi phát hiện bất thường**
+  - Mô tả: Nếu phát hiện pool unlock, owner đổi, tax tăng, v.v. thì auto sell ngay lập tức
+  - Ưu tiên: Cao
+  - Module/hàm: smart_trade.rs (hàm auto_sell_on_alert)
+- [ ] **Whale tracking**
+  - Mô tả: Theo dõi ví lớn, nếu phát hiện whale bán mạnh thì auto sell
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/mempool.rs, smart_trade.rs (hàm whale_tracker)
+- [ ] **Batch transaction**
+  - Mô tả: Gom nhiều lệnh nhỏ thành 1 lệnh lớn để tiết kiệm gas
+  - Ưu tiên: Thấp
+  - Module/hàm: smart_trade.rs (hàm batch_trade)
+
+## 3. Cảnh báo & logging nâng cao
+- [ ] **Alert real-time**
+  - Mô tả: Gửi cảnh báo khi phát hiện bất thường (Telegram, Discord, Email)
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade.rs (hàm send_alert)
+- [ ] **Logging chi tiết**
+  - Mô tả: Log lại toàn bộ quá trình phân tích, quyết định, lý do mua/bán/hủy
+  - Ưu tiên: Cao
+  - Module/hàm: smart_trade.rs (hàm log_trade_decision)
+
+## 4. Tối ưu hóa hiệu suất & bảo mật
+- [ ] **Async concurrency**
+  - Mô tả: Tối ưu hóa các tác vụ async, tránh block thread
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade.rs (refactor async)
+- [ ] **Gas optimization**
+  - Mô tả: Ưu tiên các pool có gas thấp, tránh pool congested
+  - Ưu tiên: Thấp
+  - Module/hàm: smart_trade.rs (hàm select_optimal_pool)
+- [ ] **Anti-MEV**
+  - Mô tả: Phát hiện và tránh các giao dịch có khả năng bị front-run/back-run
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade.rs (hàm anti_mev_protection)
+
+# Ghi chú:
+# - Ưu tiên thực hiện các đầu việc có priority "Cao" trước.
+# - Mỗi đầu việc nên có unit test và doc comment rõ ràng.
+# - Không trùng lặp logic giữa các module, chỉ tái sử dụng qua trait/service.

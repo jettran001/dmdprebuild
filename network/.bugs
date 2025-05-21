@@ -1,0 +1,22 @@
+### 12. Lỗi mới phát hiện bởi cargo clippy (2024-09-24):
+- [x] network/messaging/kafka.rs:2 - unused import: `crate::security::input_validation::security`
+- [x] network/messaging/kafka.rs:3 - unused import: `tokio::sync::Mutex as TokioMutex`
+
+### 13. Lỗi mới phát hiện bởi cargo clippy (2024-09-25):
+- [x] network/messaging/kafka.rs:1 - empty line after doc comment (clippy::empty-line-after-doc-comments)
+- [x] network/security/input_validation.rs:1002 - this `map_or` can be simplified (clippy::unnecessary-map-or)
+- [x] network/security/input_validation.rs:1006 - this `map_or` can be simplified (clippy::unnecessary-map-or)
+- [x] network/security/input_validation.rs:1010 - this `map_or` can be simplified (clippy::unnecessary-map-or)
+- [x] network/security/input_validation.rs:305 - very complex type used. Consider factoring parts into type definitions (clippy::type-complexity)
+
+### 14. Lỗi build (E0432, E0423, E0782, E0609, E0282) từ network/main.rs:
+- [x] network/main.rs:5 - unresolved import `network::logs` (E0432)
+- [x] network/main.rs:15 - expected a type, found trait `NetworkEngine` (E0782)
+- [x] network/main.rs:31 - no field `api_endpoint` on type `network::config::IpfsConfig` (E0609)
+- [x] network/main.rs:48 - expected a type, found trait `NetworkEngine` (E0782)
+- [x] network/main.rs:69 - expected value, found struct `WarpWebSocketService` (E0423)
+- [x] network/main.rs:74 - type annotations needed for tokio::join! macro (E0282)
+
+### 15. Lỗi mới phát hiện bởi cargo clippy (2024-09-26):
+- [x] network/main.rs:30,31,32 - called `Iterator::last` on a `DoubleEndedIterator` (clippy::double-ended-iterator-last)
+-

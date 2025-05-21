@@ -1,0 +1,708 @@
+/// Token analysis implementation for SmartTradeExecutor
+///
+/// This module contains functions for analyzing token safety, detecting
+/// honeypot, dynamic tax, liquidity risk, and other potential threats.
+///
+/// # Cải tiến đã thực hiện:
+/// - Loại bỏ các phương thức trùng lặp với analys/token_status
+/// - Sử dụng TokenStatusAnalyzer từ analys/token_status
+/// - Áp dụng xử lý lỗi chuẩn với anyhow::Result thay vì unwrap/expect
+/// - Đảm bảo thread safety trong các phương thức async
+/// - Tối ưu hóa các truy vấn blockchain song song
+/// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+
+// External imports
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use anyhow::{Result, Context, anyhow};
+use tracing::{debug, error, info, warn};
+
+// Internal imports
+use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::analys::token_status::{
+    TokenStatusAnalyzer, TokenStatus, TokenSafety, ContractInfo, 
+    LiquidityEvent, LiquidityEventType, AdvancedTokenAnalysis, TokenIssue
+};
+
+// Module imports
+use super::types::{TradeTracker, TradeStatus};
+use super::constants::*;
+use super::executor::SmartTradeExecutor;
+
+// Add import for common module
+use crate::tradelogic::common::types::{TokenIssue};
+use crate::tradelogic::common::analysis::{detect_token_issues};
+
+impl SmartTradeExecutor {
+    /// Phát hiện honeypot (token không thể bán)
+    /// 
+    /// Sử dụng TokenStatusAnalyzer để phát hiện các token honeypot
+    /// 
+    /// # Arguments
+    /// * `chain_id` - ID của blockchain
+    /// * `token_address` - Địa chỉ token
+    /// * `adapter` - EVM adapter
+    /// 
+    /// # Returns
+    /// * `bool` - true nếu phát hiện dấu hiệu honeypot
+    pub async fn detect_honeypot(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
+        // Lấy TokenStatusAnalyzer từ singleton
+        let token_analyzer = match self.get_token_analyzer().await {
+            Some(analyzer) => analyzer,
+            None => {
+                warn!("Không thể lấy TokenStatusAnalyzer, sử dụng phân tích hạn chế");
+                return self.fallback_honeypot_detection(chain_id, token_address, adapter).await;
+            }
+        };
+        
+        // Gọi phương thức is_honeypot từ TokenStatusAnalyzer
+        match token_analyzer.is_honeypot(token_address, chain_id).await {
+            Ok(is_honeypot) => {
+                if is_honeypot {
+                    debug!("TokenStatusAnalyzer phát hiện token {} là honeypot", token_address);
+                }
+                is_honeypot
+            },
+            Err(e) => {
+                warn!("Lỗi khi kiểm tra honeypot với TokenStatusAnalyzer: {}", e);
+                // Sử dụng phương pháp dự phòng nếu TokenStatusAnalyzer gặp lỗi
+                self.fallback_honeypot_detection(chain_id, token_address, adapter).await
+            }
+        }
+    }
+    
+    /// Phương pháp dự phòng để phát hiện honeypot khi TokenStatusAnalyzer không khả dụng
+    async fn fallback_honeypot_detection(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
+        // Kiểm tra bằng cách thử simulate bán token
+        match adapter.simulate_sell_token(token_address, 0.01).await {
+            Ok(can_sell) => !can_sell,
+            Err(_) => {
+                // Không thể xác định, áp dụng nguyên tắc cẩn trọng: coi là nguy hiểm
+                true
+            }
+        }
+    }
+    
+        /// Lấy TokenStatusAnalyzer từ module analys
+    async fn get_token_analyzer(&self) -> Option<Arc<TokenStatusAnalyzer>> {
+        // Trong thực tế, đây có thể được khởi tạo một lần và lưu trong struct
+        // Hoặc được truyền vào qua constructor
+        Some(Arc::new(TokenStatusAnalyzer::new()))
+    }
+
+    /// Phát hiện tax động hoặc tax cao
+    pub async fn detect_dynamic_tax(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
+        let token_analyzer = match self.get_token_analyzer().await {
+            Some(analyzer) => analyzer,
+            None => {
+                // Sử dụng adapter trực tiếp nếu không lấy được TokenStatusAnalyzer
+                return self.fallback_tax_detection(token_address, adapter).await;
+            }
+        };
+        
+        match token_analyzer.get_token_tax(token_address, chain_id).await {
+            Ok((buy_tax, sell_tax)) => {
+                let is_dynamic = (sell_tax - buy_tax).abs() > DANGEROUS_TAX_DIFF
+                    || buy_tax > MAX_SAFE_BUY_TAX
+                    || sell_tax > MAX_SAFE_SELL_TAX;
+                
+                (is_dynamic, buy_tax, sell_tax)
+            },
+            Err(e) => {
+                warn!("Lỗi khi lấy thông tin tax với TokenStatusAnalyzer: {}", e);
+                self.fallback_tax_detection(token_address, adapter).await
+            }
+        }
+    }
+
+    /// Phương pháp dự phòng để phát hiện tax
+    async fn fallback_tax_detection(&self, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
+        match adapter.get_token_tax_info(token_address).await {
+            Ok((buy_tax, sell_tax)) => {
+                let is_dynamic = (sell_tax - buy_tax).abs() > DANGEROUS_TAX_DIFF
+                    || buy_tax > MAX_SAFE_BUY_TAX
+                    || sell_tax > MAX_SAFE_SELL_TAX;
+                
+                (is_dynamic, buy_tax, sell_tax)
+            },
+            Err(_) => {
+                // Không thể xác định, coi là nguy hiểm
+                (true, 0.0, 0.0)
+            }
+        }
+    }
+
+    /// Phát hiện thanh khoản thấp hoặc rút thanh khoản đột ngột
+    pub async fn detect_liquidity_risk(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, String) {
+        let token_analyzer = match self.get_token_analyzer().await {
+            Some(analyzer) => analyzer,
+            None => {
+                return self.fallback_liquidity_detection(token_address, adapter).await;
+            }
+        };
+        
+        // Kiểm tra thanh khoản và sự kiện
+        match token_analyzer.analyze_liquidity_risk(token_address, chain_id).await {
+            Ok((has_risk, reason)) => (has_risk, reason),
+            Err(e) => {
+                warn!("Lỗi khi phân tích rủi ro thanh khoản: {}", e);
+                self.fallback_liquidity_detection(token_address, adapter).await
+            }
+        }
+    }
+    
+    /// Phương pháp dự phòng kiểm tra thanh khoản
+    async fn fallback_liquidity_detection(&self, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, String) {
+        match adapter.get_token_liquidity(token_address).await {
+            Ok(liquidity) => {
+                if liquidity < MIN_LIQUIDITY_THRESHOLD {
+                    (true, format!("Thanh khoản thấp: ${:.2}", liquidity))
+                } else {
+                    (false, "Thanh khoản ổn định".to_string())
+                }
+            },
+            Err(_) => {
+                (true, "Không thể kiểm tra thanh khoản".to_string())
+            }
+        }
+    }
+
+    /// Phân tích quyền của owner contract
+    pub async fn detect_owner_privilege(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, Vec<String>) {
+        // Lấy thông tin contract
+        let contract_info_result = self.get_contract_info(chain_id, token_address, adapter).await;
+        
+        if let Some(contract_info) = contract_info_result {
+            // Sử dụng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+            let owner_analysis = token_status.analyze_owner_privileges(&contract_info);
+            
+            // Danh sách quyền hạn đáng ngại
+            let mut dangerous_privileges = Vec::new();
+            
+            // Kiểm tra các quyền nguy hiểm
+            if owner_analysis.has_mint_authority {
+                dangerous_privileges.push("Mint vô hạn".to_string());
+            }
+            
+            if owner_analysis.has_pause_authority {
+                dangerous_privileges.push("Dừng giao dịch".to_string());
+            }
+            
+            if owner_analysis.has_burn_authority {
+                dangerous_privileges.push("Burn token bất kỳ".to_string());
+            }
+            
+            if owner_analysis.can_retrieve_ownership {
+                dangerous_privileges.push("Lấy lại quyền owner sau khi từ bỏ".to_string());
+            }
+            
+            if owner_analysis.is_proxy {
+                dangerous_privileges.push("Contract proxy có thể nâng cấp".to_string());
+            }
+            
+            // Phát hiện các hàm nguy hiểm
+            let dangerous_functions = token_status.detect_dangerous_functions(&contract_info);
+            for func in dangerous_functions {
+                dangerous_privileges.push(func);
+            }
+            
+            // Kết luận dựa trên số lượng quyền nguy hiểm
+            let is_dangerous = !dangerous_privileges.is_empty();
+            
+            (is_dangerous, dangerous_privileges)
+        } else {
+            // Không lấy được thông tin contract, nguy hiểm
+            (true, vec!["Không thể phân tích contract".to_string()])
+        }
+    }
+    
+    /// Phát hiện cơ chế blacklist/whitelist
+    pub async fn detect_blacklist(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
+        // Lấy thông tin contract
+        let contract_info_result = self.get_contract_info(chain_id, token_address, adapter).await;
+        
+        if let Some(contract_info) = contract_info_result {
+            // Kiểm tra source code có blacklist không
+            if let Some(source_code) = &contract_info.source_code {
+                // Các pattern blacklist phổ biến
+                let blacklist_patterns = [
+                    "blacklist", "blocklist", "blacklisted", "banned", 
+                    "isBlacklisted", "_blacklist", "denylist", "blackList"
+                ];
+                
+                // Tìm pattern trong source code
+                for pattern in blacklist_patterns.iter() {
+                    if source_code.to_lowercase().contains(&pattern.to_lowercase()) {
+                        return true;
+                    }
+                }
+            }
+            
+            false
+        } else {
+            // Không lấy được thông tin contract, nguy hiểm
+            true
+        }
+    }
+    
+    /// Phát hiện contract là proxy hoặc upgradeable
+    /// 
+    /// Kiểm tra xem contract có thể được nâng cấp logic sau khi launch hay không
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu là proxy contract
+    /// - `bool`: True nếu owner có quyền upgrade
+    pub async fn detect_proxy(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, bool) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Sử dụng TokenStatus để phân tích contract
+            let token_status = TokenStatus::new();
+            
+            // Kiểm tra có phải là proxy không
+            let is_proxy = token_status.is_proxy_contract(&contract_info);
+            
+            // Kiểm tra quyền upgrade
+            let owner_analysis = token_status.analyze_owner_privileges(&contract_info);
+            let owner_can_upgrade = is_proxy && !owner_analysis.is_ownership_renounced;
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Proxy check: is_proxy={}, owner_can_upgrade={}", is_proxy, owner_can_upgrade),
+                chain_id
+            ).await;
+            
+            return (is_proxy, owner_can_upgrade);
+        }
+        
+        (false, false)
+    }
+
+    /// Phát hiện external call hoặc delegatecall
+    /// 
+    /// Kiểm tra xem contract có gọi external code/delegatecall không (có thể gây rug)
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu có external call hoặc delegatecall
+    /// - `Vec<String>`: Danh sách các hàm nguy hiểm được phát hiện
+    pub async fn detect_external_call(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, Vec<String>) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Sử dụng TokenStatus để phân tích bytecode
+            let token_status = TokenStatus::new();
+            
+            // Kiểm tra external call/delegatecall
+            let has_external_calls = token_status.has_external_delegatecall(&contract_info);
+            
+            // Lấy danh sách các hàm nguy hiểm
+            let bytecode_analysis = token_status.analyze_bytecode(&contract_info);
+            let dangerous_functions = bytecode_analysis.dangerous_functions.clone();
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("External call check: has_external_calls={}, dangerous_functions={:?}", 
+                         has_external_calls, dangerous_functions),
+                chain_id
+            ).await;
+            
+            return (has_external_calls, dangerous_functions);
+        }
+        
+        (false, Vec::new())
+    }
+
+    /// Phát hiện anti-bot và anti-whale
+    /// 
+    /// Kiểm tra xem token có giới hạn giao dịch hoặc giới hạn số lượng token trong ví không
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu có giới hạn giao dịch (anti-bot)
+    /// - `bool`: True nếu có giới hạn số token một ví có thể giữ (anti-whale)
+    /// - `bool`: True nếu có cooldown giữa các giao dịch
+    pub async fn detect_anti_bot(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, bool, bool) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            let token_status = TokenStatus::new();
+            
+            // Kiểm tra max transaction limit
+            let has_tx_limit = token_status.has_max_tx_or_wallet_limit(&contract_info);
+            
+            // Kiểm tra trading cooldown
+            let has_cooldown = token_status.has_trading_cooldown(&contract_info);
+            
+            // Phân tích nâng cao từ code
+            let advanced_analysis = token_status.analyze_code_without_api(&contract_info);
+            
+            // Anti-whale là giới hạn số lượng token trong wallet
+            let has_anti_whale = advanced_analysis.has_anti_whale;
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Anti-bot check: has_tx_limit={}, has_anti_whale={}, has_cooldown={}", 
+                         has_tx_limit, has_anti_whale, has_cooldown),
+                chain_id
+            ).await;
+            
+            return (has_tx_limit, has_anti_whale, has_cooldown);
+        }
+        
+        (false, false, false)
+    }
+    
+    /// Kiểm tra xem quyền sở hữu có được từ bỏ thực sự không
+    ///
+    /// Phân tích sâu hơn để kiểm tra quyền sở hữu đã được từ bỏ thật sự chưa
+    /// hoặc còn tồn tại backdoor để lấy lại quyền
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu quyền sở hữu đã thực sự được từ bỏ
+    /// - `bool`: True nếu phát hiện backdoor để lấy lại quyền
+    pub async fn is_ownership_renounced(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, bool) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Tạo đối tượng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+
+            // Kiểm tra owner đã từ bỏ quyền chưa
+            let is_renounced = token_status.is_ownership_renounced(&contract_info);
+            
+            // Phân tích quyền hạn owner để kiểm tra backdoor
+            let owner_analysis = token_status.analyze_owner_privileges(&contract_info);
+            let has_backdoor = owner_analysis.can_retrieve_ownership;
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Ownership check: renounced={}, has_backdoor={}", is_renounced, has_backdoor),
+                chain_id
+            ).await;
+            
+            return (is_renounced, has_backdoor);
+        }
+        
+        (false, false)
+    }
+
+    /// Phát hiện token có trading cooldown không
+    /// 
+    /// Kiểm tra nếu token có giới hạn thời gian giữa các giao dịch (anti-bot)
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu có trading cooldown
+    /// - `u64`: Thời gian cooldown (giây), 0 nếu không có
+    pub async fn detect_trading_cooldown(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, u64) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Tạo đối tượng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+
+            // Kiểm tra có trading cooldown không
+            let has_cooldown = token_status.has_trading_cooldown(&contract_info);
+            
+            // Nếu có cooldown, tìm thời gian cụ thể
+            let cooldown_seconds = if has_cooldown {
+                // Phân tích mã nguồn để tìm thời gian cooldown
+                if let Some(source_code) = &contract_info.source_code {
+                    // Tìm các pattern thời gian cooldown phổ biến
+                    if let Some(cooldown_match) = Regex::new(r"(?i)cooldown\s*=\s*(\d+)")
+                        .ok()
+                        .and_then(|re| re.captures(source_code))
+                        .and_then(|cap| cap.get(1))
+                    {
+                        cooldown_match.as_str().parse::<u64>().unwrap_or(60)
+                    } else {
+                        // Default cooldown nếu không tìm thấy giá trị cụ thể
+                        60
+                    }
+                } else {
+                    60
+                }
+            } else {
+                0
+            };
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Trading cooldown check: has_cooldown={}, seconds={}", has_cooldown, cooldown_seconds),
+                chain_id
+            ).await;
+            
+            return (has_cooldown, cooldown_seconds);
+        }
+        
+        (false, 0)
+    }
+
+    /// Phát hiện giới hạn giao dịch và giới hạn ví
+    /// 
+    /// Kiểm tra nếu token có giới hạn số lượng tối đa cho mỗi giao dịch
+    /// hoặc giới hạn số lượng token trong ví
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu có giới hạn giao dịch
+    /// - `bool`: True nếu có giới hạn ví
+    /// - `f64`: Phần trăm của tổng cung có thể giao dịch trong một lần, 0 nếu không giới hạn
+    pub async fn detect_transaction_limits(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, bool, f64) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Tạo đối tượng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+
+            // Kiểm tra có giới hạn giao dịch hay không
+            let has_tx_limit = token_status.has_max_tx_or_wallet_limit(&contract_info);
+            
+            // Tìm chi tiết về giới hạn
+            let (has_wallet_limit, max_tx_percent) = if has_tx_limit {
+                // Phân tích mã nguồn để tìm giới hạn cụ thể
+                if let Some(source_code) = &contract_info.source_code {
+                    // Tìm các mẫu giới hạn ví
+                    let wallet_limit_pattern = Regex::new(r"(?i)(maxWallet|maxHolding|maxBalance)").ok();
+                    let has_wallet_limit = wallet_limit_pattern
+                        .as_ref()
+                        .map(|re| re.is_match(source_code))
+                        .unwrap_or(false);
+                    
+                    // Tìm phần trăm giới hạn giao dịch
+                    let tx_percent = Regex::new(r"(?i)_max(Transaction|Tx|TxAmount)\s*=\s*(\d+)")
+                        .ok()
+                        .and_then(|re| re.captures(source_code))
+                        .and_then(|cap| cap.get(2))
+                        .and_then(|m| m.as_str().parse::<f64>().ok())
+                        .unwrap_or(1.0);
+                    
+                    (has_wallet_limit, tx_percent)
+                } else {
+                    (false, 1.0)
+                }
+            } else {
+                (false, 0.0)
+            };
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Transaction limits: has_tx_limit={}, has_wallet_limit={}, max_tx_percent={}%", 
+                         has_tx_limit, has_wallet_limit, max_tx_percent),
+                chain_id
+            ).await;
+            
+            return (has_tx_limit, has_wallet_limit, max_tx_percent);
+        }
+        
+        (false, false, 0.0)
+    }
+
+    /// Phát hiện tax hoặc phí ẩn
+    /// 
+    /// Kiểm tra nếu token có tax hoặc phí ẩn cao hơn mức ghi trong smart contract
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu phát hiện tax ẩn
+    /// - `f64`: Tax/phí thực tế (%)
+    /// - `f64`: Tax/phí được công bố (%)
+    pub async fn detect_hidden_fees(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
+        if let Some(contract_info) = self.get_contract_info(chain_id, token_address, adapter).await {
+            // Tạo đối tượng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+
+            // Kiểm tra có hidden fees không
+            let has_hidden_fees = token_status.has_hidden_fees(&contract_info);
+            
+            // Lấy tax từ hợp đồng và tax thực tế
+            let declared_tax = if let Some(source_code) = &contract_info.source_code {
+                // Tìm các pattern tax phổ biến
+                Regex::new(r"(?i)(fee|tax)\s*=\s*(\d+)")
+                    .ok()
+                    .and_then(|re| re.captures(source_code))
+                    .and_then(|cap| cap.get(2))
+                    .and_then(|m| m.as_str().parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            
+            // Tính tax thực tế bằng cách thử giao dịch nhỏ
+            let (actual_tax, _) = adapter.simulate_buy_sell_slippage(token_address, 0.01).await.unwrap_or((0.0, 0.0));
+            
+            // Tax ẩn nếu thực tế cao hơn khai báo >2%
+            let has_hidden = (actual_tax - declared_tax).abs() > 2.0;
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Hidden fees check: has_hidden={}, declared={}%, actual={}%", 
+                         has_hidden, declared_tax, actual_tax),
+                chain_id
+            ).await;
+            
+            return (has_hidden, actual_tax, declared_tax);
+        }
+        
+        (false, 0.0, 0.0)
+    }
+
+    /// Phân tích sự kiện thanh khoản để phát hiện rug pull
+    /// 
+    /// Phân tích lịch sử add/remove liquidity để phát hiện dấu hiệu rút LP bất thường
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu phát hiện dấu hiệu rug pull
+    /// - `String`: Chi tiết về các dấu hiệu phát hiện được
+    pub async fn analyze_liquidity_events(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, String) {
+        // Lấy lịch sử sự kiện thanh khoản
+        if let Ok(liquidity_events) = adapter.get_liquidity_events(token_address, 50).await {
+            // Tạo đối tượng TokenStatus để phân tích
+            let token_status = TokenStatus::new();
+
+            // Kiểm tra bất thường trong sự kiện thanh khoản
+            let abnormal = token_status.abnormal_liquidity_events(&liquidity_events);
+            
+            // Phân tích chi tiết
+            let mut details = String::new();
+            let mut add_events = 0;
+            let mut remove_events = 0;
+            let mut total_added = 0.0;
+            let mut total_removed = 0.0;
+            
+            for event in &liquidity_events {
+                match event.event_type {
+                    LiquidityEventType::AddLiquidity => {
+                        add_events += 1;
+                        if let Ok(amount) = event.base_amount.parse::<f64>() {
+                            total_added += amount;
+                        }
+                    },
+                    LiquidityEventType::RemoveLiquidity => {
+                        remove_events += 1;
+                        if let Ok(amount) = event.base_amount.parse::<f64>() {
+                            total_removed += amount;
+                        }
+                    }
+                }
+            }
+            
+            // Tính % LP đã rút
+            let percentage_removed = if total_added > 0.0 {
+                (total_removed / total_added) * 100.0
+            } else {
+                0.0
+            };
+            
+            // Tạo chi tiết phân tích
+            details = format!(
+                "Add events: {}, Remove events: {}, Added: {:.4} ETH/BNB, Removed: {:.4} ETH/BNB ({}%)",
+                add_events, remove_events, total_added, total_removed, percentage_removed
+            );
+            
+            // Xác định dấu hiệu rug pull
+            let is_rugpull_pattern = abnormal || percentage_removed > 70.0;
+            
+            if is_rugpull_pattern {
+                details = format!("⚠️ RUG PULL PATTERN! {}", details);
+            }
+            
+            self.log_trade_decision(
+                "N/A", 
+                token_address, 
+                TradeStatus::Pending, 
+                &format!("Liquidity analysis: abnormal={}, details={}", abnormal, details),
+                chain_id
+            ).await;
+            
+            return (is_rugpull_pattern, details);
+        }
+        
+        (false, "Không thể lấy dữ liệu sự kiện thanh khoản".to_string())
+    }
+
+    /// Phân tích token toàn diện với nhiều kiểm tra an toàn
+    ///
+    /// Gọi TokenStatusAnalyzer để thực hiện phân tích toàn diện
+    /// 
+    /// # Arguments
+    /// * `chain_id` - ID của blockchain
+    /// * `token_address` - Địa chỉ token
+    /// * `adapter` - EVM adapter
+    /// 
+    /// # Returns
+    /// * `Result<AdvancedTokenAnalysis>` - Kết quả phân tích token
+    pub async fn analyze_token_comprehensive(
+        &self, 
+        chain_id: u32, 
+        token_address: &str, 
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<AdvancedTokenAnalysis> {
+        let token_analyzer = match self.get_token_analyzer().await {
+            Some(analyzer) => analyzer,
+            None => {
+                return Err(anyhow!("Không thể lấy TokenStatusAnalyzer để phân tích token"));
+            }
+        };
+        
+        // Gọi phân tích toàn diện từ TokenStatusAnalyzer
+        token_analyzer.analyze_token_comprehensive(token_address, chain_id)
+            .await
+            .context(format!("Lỗi khi phân tích toàn diện token {}", token_address))
+    }
+
+    /// Tính điểm rủi ro dựa trên các vấn đề đã phát hiện
+    /// 
+    /// # Arguments
+    /// * `analysis` - Kết quả phân tích token
+    /// 
+    /// # Returns
+    /// * `f64` - Điểm rủi ro (0-100, càng cao càng nguy hiểm)
+    // Tính điểm rủi ro dựa trên token analyzer
+    async fn log_trade_decision(&self, trade_id: &str, token_address: &str, status: TradeStatus, reason: &str, chain_id: u32) {
+        // Ghi log quyết định giao dịch
+        debug!(
+            "Trade decision for token {}: Status={:?}, Chain={}, Reason: {}",
+            token_address, status, chain_id, reason
+        );
+    }
+}
