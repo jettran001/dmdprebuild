@@ -19,6 +19,12 @@ use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
 use super::types::{TradeTracker, TradeStatus, TradeResult, TradeStrategy};
 use super::constants::*;
 use super::executor::SmartTradeExecutor;
+use crate::tradelogic::common::utils::{
+    calculate_profit,
+    wait_for_transaction,
+    convert_to_token_units,
+    current_time_seconds
+};
 
 impl SmartTradeExecutor {
     /// Lấy trade từ database bằng ID
@@ -47,22 +53,6 @@ impl SmartTradeExecutor {
         }
         
         None
-    }
-    
-    /// Chuyển đổi số dư thành đơn vị token
-    ///
-    /// # Parameters
-    /// - `balance`: Số dư (dạng raw)
-    /// - `decimals`: Số thập phân của token
-    ///
-    /// # Returns
-    /// - `f64`: Số dư đã chuyển đổi thành đơn vị token
-    pub fn convert_to_token_units(&self, balance: &str, decimals: u8) -> f64 {
-        if let Ok(raw_balance) = balance.parse::<f64>() {
-            raw_balance / 10_f64.powi(decimals as i32)
-        } else {
-            0.0
-        }
     }
     
     /// Kiểm tra nếu token là stable coin
@@ -116,37 +106,6 @@ impl SmartTradeExecutor {
         // Tính toán với slippage
         let effective_price = token_price * (1.0 + slippage / 100.0);
         amount_after_gas / effective_price
-    }
-    
-    /// Tính toán lợi nhuận từ giao dịch
-    ///
-    /// # Parameters
-    /// - `buy_price`: Giá mua
-    /// - `sell_price`: Giá bán
-    /// - `amount`: Số lượng token
-    /// - `buy_tax`: Phần trăm tax khi mua
-    /// - `sell_tax`: Phần trăm tax khi bán
-    ///
-    /// # Returns
-    /// - `(f64, f64)`: (Lợi nhuận số tiền, lợi nhuận phần trăm)
-    pub fn calculate_profit(&self, buy_price: f64, sell_price: f64, amount: f64, buy_tax: f64, sell_tax: f64) -> (f64, f64) {
-        // Tính số tiền thực tế đã dùng để mua (sau khi trừ tax)
-        let effective_buy_amount = amount * (1.0 - buy_tax / 100.0);
-        let buy_value = effective_buy_amount * buy_price;
-        
-        // Tính số tiền thực tế nhận được khi bán (sau khi trừ tax)
-        let effective_sell_amount = amount * (1.0 - sell_tax / 100.0);
-        let sell_value = effective_sell_amount * sell_price;
-        
-        // Tính lợi nhuận và phần trăm
-        let profit_amount = sell_value - buy_value;
-        let profit_percent = if buy_value > 0.0 {
-            (profit_amount / buy_value) * 100.0
-        } else {
-            0.0
-        };
-        
-        (profit_amount, profit_percent)
     }
     
     /// Kiểm tra xem có nên tiếp tục theo dõi token hay không
@@ -208,96 +167,6 @@ impl SmartTradeExecutor {
         
         let hash = hasher.finish();
         format!("{}_{:x}", chain_id, hash)
-    }
-    
-    /// Đợi cho đến khi transaction hoàn thành
-    ///
-    /// # Parameters
-    /// - `tx_hash`: Transaction hash
-    /// - `adapter`: EVM adapter
-    /// - `timeout_seconds`: Thời gian timeout (giây)
-    ///
-    /// # Returns
-    /// - `Result<bool, String>`: Kết quả (success/fail) hoặc error
-    pub async fn wait_for_transaction(&self, tx_hash: &str, adapter: &Arc<EvmAdapter>, timeout_seconds: u64) -> Result<bool, String> {
-        let timeout = Duration::from_secs(timeout_seconds);
-        let start_time = std::time::Instant::now();
-        
-        loop {
-            if start_time.elapsed() > timeout {
-                return Err(format!("Transaction {} timeout sau {} giây", tx_hash, timeout_seconds));
-            }
-            
-            match adapter.get_transaction_receipt(tx_hash).await {
-                Ok(Some(receipt)) => {
-                    // Transaction đã hoàn thành
-                    let success = receipt.status;
-                    if success {
-                        info!("Transaction {} hoàn thành thành công", tx_hash);
-                    } else {
-                        warn!("Transaction {} thất bại", tx_hash);
-                    }
-                    return Ok(success);
-                },
-                Ok(None) => {
-                    // Transaction vẫn đang pending, đợi thêm
-                    debug!("Transaction {} vẫn đang pending, đợi...", tx_hash);
-                    sleep(Duration::from_millis(2000)).await;
-                },
-                Err(e) => {
-                    // Lỗi khi kiểm tra receipt
-                    error!("Lỗi khi kiểm tra transaction {}: {:?}", tx_hash, e);
-                    return Err(format!("Lỗi khi kiểm tra: {:?}", e));
-                }
-            }
-        }
-    }
-    
-    /// Phát hiện xu hướng giá (trend)
-    ///
-    /// # Parameters
-    /// - `price_history`: Lịch sử giá (từ cũ đến mới)
-    /// - `period`: Số điểm dữ liệu để phân tích
-    ///
-    /// # Returns
-    /// - `(bool, bool, f64)`: (Đang uptrend?, Đang downtrend?, Độ mạnh trend 0-1)
-    pub fn detect_price_trend(&self, price_history: &[f64], period: usize) -> (bool, bool, f64) {
-        if price_history.len() < period {
-            return (false, false, 0.0);
-        }
-        
-        // Lấy dữ liệu gần đây nhất
-        let recent_prices = &price_history[price_history.len() - period..];
-        
-        // Đếm số lần giá tăng và giảm
-        let mut increases = 0;
-        let mut decreases = 0;
-        
-        for i in 1..recent_prices.len() {
-            if recent_prices[i] > recent_prices[i-1] {
-                increases += 1;
-            } else if recent_prices[i] < recent_prices[i-1] {
-                decreases += 1;
-            }
-        }
-        
-        // Tính độ mạnh của trend
-        let total_changes = increases + decreases;
-        let uptrend_strength = if total_changes > 0 {
-            increases as f64 / total_changes as f64
-        } else {
-            0.5 // Không có thay đổi, coi như trung tính
-        };
-        
-        let downtrend_strength = 1.0 - uptrend_strength;
-        
-        // Ngưỡng xác định trend (70% thay đổi theo cùng hướng)
-        let is_uptrend = uptrend_strength >= 0.7;
-        let is_downtrend = downtrend_strength >= 0.7;
-        
-        let trend_strength = (uptrend_strength - 0.5).abs() * 2.0; // Chuyển sang thang điểm 0-1
-        
-        (is_uptrend, is_downtrend, trend_strength)
     }
     
     /// Tính giá trung bình di động (Moving Average)

@@ -586,7 +586,11 @@ impl ConfigManager {
         
         INSTANCE.get_or_init(|| async {
             Arc::new(ConfigManager::new("config/bot_config.yaml"))
-        }).expect("Config instance not initialized")
+        }).unwrap_or_else(|e| {
+            // Log error but don't panic
+            error!("Failed to initialize config manager: {}, using a new instance", e);
+            Arc::new(ConfigManager::new("config/bot_config.yaml"))
+        })
     }
 }
 

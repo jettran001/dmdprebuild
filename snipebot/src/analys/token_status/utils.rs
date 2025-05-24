@@ -1,9 +1,17 @@
-//! Các hàm tiện ích và công cụ phân tích chung
-//!
-//! Module này chứa các công cụ và tiện ích dùng chung cho việc phân tích token
+/**
+ * Token analysis utilities
+ * 
+ * Provides core functions for token analysis including:
+ * - Honeypot detection (simulate sell test)
+ * - External call detection in contracts
+ * - Delegate call detection
+ * - Simulation helpers
+ */
 
 use std::collections::HashMap;
 use regex::Regex;
+use anyhow::{Result, Context};
+use tracing::{debug, error, info, warn};
 
 use super::types::{ContractInfo, BytecodeAnalysis};
 
@@ -258,4 +266,130 @@ pub fn detect_contract_template(contract_info: &ContractInfo) -> Option<String> 
     }
     
     None
+}
+
+/// Phát hiện token có phải honeypot không bằng cách thử mô phỏng bán token
+pub async fn detect_honeypot(contract_info: &ContractInfo, adapter: &dyn ChainAdapter) -> Result<(bool, Option<String>)> {
+    debug!("Testing honeypot for token: {}", contract_info.address);
+    
+    let test_amount = "0.01"; // Số lượng nhỏ để test
+    let result = adapter.simulate_sell_token(&contract_info.address, test_amount)
+        .await
+        .context("Failed to simulate selling token")?;
+    
+    if !result.success {
+        let reason = result.failure_reason.unwrap_or_else(|| "Unknown reason".to_string());
+        debug!("Honeypot detected: {}", reason);
+        return Ok((true, Some(reason)));
+    }
+    
+    // Nếu simulate thành công, kiểm tra thêm các vấn đề khác
+    let (has_restrictions, reason) = detect_transfer_restrictions(contract_info)?;
+    if has_restrictions {
+        return Ok((true, reason));
+    }
+    
+    Ok((false, None))
+}
+
+/// Phát hiện token có giới hạn transfer không
+fn detect_transfer_restrictions(contract_info: &ContractInfo) -> Result<(bool, Option<String>)> {
+    if let Some(source_code) = &contract_info.source_code {
+        // Tìm kiếm các hàm transfer/transferFrom có giới hạn ngoài onlyOwner
+        let restriction_patterns = [
+            "require\\s*\\(\\s*!\\s*blacklisted\\[\\w+\\]\\s*\\)",
+            "require\\s*\\(\\s*isWhitelisted\\[\\w+\\]\\s*\\)",
+            "require\\s*\\(\\s*canTransfer\\s*\\(\\s*\\w+\\s*\\)\\s*\\)",
+            "require\\s*\\(\\s*block\\.timestamp\\s*[>|>=]\\s*tradingEnabledAt\\s*\\)",
+            "if\\s*\\(\\s*tradingEnabled\\s*==\\s*false\\s*\\)",
+            "if\\s*\\(\\s*!enabledTrading\\s*\\)",
+            "return\\s+false",
+        ];
+        
+        for pattern in restriction_patterns {
+            if Regex::new(pattern).map_or(false, |re| re.is_match(source_code)) {
+                return Ok((true, Some(format!("Transfer restriction found: {}", pattern))));
+            }
+        }
+    }
+    
+    Ok((false, None))
+}
+
+/// Phát hiện external call trong contract
+pub fn detect_external_call(contract_info: &ContractInfo) -> Result<(bool, Vec<String>)> {
+    let mut has_external_calls = false;
+    let mut external_calls = Vec::new();
+    
+    if let Some(source_code) = &contract_info.source_code {
+        let external_call_patterns = [
+            r"(\w+)\.call\{",
+            r"(\w+)\.delegatecall\(",
+            r"Address\.functionCall\(",
+            r"Address\.functionCallWithValue\(",
+            r"Address\.functionDelegateCall\(",
+            r"(0x[a-fA-F0-9]{40})\.call\{",
+            r"selfdestruct\(",
+        ];
+        
+        for pattern in external_call_patterns {
+            if let Ok(re) = Regex::new(pattern) {
+                for cap in re.captures_iter(source_code) {
+                    if let Some(m) = cap.get(1) {
+                        has_external_calls = true;
+                        external_calls.push(format!("External call: {}", m.as_str()));
+                    } else {
+                        has_external_calls = true;
+                        external_calls.push(format!("External call found: {}", pattern));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok((has_external_calls, external_calls))
+}
+
+/// Phát hiện delegatecall trong contract (rủi ro cao)
+pub fn detect_delegatecall(contract_info: &ContractInfo) -> Result<(bool, Vec<String>)> {
+    let mut has_delegatecall = false;
+    let mut delegatecalls = Vec::new();
+    
+    if let Some(source_code) = &contract_info.source_code {
+        let delegatecall_patterns = [
+            r"(\w+)\.delegatecall\(",
+            r"Address\.functionDelegateCall\(",
+            r"assembly\s*\{[^}]*delegatecall[^}]*\}",
+        ];
+        
+        for pattern in delegatecall_patterns {
+            if let Ok(re) = Regex::new(pattern) {
+                for cap in re.captures_iter(source_code) {
+                    if let Some(m) = cap.get(1) {
+                        has_delegatecall = true;
+                        delegatecalls.push(format!("Delegatecall: {}", m.as_str()));
+                    } else {
+                        has_delegatecall = true;
+                        delegatecalls.push("Delegatecall detected in assembly block".to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok((has_delegatecall, delegatecalls))
+}
+
+/// ChainAdapter trait for simulating transactions
+pub trait ChainAdapter {
+    async fn simulate_sell_token(&self, token_address: &str, amount: &str) -> Result<SimulationResult>;
+}
+
+/// Kết quả mô phỏng giao dịch
+#[derive(Debug, Clone)]
+pub struct SimulationResult {
+    pub success: bool,
+    pub failure_reason: Option<String>,
+    pub gas_used: Option<u64>,
+    pub output: Option<String>,
 } 

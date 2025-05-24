@@ -11,56 +11,57 @@
 /// # Flow
 /// `blockchain` -> `snipebot/mempool_analyzer` -> `tradelogic`
 
-// Định nghĩa các kiểu dữ liệu cho phân tích mempool
-mod types;
+//! Mempool analysis module
+//!
+//! This module is responsible for monitoring and analyzing mempool transactions
+//! to identify opportunities and risks.
 
-// Phân tích mempool và các giao dịch chưa được xác nhận
-mod analyzer;
+// Re-export main types
+pub mod types;
+pub use types::*;
+
+// Re-export utility functions
+pub mod utils;
+pub use utils::*;
+
+// Analysis components
+pub mod analyzer;
+pub mod detection;
 
 // Lọc và phân loại giao dịch
-mod filter;
+pub mod filter;
 
 // Đánh giá độ ưu tiên và phân tích gas
-mod priority;
+pub mod priority;
 
 // Phát hiện cơ hội arbitrage và MEV
-mod arbitrage;
+pub mod arbitrage;
 
-// Phát hiện pattern đáng ngờ (front-running, sandwich,...)
-mod detection;
-
-// Các tiện ích chung
-mod utils;
-
-// Re-export các struct và trait quan trọng
-pub use types::{
-    MempoolTransaction, TransactionType, TransactionPriority, 
-    MempoolAlert, MempoolAlertType, AlertSeverity, SuspiciousPattern,
-    NewTokenInfo, TokenTransferInfo, TransactionCluster,
-    TransactionPredictionData, TokenInfo, TransactionFilterOptions,
-    TransactionSortCriteria
-};
-
-// Re-export MempoolAnalyzer như API chính
+// Re-export main analyzer for convenience
 pub use analyzer::MempoolAnalyzer;
 
 // Re-export các hàm phân tích chính
 pub use detection::{
-    detect_front_running, detect_sandwich_attack, detect_high_frequency_trading
+    detect_front_running,
+    detect_sandwich_attack,
+    detect_high_frequency_trading,
+    detect_sudden_liquidity_removal,
+    detect_whale_movement,
+    detect_token_liquidity_pattern
 };
 
-pub use filter::{
-    get_filtered_transactions
-};
+pub use filter::get_filtered_transactions;
 
 pub use priority::{
-    estimate_confirmation_time
+    estimate_confirmation_time,
+    gas_multiplier_to_string,
+    calculate_transaction_priority,
+    format_gas_price,
+    analyze_gas_price_trend
 };
 
 pub use arbitrage::{
-    find_mev_bots
-};
-
-pub use utils::{
-    hash_data, normalize_address, gas_multiplier_to_string
+    find_mev_bots,
+    find_sandwich_attacks,
+    find_frontrunning_transactions
 }; 

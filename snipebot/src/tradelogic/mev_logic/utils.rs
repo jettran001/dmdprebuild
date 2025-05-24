@@ -7,6 +7,12 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 use crate::analys::mempool::TokenInfo;
 use super::types::{MarketData, TraderBehaviorType, TraderExpertiseLevel};
+use crate::tradelogic::common::utils::{
+    calculate_percentage_change,
+    eth_to_usd,
+    usd_to_eth,
+    current_time_seconds
+};
 
 /// Tính toán thời gian hiện tại tính từ UNIX epoch (giây)
 pub fn current_time_seconds() -> u64 {

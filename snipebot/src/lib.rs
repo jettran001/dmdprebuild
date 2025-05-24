@@ -13,8 +13,15 @@ pub mod chain_adapters;
 pub mod tradelogic;
 pub mod analys;
 
+// Thêm re-export cho shared coordinator
+pub use tradelogic::traits::{
+    TradeCoordinator, ExecutorType, OpportunityPriority, SharedOpportunity, SharedOpportunityType, 
+};
+pub use tradelogic::coordinator::create_trade_coordinator;
+
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 use anyhow::{Result, Context};
 use tokio::sync::oneshot;
@@ -29,31 +36,93 @@ use crate::tradelogic::mev_logic::bot::MevBot;
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::health::{HealthManager, RpcHealthCheck};
 
-/// Application state containing main components
+/// Application state containing main components of the SnipeBot
+///
+/// This struct serves as the central orchestration point for all major components of the bot,
+/// including configuration, executors, chain adapters, and background tasks. It manages
+/// the lifecycle of these components and provides methods to initialize, start, and stop
+/// the services.
 pub struct AppState {
-    /// Global configuration
+    /// Global configuration manager that provides access to all bot settings
+    /// and can reload configuration at runtime
     pub config: Arc<ConfigManager>,
     
-    /// Health manager
+    /// Health manager for monitoring system and service health
+    /// Tracks the health of RPC connections, services, and other critical components
     pub health_manager: Arc<HealthManager>,
     
-    /// Chain adapters
+    /// Collection of blockchain adapters for each supported chain
+    /// Provides standardized interfaces for interacting with different blockchains
     pub chain_adapters: Arc<Vec<Arc<EvmAdapter>>>,
     
-    /// Manual trade executor
-    pub manual_executor: Option<Arc<ManualTradeExecutor>>,
+    /// Collection of trade executors implementing different trading strategies
+    /// Each executor follows the TradeExecutor trait and can be started/stopped independently
+    pub trade_executors: Vec<Arc<dyn TradeExecutor>>,
     
-    /// Smart trade executor
-    pub smart_executor: Option<Arc<SmartTradeExecutor>>,
-    
-    /// MEV bot
-    pub mev_bot: Option<Arc<MevBot>>,
-    
-    /// Shutdown signal sender
+    /// Channel for sending shutdown signals to gracefully terminate services
+    /// Used by the stop() method to initiate shutdown sequence
     pub shutdown_tx: Option<oneshot::Sender<()>>,
     
-    /// Background tasks
+    /// Handles to background tasks spawned by the application
+    /// Allows tracking and potentially joining these tasks during shutdown
     pub background_tasks: Vec<JoinHandle<()>>,
+}
+
+/// Tạo một shared coordinator toàn cục dùng chung cho tất cả các module
+static GLOBAL_COORDINATOR: OnceCell<Arc<dyn TradeCoordinator>> = OnceCell::const_new();
+
+/// Khởi tạo global coordinator nếu chưa được khởi tạo
+/// 
+/// Hàm này sẽ khởi tạo global trade coordinator nếu chưa tồn tại.
+/// Trong trường hợp có lỗi, hệ thống sẽ log lại lỗi đó và trả về một coordinator
+/// mặc định để tránh panic.
+pub async fn initialize_global_coordinator() -> Arc<dyn TradeCoordinator> {
+    // Kiểm tra nếu coordinator đã được khởi tạo trước đó
+    if let Some(coordinator) = GLOBAL_COORDINATOR.get() {
+        return coordinator.clone();
+    }
+
+    // Khởi tạo coordinator nếu chưa có
+    match GLOBAL_COORDINATOR.get_or_try_init(|| async {
+        info!("Initializing global trade coordinator");
+        
+        // Tạo coordinator bằng factory function, bọc trong Result để xử lý lỗi tốt hơn
+        let result: Result<Arc<dyn TradeCoordinator>> = (|| {
+            let coordinator = tradelogic::coordinator::create_trade_coordinator();
+            Ok(coordinator)
+        })();
+        
+        match result {
+            Ok(coordinator) => {
+                info!("Global trade coordinator initialized successfully");
+                Ok(coordinator)
+            },
+            Err(e) => {
+                // Log lỗi chi tiết
+                error!("Failed to initialize global trade coordinator: {}", e);
+                error!("This may cause unexpected behavior in modules that depend on the coordinator");
+                // Trả về lỗi để let_on_error xử lý
+                Err(e)
+            }
+        }
+    }).await {
+        Ok(coordinator) => coordinator.clone(),
+        Err(e) => {
+            // Xử lý trường hợp lỗi khi khởi tạo
+            error!("Critical error initializing global coordinator: {}", e);
+            // Tạo fallback coordinator để tránh panic
+            let fallback = tradelogic::coordinator::create_trade_coordinator();
+            warn!("Using fallback coordinator instead");
+            fallback
+        }
+    }
+}
+
+/// Lấy global coordinator sẵn có hoặc khởi tạo mới nếu chưa có
+/// 
+/// Trả về Arc<dyn TradeCoordinator> đảm bảo luôn có một coordinator có thể sử dụng
+pub async fn get_global_coordinator() -> Arc<dyn TradeCoordinator> {
+    initialize_global_coordinator().await
 }
 
 impl AppState {
@@ -63,9 +132,7 @@ impl AppState {
             config: config_manager,
             health_manager: HealthManager::get_instance(),
             chain_adapters: Arc::new(Vec::new()),
-            manual_executor: None,
-            smart_executor: None,
-            mev_bot: None,
+            trade_executors: Vec::new(),
             shutdown_tx: None,
             background_tasks: Vec::new(),
         }
@@ -125,18 +192,26 @@ impl AppState {
             metric::register_chain_metrics(*chain_id, &chain_config.name).await?;
             
             // Register health check for this chain
-            let rpc_url = chain_config.rpc_urls.first()
-                .ok_or_else(|| anyhow::anyhow!("No RPC URLs configured for chain {}", chain_id))?;
-                
-            let adapter_clone = adapter.clone();
-            let health_check = Arc::new(RpcHealthCheck::new(
-                *chain_id,
-                &chain_config.name,
-                rpc_url,
-                adapter_clone as Arc<dyn crate::health::RpcAdapter>,
-            ));
-            
-            self.health_manager.register(health_check).await;
+            if chain_config.rpc_urls.is_empty() {
+                warn!("No RPC URLs configured for chain {}, skipping health check", chain_id);
+            } else {
+                // Truy cập an toàn phần tử đầu tiên sử dụng .get(0)
+                if let Some(rpc_url) = chain_config.rpc_urls.get(0) {
+                    let adapter_clone = adapter.clone();
+                    let health_check = Arc::new(RpcHealthCheck::new(
+                        *chain_id,
+                        &chain_config.name,
+                        rpc_url,
+                        adapter_clone as Arc<dyn crate::health::RpcAdapter>,
+                    ));
+                    
+                    self.health_manager.register(health_check).await;
+                } else {
+                    // Trường hợp này không nên xảy ra vì đã kiểm tra empty ở trên
+                    // Nhưng vẫn xử lý để đảm bảo an toàn tuyệt đối
+                    warn!("RPC URLs vector is unexpectedly empty for chain {}", chain_id);
+                }
+            }
             
             adapters.push(Arc::new(adapter));
         }
@@ -155,7 +230,8 @@ impl AppState {
             config.trading.default_deadline_minutes,
         );
         
-        self.manual_executor = Some(Arc::new(manual_executor));
+        let manual_executor = Arc::new(manual_executor) as Arc<dyn TradeExecutor>;
+        self.trade_executors.push(manual_executor);
         
         // Initialize smart trader if enabled
         if config.trading.enabled_strategies.contains(&"smart".to_string()) {
@@ -165,7 +241,8 @@ impl AppState {
                 config.trading.smart_trade.clone(),
             ).await?;
             
-            self.smart_executor = Some(Arc::new(smart_executor));
+            let smart_executor = Arc::new(smart_executor) as Arc<dyn TradeExecutor>;
+            self.trade_executors.push(smart_executor);
         }
         
         // Initialize MEV bot if enabled
@@ -176,7 +253,8 @@ impl AppState {
                 config.trading.mev_trade.clone(),
             ).await?;
             
-            self.mev_bot = Some(Arc::new(mev_bot));
+            let mev_bot = Arc::new(mev_bot) as Arc<dyn TradeExecutor>;
+            self.trade_executors.push(mev_bot);
         }
         
         Ok(())
@@ -190,26 +268,14 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
         
-        // Start manual trade executor
-        if let Some(executor) = &self.manual_executor {
+        // Start all trade executors
+        for executor in &self.trade_executors {
             executor.start().await?;
-        }
-        
-        // Start smart trade executor if enabled
-        if let Some(executor) = &self.smart_executor {
-            executor.start().await?;
-        }
-        
-        // Start MEV bot if enabled
-        if let Some(bot) = &self.mev_bot {
-            bot.start().await?;
         }
         
         // Spawn shutdown handler
         let chain_adapters = self.chain_adapters.clone();
-        let manual_executor = self.manual_executor.clone();
-        let smart_executor = self.smart_executor.clone();
-        let mev_bot = self.mev_bot.clone();
+        let trade_executors = self.trade_executors.clone();
         
         let shutdown_task = tokio::spawn(async move {
             if let Err(e) = shutdown_rx.await {
@@ -218,24 +284,10 @@ impl AppState {
             
             info!("Shutdown signal received, stopping services");
             
-            // Stop MEV bot
-            if let Some(bot) = mev_bot {
-                if let Err(e) = bot.stop().await {
-                    error!("Error stopping MEV bot: {}", e);
-                }
-            }
-            
-            // Stop smart trade executor
-            if let Some(executor) = smart_executor {
+            // Stop all trade executors
+            for executor in trade_executors {
                 if let Err(e) = executor.stop().await {
-                    error!("Error stopping smart trade executor: {}", e);
-                }
-            }
-            
-            // Stop manual trade executor
-            if let Some(executor) = manual_executor {
-                if let Err(e) = executor.stop().await {
-                    error!("Error stopping manual trade executor: {}", e);
+                    error!("Error stopping trade executor: {}", e);
                 }
             }
             

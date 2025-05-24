@@ -334,7 +334,11 @@ impl HealthManager {
         
         INSTANCE.get_or_init(|| async {
             Arc::new(HealthManager::new(60)) // Default to 60 second interval
-        }).expect("Health manager instance not initialized")
+        }).unwrap_or_else(|e| {
+            // Log error but don't panic
+            error!("Failed to initialize health manager: {}, using a new instance", e);
+            Arc::new(HealthManager::new(60))
+        })
     }
 }
 

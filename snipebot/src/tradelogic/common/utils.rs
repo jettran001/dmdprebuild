@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use anyhow::{Result, Context};
 use tracing::{debug, error, info, warn};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::sync::Arc;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::token_status::{ContractInfo, TokenStatus};
@@ -294,4 +296,194 @@ pub fn calculate_risk_score(issues: &[TokenIssue]) -> f64 {
     
     // Cap at 100
     risk_score.min(100.0)
+}
+
+/// Get current timestamp in seconds
+pub fn current_time_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs()
+}
+
+/// Calculate percentage change between two values
+pub fn calculate_percentage_change(old_value: f64, new_value: f64) -> f64 {
+    if old_value == 0.0 {
+        return 0.0;
+    }
+    ((new_value - old_value) / old_value) * 100.0
+}
+
+/// Convert ETH amount to USD using given ETH price
+pub fn eth_to_usd(eth_amount: f64, eth_price_usd: f64) -> f64 {
+    eth_amount * eth_price_usd
+}
+
+/// Convert USD amount to ETH using given ETH price
+pub fn usd_to_eth(usd_amount: f64, eth_price_usd: f64) -> f64 {
+    if eth_price_usd == 0.0 {
+        return 0.0;
+    }
+    usd_amount / eth_price_usd
+}
+
+/// Calculate profit from trade
+pub fn calculate_profit(buy_price: f64, sell_price: f64, amount: f64, buy_tax: f64, sell_tax: f64) -> (f64, f64) {
+    // Calculate effective amounts after taxes
+    let effective_buy_amount = amount * (1.0 - buy_tax / 100.0);
+    let buy_value = effective_buy_amount * buy_price;
+    
+    let effective_sell_amount = amount * (1.0 - sell_tax / 100.0);
+    let sell_value = effective_sell_amount * sell_price;
+    
+    // Calculate profit amount and percentage
+    let profit_amount = sell_value - buy_value;
+    let profit_percent = if buy_value > 0.0 {
+        (profit_amount / buy_value) * 100.0
+    } else {
+        0.0
+    };
+    
+    (profit_amount, profit_percent)
+}
+
+/// Wait for transaction confirmation
+pub async fn wait_for_transaction(tx_hash: &str, adapter: &Arc<EvmAdapter>, timeout_seconds: u64) -> Result<bool> {
+    let start_time = current_time_seconds();
+    let timeout = Duration::from_secs(timeout_seconds);
+    
+    while current_time_seconds() - start_time < timeout_seconds {
+        match adapter.get_transaction_receipt(tx_hash).await {
+            Ok(Some(receipt)) => {
+                if receipt.status == Some(1.into()) {
+                    info!("Transaction {} confirmed successfully", tx_hash);
+                    return Ok(true);
+                } else {
+                    error!("Transaction {} failed", tx_hash);
+                    return Ok(false);
+                }
+            }
+            Ok(None) => {
+                debug!("Transaction {} still pending", tx_hash);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(e) => {
+                error!("Error checking transaction {}: {}", tx_hash, e);
+                return Err(e.into());
+            }
+        }
+    }
+    
+    warn!("Transaction {} timed out after {} seconds", tx_hash, timeout_seconds);
+    Ok(false)
+}
+
+/// Convert raw balance to token units
+pub fn convert_to_token_units(balance: &str, decimals: u8) -> f64 {
+    if let Ok(raw_balance) = balance.parse::<f64>() {
+        raw_balance / 10_f64.powi(decimals as i32)
+    } else {
+        0.0
+    }
+}
+
+/// Calculate moving average from price history
+pub fn calculate_moving_average(price_history: &[f64], period: usize) -> f64 {
+    if price_history.is_empty() || period == 0 {
+        return 0.0;
+    }
+    
+    let start_idx = if price_history.len() > period {
+        price_history.len() - period
+    } else {
+        0
+    };
+    
+    let sum: f64 = price_history[start_idx..].iter().sum();
+    sum / (price_history.len() - start_idx) as f64
+}
+
+/// Find price extremes in history
+pub fn find_price_extremes(price_history: &[f64], period: usize) -> (f64, f64) {
+    if price_history.is_empty() {
+        return (0.0, 0.0);
+    }
+    
+    let start_idx = if price_history.len() > period {
+        price_history.len() - period
+    } else {
+        0
+    };
+    
+    let slice = &price_history[start_idx..];
+    let min = slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let max = slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    
+    (min, max)
+}
+
+/// Calculate RSI from price history
+pub fn calculate_rsi(price_history: &[f64], period: usize) -> f64 {
+    if price_history.len() < 2 || period == 0 {
+        return 50.0; // Default neutral RSI
+    }
+    
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+    
+    for i in 1..price_history.len() {
+        let change = price_history[i] - price_history[i-1];
+        if change >= 0.0 {
+            gains += change;
+        } else {
+            losses -= change;
+        }
+    }
+    
+    if losses == 0.0 {
+        return 100.0;
+    }
+    
+    let rs = gains / losses;
+    100.0 - (100.0 / (1.0 + rs))
+}
+
+/// Detect price trend from price history
+pub fn detect_price_trend(price_history: &[f64], period: usize) -> (bool, bool, f64) {
+    if price_history.len() < period {
+        return (false, false, 0.0);
+    }
+    
+    // Get most recent data
+    let recent_prices = &price_history[price_history.len() - period..];
+    
+    // Count price increases and decreases
+    let mut increases = 0;
+    let mut decreases = 0;
+    
+    for i in 1..recent_prices.len() {
+        if recent_prices[i] > recent_prices[i-1] {
+            increases += 1;
+        } else if recent_prices[i] < recent_prices[i-1] {
+            decreases += 1;
+        }
+    }
+    
+    // Calculate trend strength
+    let total_changes = increases + decreases;
+    let uptrend_strength = if total_changes > 0 {
+        increases as f64 / total_changes as f64
+    } else {
+        0.5 // No changes, consider neutral
+    };
+    
+    let downtrend_strength = 1.0 - uptrend_strength;
+    
+    // Threshold for trend determination (70% changes in same direction)
+    let is_uptrend = uptrend_strength >= 0.7;
+    let is_downtrend = downtrend_strength >= 0.7;
+    
+    let trend_strength = (uptrend_strength - 0.5).abs() * 2.0; // Convert to 0-1 scale
+    
+    (is_uptrend, is_downtrend, trend_strength)
 } 

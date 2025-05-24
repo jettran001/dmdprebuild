@@ -29,6 +29,8 @@ pub mod optimization;
 pub mod security;
 pub mod utils;
 pub mod analys_client;
+pub mod optimizer;
+pub mod anti_mev;
 
 // Re-exports for backward compatibility and ease of use
 pub use types::{
@@ -38,6 +40,8 @@ pub use types::{
     TradeResult,
     TradeTracker,
     SmartTradeConfig,
+    TradeParams,
+    TokenSafety,
 };
 
 pub use executor::SmartTradeExecutor;

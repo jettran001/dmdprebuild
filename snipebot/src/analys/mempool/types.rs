@@ -54,6 +54,10 @@ pub struct MempoolTransaction {
     pub is_suspicious: bool,
     /// Mô tả nếu giao dịch đáng ngờ
     pub suspicious_reason: Option<String>,
+    /// Optional from token info (for swaps)
+    pub from_token: Option<TokenInfo>,
+    /// Optional to token info (for swaps)
+    pub to_token: Option<TokenInfo>,
 }
 
 /// Loại giao dịch được phát hiện
@@ -271,6 +275,44 @@ pub struct TokenInfo {
     pub symbol: Option<String>,
     /// Số lượng token
     pub amount: f64,
+    /// Token price in USD
+    pub price: f64,
+    /// Token liquidity in USD
+    pub liquidity_usd: f64,
+    /// 24-hour volume
+    pub volume_24h: f64,
+    /// Number of holders
+    pub holders: u64,
+    /// Last update timestamp
+    pub last_updated: u64,
+    /// Risk score (0-100)
+    pub risk_score: f64,
+    /// Warning messages
+    pub warnings: Vec<String>,
+    /// Buy tax percentage
+    pub buy_tax: f64,
+    /// Sell tax percentage
+    pub sell_tax: f64,
+    /// Maximum transaction amount
+    pub max_tx_amount: Option<f64>,
+    /// Maximum wallet amount
+    pub max_wallet_amount: Option<f64>,
+    /// Market capitalization
+    pub market_cap: f64,
+    /// 24-hour price change percentage
+    pub price_change_24h: f64,
+    /// 7-day price change percentage
+    pub price_change_7d: f64,
+    /// Whether the contract is verified
+    pub contract_verified: bool,
+    /// Contract creation date
+    pub contract_creation_date: Option<u64>,
+    /// Contract creator address
+    pub contract_creator: Option<String>,
+    /// Whether this is a base token (ETH, BNB, etc.)
+    pub is_base_token: bool,
+    /// Token creation timestamp
+    pub created_at: u64,
 }
 
 /// Các tùy chọn lọc giao dịch
@@ -394,6 +436,8 @@ impl MempoolTransaction {
             function_signature,
             is_suspicious: false,
             suspicious_reason: None,
+            from_token: None,
+            to_token: None,
         }
     }
     

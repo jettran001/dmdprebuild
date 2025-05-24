@@ -239,6 +239,41 @@ impl MevOpportunity {
     }
 }
 
+/// Số lượng tối đa cơ hội được lưu trữ trong OpportunityManager
+const MAX_OPPORTUNITIES: usize = 1000;
+
+/// Mức độ ưu tiên giữ lại cơ hội khi làm sạch
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpportunityRetentionPriority {
+    /// Giữ lại tất cả các cơ hội đã thực thi
+    Executed,
+    /// Giữ lại cơ hội lợi nhuận cao
+    HighProfit, 
+    /// Giữ lại cơ hội rủi ro thấp
+    LowRisk,
+    /// Giữ lại cơ hội mới nhất
+    Recent,
+}
+
+/// Chỉ số hiệu suất và thống kê của OpportunityManager
+#[derive(Debug, Default, Clone)]
+pub struct OpportunityManagerStats {
+    /// Số cơ hội đã xử lý tổng cộng
+    pub total_processed: usize,
+    /// Số cơ hội đã thêm vào danh sách
+    pub total_added: usize,
+    /// Số cơ hội đã loại bỏ do hết hạn
+    pub total_expired: usize,
+    /// Số cơ hội đã loại bỏ do tràn kích thước
+    pub total_pruned: usize,
+    /// Số lần làm sạch đã thực hiện
+    pub total_cleanups: usize,
+    /// Lợi nhuận trung bình của các cơ hội
+    pub average_profit_usd: f64,
+    /// Thời gian phát hiện cơ hội gần nhất
+    pub last_opportunity_time: u64,
+}
+
 /// Opportunity Manager for MEV opportunities
 pub struct OpportunityManager {
     /// List of active opportunities
@@ -249,6 +284,8 @@ pub struct OpportunityManager {
     token_analyzer: Arc<dyn TokenAnalysisProvider>,
     /// Risk analyzer reference
     risk_analyzer: Arc<dyn RiskAnalysisProvider>,
+    /// Chỉ số hiệu suất và thống kê
+    stats: OpportunityManagerStats,
 }
 
 impl OpportunityManager {
@@ -259,16 +296,90 @@ impl OpportunityManager {
         risk_analyzer: Arc<dyn RiskAnalysisProvider>,
     ) -> Self {
         Self {
-            opportunities: Vec::new(),
+            opportunities: Vec::with_capacity(100), // Pre-allocate space for better performance
             mempool_analyzer,
             token_analyzer,
             risk_analyzer,
+            stats: OpportunityManagerStats::default(),
         }
     }
     
     /// Add a new opportunity
     pub fn add_opportunity(&mut self, opportunity: MevOpportunity) {
+        // Cập nhật thống kê
+        self.stats.total_added += 1;
+        self.stats.average_profit_usd = (self.stats.average_profit_usd * (self.stats.total_added - 1) as f64 + 
+                                        opportunity.estimated_profit_usd) / self.stats.total_added as f64;
+        self.stats.last_opportunity_time = opportunity.detected_at;
+        
+        // Thêm cơ hội vào danh sách
         self.opportunities.push(opportunity);
+        
+        // Giới hạn kích thước nếu cần
+        if self.opportunities.len() > MAX_OPPORTUNITIES {
+            self.prune(OpportunityRetentionPriority::HighProfit);
+        }
+    }
+    
+    /// Làm sạch danh sách cơ hội để giữ trong giới hạn kích thước
+    /// 
+    /// # Parameters
+    /// * `priority` - Ưu tiên loại cơ hội nào sẽ được giữ lại
+    pub fn prune(&mut self, priority: OpportunityRetentionPriority) {
+        if self.opportunities.len() <= MAX_OPPORTUNITIES {
+            return;
+        }
+
+        // Sắp xếp theo ưu tiên được chọn
+        match priority {
+            OpportunityRetentionPriority::Executed => {
+                // Giữ lại tất cả cơ hội đã thực thi và các cơ hội có lợi nhuận cao nhất
+                self.opportunities.sort_by(|a, b| {
+                    // Ưu tiên 1: các cơ hội đã thực thi
+                    if a.executed && !b.executed {
+                        std::cmp::Ordering::Less
+                    } else if !a.executed && b.executed {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        // Ưu tiên 2: lợi nhuận cao hơn
+                        b.estimated_net_profit_usd.partial_cmp(&a.estimated_net_profit_usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                });
+            },
+            OpportunityRetentionPriority::HighProfit => {
+                // Sắp xếp theo lợi nhuận từ cao đến thấp
+                self.opportunities.sort_by(|a, b| {
+                    b.estimated_net_profit_usd.partial_cmp(&a.estimated_net_profit_usd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            },
+            OpportunityRetentionPriority::LowRisk => {
+                // Sắp xếp theo rủi ro từ thấp đến cao
+                self.opportunities.sort_by(|a, b| {
+                    a.risk_score.partial_cmp(&b.risk_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            },
+            OpportunityRetentionPriority::Recent => {
+                // Sắp xếp theo thời gian phát hiện từ mới đến cũ
+                self.opportunities.sort_by(|a, b| {
+                    b.detected_at.cmp(&a.detected_at)
+                });
+            }
+        }
+
+        // Giữ lại MAX_OPPORTUNITIES cơ hội đầu tiên, loại bỏ phần còn lại
+        let num_to_remove = self.opportunities.len() - MAX_OPPORTUNITIES;
+        self.opportunities.truncate(MAX_OPPORTUNITIES);
+        
+        // Cập nhật thống kê
+        self.stats.total_pruned += num_to_remove;
+        self.stats.total_cleanups += 1;
+        
+        // Log thông tin về việc làm sạch
+        tracing::info!("Pruned {} opportunities, keeping {}. Total pruned so far: {}", 
+                      num_to_remove, MAX_OPPORTUNITIES, self.stats.total_pruned);
     }
     
     /// Get all active opportunities
@@ -347,18 +458,35 @@ impl OpportunityManager {
         chain_id: u32,
         opportunity_types: Option<Vec<MevOpportunityType>>,
     ) -> Result<Vec<MevOpportunity>> {
+        // Fetch opportunities from mempool analyzer
         let new_opportunities = self.mempool_analyzer.detect_mev_opportunities(
             chain_id,
             opportunity_types,
         ).await?;
         
-        // Analyze risk for each opportunity
+        // Update statistics
+        self.stats.total_processed += new_opportunities.len();
+        
+        // Analyze risk for each opportunity and add to collection
         let mut analyzed_opportunities = Vec::new();
         for mut opp in new_opportunities {
             if let Ok(_) = opp.analyze_risk(&*self.risk_analyzer).await {
+                // Cập nhật thống kê trước khi thêm
                 self.add_opportunity(opp.clone());
                 analyzed_opportunities.push(opp);
             }
+        }
+        
+        // Nếu quá nhiều cơ hội được phân tích, chỉ trả về những cơ hội tốt nhất
+        if analyzed_opportunities.len() > 50 {
+            // Sắp xếp theo lợi nhuận ròng từ cao xuống thấp
+            analyzed_opportunities.sort_by(|a, b| {
+                b.estimated_net_profit_usd.partial_cmp(&a.estimated_net_profit_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            
+            // Chỉ giữ lại 50 cơ hội tốt nhất
+            analyzed_opportunities.truncate(50);
         }
         
         Ok(analyzed_opportunities)
@@ -366,6 +494,24 @@ impl OpportunityManager {
     
     /// Clean up expired opportunities
     pub fn cleanup_expired(&mut self) {
+        let before_count = self.opportunities.len();
+        
+        // Chỉ giữ lại các cơ hội còn hiệu lực hoặc đã được thực thi
         self.opportunities.retain(|opp| opp.is_valid() || opp.executed);
+        
+        // Cập nhật thống kê
+        let removed_count = before_count - self.opportunities.len();
+        if removed_count > 0 {
+            self.stats.total_expired += removed_count;
+            self.stats.total_cleanups += 1;
+            
+            tracing::info!("Cleaned up {} expired opportunities. Total expired: {}", 
+                          removed_count, self.stats.total_expired);
+        }
+    }
+    
+    /// Get statistics about opportunity management
+    pub fn get_stats(&self) -> &OpportunityManagerStats {
+        &self.stats
     }
 } 

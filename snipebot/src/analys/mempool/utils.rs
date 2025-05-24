@@ -1,4 +1,10 @@
+//! Utility functions for mempool analysis
+//!
+//! This module contains helper functions for processing mempool transactions,
+//! extracting data, and performing common operations on blockchain transactions.
+
 use sha2::{Sha256, Digest};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 /// Hash dữ liệu thành chuỗi hex
 ///
@@ -25,74 +31,24 @@ pub fn hash_data(data: &[u8]) -> String {
 /// # Returns
 /// - `String`: Địa chỉ đã chuẩn hóa
 pub fn normalize_address(address: &str) -> String {
-    let mut addr = address.to_lowercase();
+    let mut clean_address = address.to_lowercase();
     
-    if !addr.starts_with("0x") {
-        addr = format!("0x{}", addr);
+    // Ensure 0x prefix
+    if !clean_address.starts_with("0x") {
+        clean_address = format!("0x{}", clean_address);
     }
     
-    addr
-}
-
-/// Chuyển đổi bội số gas thành chuỗi mô tả
-///
-/// # Parameters
-/// - `multiplier`: Bội số gas so với giá trung bình
-///
-/// # Returns
-/// - `String`: Mô tả bội số gas
-pub fn gas_multiplier_to_string(multiplier: f64) -> String {
-    if multiplier <= 0.7 {
-        "slow".to_string()
-    } else if multiplier <= 0.9 {
-        "standard".to_string()
-    } else if multiplier <= 1.1 {
-        "fast".to_string()
-    } else if multiplier <= 1.5 {
-        "rapid".to_string()
-    } else {
-        "urgent".to_string()
+    // Ensure address has correct length
+    if clean_address.len() < 42 {
+        // Pad with leading zeros to make it valid
+        let padding = 42 - clean_address.len();
+        clean_address = format!("0x{}{}", "0".repeat(padding), &clean_address[2..]);
+    } else if clean_address.len() > 42 {
+        // Truncate to valid length
+        clean_address = format!("0x{}", &clean_address[clean_address.len() - 40..]);
     }
-}
-
-/// Ước tính thời gian xác nhận giao dịch dựa trên priority
-///
-/// # Parameters
-/// - `tx_priority`: Mức độ ưu tiên của giao dịch
-/// - `chain_id`: ID của blockchain
-///
-/// # Returns
-/// - `String`: Ước tính thời gian xác nhận
-pub fn estimate_confirmation_time(
-    tx_priority: &crate::analys::mempool::types::TransactionPriority,
-    chain_id: u32,
-) -> String {
-    use crate::analys::mempool::types::TransactionPriority;
     
-    // Thời gian cơ bản theo chain
-    let base_time = match chain_id {
-        1 => 15.0,  // Ethereum ~15 giây/block
-        56 => 3.0,  // BSC ~3 giây/block
-        137 => 2.0, // Polygon ~2 giây/block
-        _ => 10.0,  // Mặc định 10 giây/block
-    };
-    
-    // Ước tính theo priority
-    let (blocks, description) = match tx_priority {
-        TransactionPriority::VeryHigh => (1, "very quickly"),
-        TransactionPriority::High => (2, "quickly"),
-        TransactionPriority::Medium => (5, "in a few minutes"),
-        TransactionPriority::Low => (10, "may take some time"),
-    };
-    
-    // Tính toán thời gian dự kiến (giây)
-    let time_seconds = base_time * blocks as f64;
-    
-    if time_seconds < 60.0 {
-        format!("~{:.0} seconds ({})", time_seconds, description)
-    } else {
-        format!("~{:.1} minutes ({})", time_seconds / 60.0, description)
-    }
+    clean_address
 }
 
 /// Phân tích function signature từ input data
@@ -146,7 +102,7 @@ pub fn extract_token_address_from_input(input_data: &str) -> Option<String> {
 pub fn calculate_token_price_from_swap(input_data: &str, value: f64) -> Option<f64> {
     // Phát hiện từ input data số lượng token
     // Đây chỉ là một placeholder, cần triển khai thực tế
-    let token_amount = extract_token_amount_from_input(input_data)?;
+    let token_amount = extract_token_amount(input_data)?;
     
     if token_amount > 0.0 && value > 0.0 {
         Some(value / token_amount)
@@ -162,10 +118,26 @@ pub fn calculate_token_price_from_swap(input_data: &str, value: f64) -> Option<f
 ///
 /// # Returns
 /// - `Option<f64>`: Số lượng token nếu tìm thấy
-fn extract_token_amount_from_input(input_data: &str) -> Option<f64> {
-    // Placeholder - triển khai thực sẽ parse ABI data
-    // Cần decode function parameters từ input data
-    None
+pub fn extract_token_amount(input_data: &str) -> Option<f64> {
+    // Remove 0x prefix if exists
+    let data = if input_data.starts_with("0x") {
+        &input_data[2..]
+    } else {
+        input_data
+    };
+    
+    // Check if data is long enough to contain amount
+    if data.len() < 64 {
+        return None;
+    }
+    
+    // Extract amount from last 32 bytes (64 hex chars)
+    let amount_hex = &data[data.len() - 64..];
+    if let Ok(amount) = u128::from_str_radix(amount_hex, 16) {
+        Some(amount as f64 / 1e18) // Convert from wei to ETH
+    } else {
+        None
+    }
 }
 
 /// Ước tính slippage từ giá trị trong input data
@@ -198,4 +170,64 @@ pub fn estimate_slippage_from_input(input_data: &str) -> Option<f64> {
 pub fn extract_pool_address_from_input(input_data: &str) -> Option<String> {
     // Placeholder - triển khai thực sẽ parse path[] parameter
     None
+}
+
+/// Calculate liquidity value from input data and token price
+pub fn calculate_liquidity_value(input_data: &str, token_price: f64) -> f64 {
+    // Parse input data to get token amount
+    if let Some(token_amount) = extract_token_amount(input_data) {
+        token_amount * token_price
+    } else {
+        0.0
+    }
+}
+
+/// Extract related token address from input data
+pub fn extract_related_token(input_data: &str) -> Option<String> {
+    // Remove 0x prefix if exists
+    let data = if input_data.starts_with("0x") {
+        &input_data[2..]
+    } else {
+        input_data
+    };
+    
+    // Check if data is long enough to contain address
+    if data.len() < 40 {
+        return None;
+    }
+    
+    // Extract address from data (20 bytes = 40 hex chars)
+    let address_hex = &data[data.len() - 40..];
+    if address_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(format!("0x{}", address_hex))
+    } else {
+        None
+    }
+}
+
+/// Get current timestamp in seconds
+pub fn current_time_seconds() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(e) => {
+            tracing::warn!("Failed to get current time: {}", e);
+            0
+        }
+    }
+}
+
+/// Detect DEX from router address
+pub fn detect_dex_from_router(router_address: &str) -> String {
+    let router = router_address.to_lowercase();
+    
+    // Common DEX router addresses
+    match router.as_str() {
+        "0x10ed43c718714eb63d5aa57b78b54704e256024e" => "PancakeSwap".to_string(), // PancakeSwap V2 Router
+        "0x7a250d5630b4cf539739df2c5dacb4c659f2488d" => "Uniswap".to_string(),     // Uniswap V2 Router
+        "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506" => "SushiSwap".to_string(),   // SushiSwap Router
+        "0xcf0febd3f17cef5b47b0cd257acf6025c5bff3b7" => "ApeSwap".to_string(),     // ApeSwap Router
+        "0xd99d1c33f9fc3444f8101754abc46c52416550d1" => "PancakeSwap".to_string(), // PancakeSwap Testnet
+        "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45" => "Uniswap".to_string(),     // Uniswap V3 Router
+        _ => "Unknown DEX".to_string(),
+    }
 } 

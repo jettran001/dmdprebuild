@@ -282,7 +282,6 @@ pub trait MevOpportunityProvider: Send + Sync + 'static {
 ///
 /// This trait defines methods for coordinating between different trade executors
 /// including opportunity sharing, trade allocation, and global state management.
-#[async_trait]
 pub trait TradeCoordinator: Send + Sync + 'static {
     /// Register a trade executor
     async fn register_executor(&self, executor_id: &str, executor_type: ExecutorType) -> Result<()>;
@@ -328,7 +327,7 @@ pub trait TradeCoordinator: Send + Sync + 'static {
     async fn get_global_parameters(&self) -> Result<HashMap<String, f64>>;
 }
 
-/// Type of executor
+/// Enum cho loại executor
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExecutorType {
     /// Smart trade executor
@@ -345,7 +344,7 @@ pub enum ExecutorType {
 }
 
 /// Priority level for opportunity reservation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OpportunityPriority {
     /// Low priority (will be overridden by higher priority)
     Low = 0,
@@ -360,7 +359,7 @@ pub enum OpportunityPriority {
     Critical = 200,
 }
 
-/// Shared opportunity information between executors
+/// Opportunity to be shared between executors
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedOpportunity {
     /// Unique ID for the opportunity
@@ -397,7 +396,7 @@ pub struct SharedOpportunity {
     pub reservation: Option<OpportunityReservation>,
 }
 
-/// Type of shared opportunity
+/// Type of opportunity being shared
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SharedOpportunityType {
     /// MEV opportunity

@@ -5,7 +5,9 @@ use tokio::sync::RwLock;
 
 use crate::analys::mempool::types::*;
 use crate::analys::mempool::detection;
-use crate::analys::mempool::utils;
+use crate::analys::mempool::filter;
+use crate::analys::mempool::priority;
+use super::utils;
 
 /// Phân tích và theo dõi mempool
 pub struct MempoolAnalyzer {
@@ -261,12 +263,16 @@ impl MempoolAnalyzer {
             if is_adding && !token.liquidity_added {
                 token.liquidity_added = true;
                 token.liquidity_tx = Some(transaction.tx_hash.clone());
-                // TODO: Tính liquidity_value từ input data
-                token.liquidity_value = Some(transaction.value * 2.0); // Giá trị ước tính
+                // Sử dụng hàm từ utils để tính liquidity_value
+                if let Some(token_price) = self.get_token_price(&token_address).await {
+                    token.liquidity_value = Some(utils::calculate_liquidity_value(&transaction.input_data, token_price));
+                } else {
+                    token.liquidity_value = Some(transaction.value * 2.0); // Giá trị ước tính
+                }
                 
                 // Xác định DEX từ địa chỉ nhận
                 if let Some(to) = &transaction.to_address {
-                    token.dex_type = Some(self.detect_dex_from_router(to));
+                    token.dex_type = Some(utils::detect_dex_from_router(to));
                 }
             }
         }
@@ -491,22 +497,112 @@ impl MempoolAnalyzer {
         transaction.to_address.clone()
     }
     
-    /// Phát hiện DEX từ router address
-    fn detect_dex_from_router(&self, router_address: &str) -> String {
-        let router = router_address.to_lowercase();
-        
-        // Các router phổ biến
-        match router.as_str() {
-            "0x10ed43c718714eb63d5aa57b78b54704e256024e" => "PancakeSwap".to_string(),
-            "0x7a250d5630b4cf539739df2c5dacb4c659f2488d" => "Uniswap".to_string(),
-            "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506" => "SushiSwap".to_string(),
-            _ => "Unknown DEX".to_string(),
-        }
-    }
-    
     /// Lấy gas price trung bình hiện tại
     pub async fn get_average_gas_price(&self) -> f64 {
         let avg_gas = self.average_gas_price.read().await;
         *avg_gas
     }
+
+    /// Thêm phương thức giả lập để lấy giá token cho mục đích ước tính trong process_liquidity_event
+    async fn get_token_price(&self, _token_address: &str) -> Option<f64> {
+        // Trong triển khai thực tế, sẽ truy vấn API hoặc oracle để lấy giá token
+        // Đây chỉ là phương thức giả lập
+        None
+    }
+}
+
+/// Update the analyze_transaction function
+pub async fn analyze_transaction(&self, tx: &Transaction) -> Result<TokenInfo> {
+    // ... existing code ...
+    
+    let token_price = self.get_token_price(&token_address).await.unwrap_or(0.0);
+    let liquidity_value = utils::calculate_liquidity_value(&tx.input, token_price);
+    let related_token = utils::extract_related_token(&tx.input);
+    
+    // ... rest of the function ...
+}
+
+// Update method to use the filter module
+pub async fn get_filtered_transactions(
+    &self,
+    filter_options: TransactionFilterOptions,
+    limit: usize,
+) -> Vec<MempoolTransaction> {
+    let pending_txs = self.pending_transactions.read().await;
+    filter::get_filtered_transactions(&pending_txs, filter_options, limit)
+}
+
+// Update method to use the priority module
+pub async fn estimate_confirmation_time(
+    &self,
+    transaction_priority: &TransactionPriority,
+    chain_id: u32,
+) -> String {
+    priority::estimate_confirmation_time(transaction_priority, chain_id)
+}
+
+// Update method to use the arbitrage module
+pub async fn find_mev_bots(
+    &self,
+    high_frequency_threshold: usize,
+    time_window_sec: u64,
+    limit: usize,
+) -> Vec<(String, usize)> {
+    let pending_txs = self.pending_transactions.read().await;
+    let mut results = super::arbitrage::find_mev_bots(
+        &pending_txs, 
+        high_frequency_threshold, 
+        time_window_sec
+    );
+    
+    // Apply limit
+    if results.len() > limit {
+        results.truncate(limit);
+    }
+    
+    results
+}
+
+// Update method to use the arbitrage module
+pub async fn find_sandwich_attacks(
+    &self,
+    min_value_eth: f64,
+    time_window_ms: u64,
+    limit: usize,
+) -> Vec<Vec<MempoolTransaction>> {
+    let pending_txs = self.pending_transactions.read().await;
+    let mut results = super::arbitrage::find_sandwich_attacks(
+        &pending_txs, 
+        min_value_eth, 
+        time_window_ms
+    );
+    
+    // Apply limit
+    if results.len() > limit {
+        results.truncate(limit);
+    }
+    
+    results
+}
+
+// Update method to use the arbitrage module
+pub async fn find_frontrunning_transactions(
+    &self,
+    min_value_eth: f64,
+    time_window_ms: u64,
+    limit: usize,
+) -> Vec<(MempoolTransaction, MempoolTransaction)> {
+    let pending_txs = self.pending_transactions.read().await;
+    let mut results = super::arbitrage::find_frontrunning_transactions(
+        &pending_txs, 
+        min_value_eth, 
+        time_window_ms
+    );
+    
+    // Apply limit
+    if results.len() > limit {
+        results.truncate(limit);
+    }
+    
+    results
 } 

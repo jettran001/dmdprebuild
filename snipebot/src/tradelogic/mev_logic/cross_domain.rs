@@ -495,12 +495,58 @@ impl CrossDomainMevManager {
     
     /// Clone for using in async contexts
     fn clone(&self) -> Self {
+        // Sử dụng blocking read với timeout để đảm bảo không bị treo vô hạn
+        // nhưng vẫn ưu tiên lấy giá trị thực
+        let config = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match tokio::time::timeout(std::time::Duration::from_millis(200), 
+                                          self.config.read()).await {
+                    Ok(guard) => {
+                        let cloned = guard.clone();
+                        Ok(cloned)
+                    },
+                    Err(_) => {
+                        tracing::warn!("Timeout waiting for config lock in CrossDomainMevManager.clone()");
+                        Err(())
+                    }
+                }
+            })
+        }) {
+            Ok(cfg) => cfg,
+            Err(_) => {
+                tracing::warn!("Using default config in CrossDomainMevManager.clone() due to lock timeout");
+                CrossDomainMevConfig::default()
+            }
+        };
+
+        let running = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match tokio::time::timeout(std::time::Duration::from_millis(200), 
+                                          self.running.read()).await {
+                    Ok(guard) => {
+                        let running_value = *guard;
+                        Ok(running_value)
+                    },
+                    Err(_) => {
+                        tracing::warn!("Timeout waiting for running lock in CrossDomainMevManager.clone()");
+                        Err(())
+                    }
+                }
+            })
+        }) {
+            Ok(value) => value,
+            Err(_) => {
+                tracing::warn!("Using default running state (false) in CrossDomainMevManager.clone() due to lock timeout");
+                false
+            }
+        };
+
         Self {
-            config: RwLock::new(self.config.try_read().unwrap_or_default().clone()),
+            config: RwLock::new(config),
             evm_adapters: self.evm_adapters.clone(),
             price_cache: RwLock::new(HashMap::new()),
             bridges: self.bridges.clone(),
-            running: RwLock::new(*self.running.try_read().unwrap_or(&false)),
+            running: RwLock::new(running),
             recent_opportunities: RwLock::new(Vec::new()),
         }
     }

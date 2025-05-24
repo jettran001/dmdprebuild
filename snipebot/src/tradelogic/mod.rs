@@ -16,11 +16,14 @@ pub mod manual_trade;    // User-initiated trading through API requests
 pub mod coordinator;     // Coordinator for managing shared state between executors
 
 // Re-export main traits for easy access
-pub use traits::{TradeExecutor, RiskManager, StrategyOptimizer, CrossChainTrader};
+pub use traits::{
+    TradeExecutor, RiskManager, StrategyOptimizer, CrossChainTrader,
+    MempoolAnalysisProvider, TokenAnalysisProvider, RiskAnalysisProvider, MevOpportunityProvider,
+    TradeCoordinator
+};
 
-// Re-export main implementations
-pub use smart_trade::executor::SmartTradeExecutor;
+// Re-export factory functions (not implementations)
+pub use coordinator::create_trade_coordinator;
 pub use smart_trade::create_smart_trade_executor;
-pub use mev_logic::bot::MevBot;
 pub use mev_logic::strategy::create_mev_strategy;
 pub use manual_trade::create_manual_trade_executor; 

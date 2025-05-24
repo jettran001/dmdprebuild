@@ -1,262 +1,339 @@
+//! Mempool transaction pattern detection
+//!
+//! This module contains functions for detecting various transaction patterns
+//! in the mempool, such as front-running, sandwich attacks, and suspicious activities.
+
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::analys::mempool::types::{MempoolTransaction, SuspiciousPattern};
+use super::types::*;
 
-/// Phát hiện front-running trong mempool
+/// Detect front-running pattern
 ///
-/// Phát hiện giao dịch cố gắng chạy trước giao dịch khác với gas price cao hơn
+/// Front-running occurs when a transaction is submitted with a higher gas price
+/// to be executed before another pending transaction.
 ///
-/// # Parameters
-/// - `transaction`: Giao dịch cần kiểm tra
-/// - `pending_txs`: Danh sách giao dịch đang chờ trong mempool
-/// - `time_window_ms`: Cửa sổ thời gian (milliseconds) để xem xét
+/// # Arguments
+/// * `transaction` - The transaction to check
+/// * `pending_txs` - Map of pending transactions
+/// * `time_window_ms` - Time window to consider (milliseconds)
 ///
 /// # Returns
-/// - `Option<SuspiciousPattern>`: Pattern được phát hiện nếu có
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::FrontRunning if detected
 pub async fn detect_front_running(
     transaction: &MempoolTransaction,
     pending_txs: &HashMap<String, MempoolTransaction>,
-    time_window_ms: u64,
+    time_window_ms: u64
 ) -> Option<SuspiciousPattern> {
-    // Kiểm tra gas price cao bất thường
-    if transaction.gas_price <= 0.0 {
+    // Check if gas price is significantly higher than average
+    // This requires access to the average gas price, which we don't have here
+    // So we'll compare against other pending transactions
+    
+    // Get all transactions in the last time_window_ms
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(e) => {
+            tracing::warn!("Failed to get current time in detect_front_running: {}", e);
+            // Fallback to transaction detected_at as current time if available
+            // or use a reasonable default
+            transaction.detected_at.saturating_add(1)
+        }
+    };
+    
+    let time_window_sec = time_window_ms / 1000;
+    let window_start = now.saturating_sub(time_window_sec);
+    
+    // Check if there are any large value transactions in the time window
+    let large_txs: Vec<&MempoolTransaction> = pending_txs.values()
+        .filter(|tx| {
+            tx.detected_at >= window_start && 
+            tx.value >= LARGE_TRANSACTION_ETH &&
+            tx.tx_hash != transaction.tx_hash &&
+            tx.from_address != transaction.from_address
+        })
+        .collect();
+    
+    if large_txs.is_empty() {
         return None;
     }
-
-    // Tìm giao dịch tương tự trong cùng thời gian
-    let mut similar_txs = Vec::new();
     
-    for (_, tx) in pending_txs {
-        // Bỏ qua giao dịch hiện tại
-        if tx.tx_hash == transaction.tx_hash {
-            continue;
-        }
-        
-        // Chỉ xem xét giao dịch trong cùng một cửa sổ thời gian
-        if (tx.detected_at as i64 - transaction.detected_at as i64).abs() as u64 > time_window_ms / 1000 {
-            continue;
-        }
-        
-        // Kiểm tra liệu giao dịch có cùng mục tiêu
-        if let (Some(to1), Some(to2)) = (&transaction.to_address, &tx.to_address) {
-            if to1 == to2 && transaction.gas_price > tx.gas_price * 1.5 {
-                similar_txs.push(tx);
+    // Check if this transaction has significantly higher gas price
+    for large_tx in large_txs {
+        if transaction.gas_price > large_tx.gas_price * 1.5 {
+            // This transaction has much higher gas price
+            if transaction.transaction_type == large_tx.transaction_type {
+                // And targets the same token or contract
+                if let Some(to_addr) = &transaction.to_address {
+                    if let Some(large_to) = &large_tx.to_address {
+                        if to_addr == large_to {
+                            return Some(SuspiciousPattern::FrontRunning);
+                        }
+                    }
+                }
             }
         }
-    }
-    
-    // Nếu có giao dịch tương tự và gas price cao hơn đáng kể
-    if !similar_txs.is_empty() {
-        return Some(SuspiciousPattern::FrontRunning);
     }
     
     None
 }
 
-/// Phát hiện sandwich attack trong mempool
+/// Detect sandwich attack pattern
 ///
-/// Phát hiện cặp giao dịch cố gắng kẹp một giao dịch lớn để hưởng lợi từ slippage
+/// Sandwich attack occurs when an attacker places two transactions around a victim's transaction,
+/// buying before and selling after to profit from the price impact.
 ///
-/// # Parameters
-/// - `transaction`: Giao dịch cần kiểm tra
-/// - `pending_txs`: Danh sách giao dịch đang chờ trong mempool
-/// - `time_window_ms`: Cửa sổ thời gian (milliseconds) để xem xét
+/// # Arguments
+/// * `transaction` - The transaction to check
+/// * `pending_txs` - Map of pending transactions
+/// * `time_window_ms` - Time window to consider (milliseconds)
 ///
 /// # Returns
-/// - `Option<SuspiciousPattern>`: Pattern được phát hiện nếu có
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::SandwichAttack if detected
 pub async fn detect_sandwich_attack(
     transaction: &MempoolTransaction,
     pending_txs: &HashMap<String, MempoolTransaction>,
-    time_window_ms: u64,
+    time_window_ms: u64
 ) -> Option<SuspiciousPattern> {
-    // Chỉ kiểm tra các giao dịch swap
-    let is_swap_function = match &transaction.function_signature {
-        Some(sig) => sig.contains("swap") || sig.contains("Swap"),
-        None => false,
-    };
-    
-    if !is_swap_function {
+    // Only check swap transactions
+    if transaction.transaction_type != TransactionType::Swap {
         return None;
     }
     
-    // Tìm giao dịch từ cùng địa chỉ trong cửa sổ thời gian
-    let mut related_txs = Vec::new();
+    let time_window_sec = time_window_ms / 1000;
     
-    for (_, tx) in pending_txs {
-        // Bỏ qua giao dịch hiện tại
-        if tx.tx_hash == transaction.tx_hash {
-            continue;
-        }
-        
-        // Chỉ xem xét giao dịch trong cùng một cửa sổ thời gian
-        if (tx.detected_at as i64 - transaction.detected_at as i64).abs() as u64 > time_window_ms / 1000 {
-            continue;
-        }
-        
-        // Kiểm tra nếu cùng người gửi và cũng là swap
-        if tx.from_address == transaction.from_address {
-            let tx_is_swap = match &tx.function_signature {
-                Some(sig) => sig.contains("swap") || sig.contains("Swap"),
-                None => false,
-            };
-            
-            if tx_is_swap {
-                related_txs.push(tx);
-            }
-        }
+    // Find potential front-running transaction
+    let front_txs: Vec<&MempoolTransaction> = pending_txs.values()
+        .filter(|tx| {
+            // Different sender
+            tx.from_address != transaction.from_address &&
+            // Swap transaction
+            tx.transaction_type == TransactionType::Swap &&
+            // Higher gas price
+            tx.gas_price > transaction.gas_price &&
+            // Came right before target transaction
+            tx.detected_at < transaction.detected_at &&
+            tx.detected_at >= transaction.detected_at.saturating_sub(time_window_sec)
+        })
+        .collect();
+    
+    if front_txs.is_empty() {
+        return None;
     }
     
-    // Nếu cùng địa chỉ có hơn 2 giao dịch swap trong một cửa sổ thời gian ngắn
-    if related_txs.len() >= 1 {
-        return Some(SuspiciousPattern::SandwichAttack);
+    // Find potential back-running transaction
+    let back_txs: Vec<&MempoolTransaction> = pending_txs.values()
+        .filter(|tx| {
+            // Check if it's from the same address as any front-runner
+            front_txs.iter().any(|ft| ft.from_address == tx.from_address) &&
+            // Swap transaction
+            tx.transaction_type == TransactionType::Swap &&
+            // Came right after target transaction
+            tx.detected_at > transaction.detected_at &&
+            tx.detected_at <= transaction.detected_at + time_window_sec
+        })
+        .collect();
+    
+    if back_txs.is_empty() {
+        return None;
+    }
+    
+    // Check if there's a sandwich pattern with token info
+    for front_tx in &front_txs {
+        for back_tx in &back_txs {
+            // If we have token info, check that it's the same token being targeted
+            if let (Some(victim_from), Some(front_to)) = (
+                &transaction.from_token,
+                &front_tx.to_token
+            ) {
+                // Safe access with match instead of unwrap
+                let front_target_matches = match (&front_tx.to_token, &transaction.from_token) {
+                    (Some(front_token), Some(victim_token)) => {
+                        front_token.address == victim_token.address
+                    },
+                    _ => false
+                };
+                
+                let back_source_matches = match (&back_tx.from_token, &transaction.to_token) {
+                    (Some(back_token), Some(victim_token)) => {
+                        back_token.address == victim_token.address
+                    },
+                    _ => false
+                };
+                
+                if front_target_matches && back_source_matches {
+                    return Some(SuspiciousPattern::SandwichAttack);
+                }
+            }
+            // If no token info, check for contract interaction on the same address
+            else if front_tx.from_address == back_tx.from_address {
+                if let (Some(front_to), Some(victim_to), Some(back_to)) =
+                    (&front_tx.to_address, &transaction.to_address, &back_tx.to_address) {
+                    if front_to == victim_to && victim_to == back_to {
+                        return Some(SuspiciousPattern::SandwichAttack);
+                    }
+                }
+            }
+        }
     }
     
     None
 }
 
-/// Phát hiện giao dịch tần số cao từ cùng địa chỉ
+/// Detect high frequency trading from a single address
 ///
-/// Phát hiện địa chỉ thực hiện nhiều giao dịch liên tiếp trong thời gian ngắn
+/// High frequency trading is characterized by a large number of transactions
+/// from the same address within a short time window.
 ///
-/// # Parameters
-/// - `transaction`: Giao dịch cần kiểm tra
-/// - `pending_txs`: Danh sách giao dịch đang chờ trong mempool
+/// # Arguments
+/// * `transaction` - The transaction to check
+/// * `pending_txs` - Map of pending transactions
 ///
 /// # Returns
-/// - `Option<SuspiciousPattern>`: Pattern được phát hiện nếu có
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::HighFrequencyTrading if detected
 pub async fn detect_high_frequency_trading(
     transaction: &MempoolTransaction,
-    pending_txs: &HashMap<String, MempoolTransaction>,
+    pending_txs: &HashMap<String, MempoolTransaction>
 ) -> Option<SuspiciousPattern> {
-    // Đếm số giao dịch từ cùng địa chỉ trong 5 phút
-    let mut transaction_count = 0;
-    let from_address = &transaction.from_address;
+    const HIGH_FREQUENCY_THRESHOLD: usize = 5; // 5+ transactions in the window
+    const TIME_WINDOW_SEC: u64 = 60; // 1 minute window
     
-    for (_, tx) in pending_txs {
-        // Bỏ qua giao dịch hiện tại
-        if tx.tx_hash == transaction.tx_hash {
-            continue;
+    // Get all transactions from the same sender in the last TIME_WINDOW_SEC
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(e) => {
+            tracing::warn!("Failed to get current time in detect_high_frequency_trading: {}", e);
+            // Fallback to transaction detected_at as current time if available
+            transaction.detected_at
         }
-        
-        // Kiểm tra nếu trong 5 phút và cùng địa chỉ
-        if tx.from_address == *from_address {
-            if (transaction.detected_at as i64 - tx.detected_at as i64).abs() as u64 <= 300 { // 5 phút = 300 giây
-                transaction_count += 1;
-            }
-        }
-    }
+    };
     
-    // Nếu có nhiều hơn 5 giao dịch trong 5 phút
-    if transaction_count >= 5 {
+    let window_start = now.saturating_sub(TIME_WINDOW_SEC);
+    
+    let sender_txs: Vec<&MempoolTransaction> = pending_txs.values()
+        .filter(|tx| {
+            tx.detected_at >= window_start && 
+            tx.from_address == transaction.from_address
+        })
+        .collect();
+    
+    if sender_txs.len() >= HIGH_FREQUENCY_THRESHOLD {
         return Some(SuspiciousPattern::HighFrequencyTrading);
     }
     
     None
 }
 
-/// Phát hiện large pending sells
+/// Detect sudden liquidity removal (potential rug pull)
 ///
-/// Phát hiện các giao dịch bán lớn đang chờ xử lý
+/// Sudden liquidity removal is characterized by a large liquidity removal transaction,
+/// especially soon after token creation or a large price increase.
 ///
-/// # Parameters
-/// - `token_address`: Địa chỉ token cần kiểm tra
-/// - `min_value_eth`: Giá trị tối thiểu (ETH) để xem xét là giao dịch lớn
+/// # Arguments
+/// * `transaction` - The transaction to check
+/// * `token_info` - Additional token information if available
 ///
 /// # Returns
-/// - `bool`: True nếu có giao dịch bán lớn đang chờ
-pub async fn detect_large_pending_sells(
-    token_address: &str,
-    pending_txs: &HashMap<String, MempoolTransaction>,
-    min_value_eth: f64,
-) -> bool {
-    for (_, tx) in pending_txs {
-        // Xác định nếu đây là giao dịch bán token
-        let is_sell = match &tx.function_signature {
-            Some(sig) => {
-                sig.contains("sell") || sig.contains("Sell") || 
-                sig.contains("swapExactTokensForETH") || sig.contains("swapTokensForExactETH")
-            },
-            None => false,
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::SuddenLiquidityRemoval if detected
+pub fn detect_sudden_liquidity_removal(
+    transaction: &MempoolTransaction,
+    token_info: Option<&TokenInfo>
+) -> Option<SuspiciousPattern> {
+    // Check if this is a remove liquidity transaction
+    if transaction.transaction_type != TransactionType::RemoveLiquidity {
+        return None;
+    }
+    
+    // If we have token info and it's a recently created token
+    if let Some(token) = token_info {
+        // Calculate time since token creation
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(e) => {
+                tracing::warn!("Failed to get current time in detect_sudden_liquidity_removal: {}", e);
+                return None;
+            }
         };
         
-        if !is_sell {
-            continue;
+        let token_age_hours = (now - token.created_at) / 3600;
+        
+        // If token is less than 24 hours old and a large amount of liquidity is being removed
+        if token_age_hours < 24 && transaction.value > LARGE_TRANSACTION_ETH {
+            return Some(SuspiciousPattern::SuddenLiquidityRemoval);
         }
         
-        // Kiểm tra nếu transaction liên quan đến token đang xem xét
-        let token_related = tx.input_data.to_lowercase().contains(&token_address.to_lowercase());
-        
-        // Nếu là giao dịch bán lớn liên quan đến token
-        if token_related && tx.value >= min_value_eth {
-            return true;
+        // Or if there was a large price increase recently
+        if token.price_change_24h > 50.0 && transaction.value > LARGE_TRANSACTION_ETH {
+            return Some(SuspiciousPattern::SuddenLiquidityRemoval);
         }
     }
     
-    false
+    None
 }
 
-/// Phát hiện MEV bots
+/// Detect whale wallet movements
 ///
-/// Tìm các địa chỉ có dấu hiệu của MEV bot
+/// Whale movements are large value transactions from addresses that hold a significant
+/// amount of tokens.
 ///
-/// # Parameters
-/// - `pending_txs`: Danh sách giao dịch đang chờ trong mempool
-/// - `high_frequency_threshold`: Ngưỡng số lượng giao dịch để coi là tần số cao
-/// - `time_window_sec`: Cửa sổ thời gian (giây) để xem xét
-/// - `limit`: Số lượng tối đa MEV bot trả về
+/// # Arguments
+/// * `transaction` - The transaction to check
+/// * `whale_threshold_eth` - Threshold in ETH to consider a transaction as a whale movement
 ///
 /// # Returns
-/// - `Vec<(String, usize)>`: Danh sách (địa chỉ, số giao dịch) của các MEV bot phát hiện được
-pub async fn find_mev_bots(
-    pending_txs: &HashMap<String, MempoolTransaction>,
-    high_frequency_threshold: usize,
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::WhaleMovement if detected
+pub fn detect_whale_movement(
+    transaction: &MempoolTransaction,
+    whale_threshold_eth: f64,
+) -> Option<SuspiciousPattern> {
+    if transaction.value >= whale_threshold_eth {
+        return Some(SuspiciousPattern::WhaleMovement);
+    }
+    
+    None
+}
+
+/// Detect token creation and liquidity addition pattern
+///
+/// This pattern is characterized by token creation followed shortly by
+/// liquidity addition, which could indicate a new token launch or a rug pull setup.
+///
+/// # Arguments
+/// * `transactions` - Map of pending transactions
+/// * `address` - Address to check
+/// * `time_window_sec` - Time window to consider
+///
+/// # Returns
+/// * `Option<SuspiciousPattern>` - SuspiciousPattern::TokenLiquidityPattern if detected
+pub async fn detect_token_liquidity_pattern(
+    transactions: &HashMap<String, MempoolTransaction>,
+    address: &str,
     time_window_sec: u64,
-    limit: usize,
-) -> Vec<(String, usize)> {
-    // Thống kê số lượng giao dịch theo địa chỉ
-    let mut tx_count_by_address: HashMap<String, usize> = HashMap::new();
-    let mut gas_sum_by_address: HashMap<String, f64> = HashMap::new();
+) -> Option<SuspiciousPattern> {
+    // Find token creation transaction
+    let token_creation: Option<&MempoolTransaction> = transactions.values()
+        .find(|tx| {
+            tx.transaction_type == TransactionType::TokenCreation &&
+            tx.from_address == address
+        });
     
-    // Thời gian hiện tại
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    
-    for (_, tx) in pending_txs {
-        // Chỉ xem xét giao dịch trong cửa sổ thời gian
-        if now - tx.detected_at > time_window_sec {
-            continue;
-        }
-        
-        // Cập nhật số lượng giao dịch
-        *tx_count_by_address.entry(tx.from_address.clone()).or_insert(0) += 1;
-        
-        // Cập nhật tổng gas price
-        *gas_sum_by_address.entry(tx.from_address.clone()).or_insert(0.0) += tx.gas_price;
+    if token_creation.is_none() {
+        return None;
     }
     
-    // Lọc ra các địa chỉ có dấu hiệu của MEV bot
-    let mut potential_mev_bots = Vec::new();
+    let token_creation = token_creation.unwrap();
     
-    for (address, count) in tx_count_by_address {
-        if count >= high_frequency_threshold {
-            // Gas price trung bình
-            let avg_gas = gas_sum_by_address.get(&address).unwrap_or(&0.0) / count as f64;
-            
-            // MEV bots thường có gas price cao và số lượng giao dịch lớn
-            if avg_gas > 0.0 {
-                potential_mev_bots.push((address, count));
-            }
-        }
+    // Find liquidity addition after token creation
+    let liquidity_addition: Option<&MempoolTransaction> = transactions.values()
+        .find(|tx| {
+            tx.transaction_type == TransactionType::AddLiquidity &&
+            tx.from_address == address && 
+            tx.detected_at > token_creation.detected_at &&
+            tx.detected_at <= token_creation.detected_at + time_window_sec
+        });
+    
+    if liquidity_addition.is_some() {
+        return Some(SuspiciousPattern::TokenLiquidityPattern);
     }
     
-    // Sắp xếp theo số lượng giao dịch giảm dần
-    potential_mev_bots.sort_by(|a, b| b.1.cmp(&a.1));
-    
-    // Giới hạn số lượng kết quả
-    potential_mev_bots.truncate(limit);
-    
-    potential_mev_bots
+    None
 } 

@@ -65,12 +65,12 @@ impl TradeCoordinatorImpl {
         let (broadcaster, _) = broadcast::channel::<SharedOpportunity>(100);
         
         Self {
-            executors: RwLock::new(HashMap::new()),
-            opportunities: RwLock::new(HashMap::new()),
-            subscriptions: RwLock::new(HashMap::new()),
-            executor_subscriptions: RwLock::new(HashMap::new()),
+            executors: RwLock::new(HashMap::<String, ExecutorType>::new()),
+            opportunities: RwLock::new(HashMap::<String, SharedOpportunity>::new()),
+            subscriptions: RwLock::new(HashMap::<String, mpsc::Sender<SharedOpportunity>>::new()),
+            executor_subscriptions: RwLock::new(HashMap::<String, HashSet<String>>::new()),
             opportunity_broadcaster: broadcaster,
-            global_parameters: RwLock::new(HashMap::new()),
+            global_parameters: RwLock::new(HashMap::<String, f64>::new()),
             statistics: RwLock::new(SharingStatistics::default()),
         }
     }
@@ -105,12 +105,16 @@ impl TradeCoordinatorImpl {
         Ok(())
     }
     
-    /// Get current timestamp in seconds
+    /// Get current timestamp in seconds in a safe manner
     fn current_timestamp() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs()
+            .map(|d| d.as_secs())
+            .unwrap_or_else(|_| {
+                // Log error but don't panic
+                error!("System time before UNIX EPOCH, using 0 as fallback");
+                0
+            })
     }
     
     /// Check if opportunity exists
@@ -230,12 +234,12 @@ impl Clone for TradeCoordinatorImpl {
         let (broadcaster, _) = broadcast::channel::<SharedOpportunity>(100);
         
         Self {
-            executors: RwLock::new(HashMap::new()),
-            opportunities: RwLock::new(HashMap::new()),
-            subscriptions: RwLock::new(HashMap::new()),
-            executor_subscriptions: RwLock::new(HashMap::new()),
+            executors: RwLock::new(HashMap::<String, ExecutorType>::new()),
+            opportunities: RwLock::new(HashMap::<String, SharedOpportunity>::new()),
+            subscriptions: RwLock::new(HashMap::<String, mpsc::Sender<SharedOpportunity>>::new()),
+            executor_subscriptions: RwLock::new(HashMap::<String, HashSet<String>>::new()),
             opportunity_broadcaster: broadcaster,
-            global_parameters: RwLock::new(HashMap::new()),
+            global_parameters: RwLock::new(HashMap::<String, f64>::new()),
             statistics: RwLock::new(SharingStatistics::default()),
         }
     }
@@ -361,66 +365,83 @@ impl TradeCoordinator for TradeCoordinatorImpl {
         executor_id: &str,
         priority: OpportunityPriority,
     ) -> Result<bool> {
-        let mut opportunities = self.opportunities.write().await;
+        // Tách riêng việc kiểm tra và lấy thông tin cơ hội
+        let opportunity_info = {
+            let opportunities = self.opportunities.read().await;
+            
+            if let Some(opp) = opportunities.get(opportunity_id) {
+                // Clone thông tin cần thiết thay vì giữ lock
+                (opp.reservation.clone(), true)
+            } else {
+                (None, false)
+            }
+        };
         
-        let opportunity = opportunities
-            .get_mut(opportunity_id)
-            .ok_or_else(|| anyhow!("Opportunity not found: {}", opportunity_id))?;
+        // Kiểm tra nếu cơ hội không tồn tại
+        if !opportunity_info.1 {
+            return Err(anyhow!("Opportunity not found: {}", opportunity_id));
+        }
         
         let now = Self::current_timestamp();
         let expiry = now + DEFAULT_RESERVATION_EXPIRY;
+        let existing = opportunity_info.0;
         
-        // Check if already reserved
-        if let Some(existing) = &opportunity.reservation {
-            // If reserved by someone else
-            if existing.executor_id != executor_id {
-                // Check if our priority is higher
-                if priority as u8 > existing.priority as u8 {
-                    // We can override
-                    let mut stats = self.statistics.write().await;
-                    stats.reservation_conflicts += 1;
-                    
-                    // Create new reservation
-                    opportunity.reservation = Some(OpportunityReservation {
-                        executor_id: executor_id.to_string(),
-                        priority,
-                        reserved_at: now,
-                        expires_at: expiry,
-                    });
-                    
-                    info!("Executor {} overrode reservation for opportunity {} with higher priority", 
-                        executor_id, opportunity_id);
-                    return Ok(true);
+        // Biến để theo dõi xung đột reservation
+        let mut has_conflict = false;
+        let mut can_reserve = true;
+        
+        // Kiểm tra nếu đã được đặt trước
+        if let Some(reservation) = &existing {
+            if reservation.executor_id != executor_id {
+                // Nếu được đặt trước bởi người khác
+                if priority as u8 > reservation.priority as u8 {
+                    // Có thể ghi đè do ưu tiên cao hơn
+                    has_conflict = true;
                 } else {
-                    // Can't override
-                    info!("Executor {} could not reserve opportunity {} (already reserved by {} with higher priority)", 
-                        executor_id, opportunity_id, existing.executor_id);
+                    // Không thể ghi đè
+                    info!("Executor {} could not reserve opportunity {} (already reserved by {} with higher priority)",
+                        executor_id, opportunity_id, reservation.executor_id);
                     return Ok(false);
                 }
-            } else {
-                // Already reserved by us, extend expiry
-                opportunity.reservation = Some(OpportunityReservation {
-                    executor_id: executor_id.to_string(),
-                    priority,
-                    reserved_at: existing.reserved_at, // Keep original reservation time
-                    expires_at: expiry, // Extended expiry
-                });
-                
-                debug!("Extended reservation for opportunity {} by executor {}", 
-                    opportunity_id, executor_id);
-                return Ok(true);
             }
         }
         
-        // Not reserved, create new reservation
-        opportunity.reservation = Some(OpportunityReservation {
+        // Tạo reservation mới
+        let new_reservation = OpportunityReservation {
             executor_id: executor_id.to_string(),
             priority,
-            reserved_at: now,
+            reserved_at: existing.as_ref().map_or(now, |r| r.reserved_at),
             expires_at: expiry,
-        });
+        };
         
-        info!("Executor {} reserved opportunity {}", executor_id, opportunity_id);
+        // Cập nhật opportunity với reservation mới
+        {
+            let mut opportunities = self.opportunities.write().await;
+            
+            // Kiểm tra lại vì có thể đã thay đổi trong lúc xử lý
+            let opportunity = opportunities
+                .get_mut(opportunity_id)
+                .ok_or_else(|| anyhow!("Opportunity not found: {}", opportunity_id))?;
+            
+            opportunity.reservation = Some(new_reservation);
+        }
+        
+        // Cập nhật thống kê nếu có xung đột (tách riêng để tránh deadlock)
+        if has_conflict {
+            let mut stats = self.statistics.write().await;
+            stats.reservation_conflicts += 1;
+            
+            info!("Executor {} overrode reservation for opportunity {} with higher priority",
+                executor_id, opportunity_id);
+        } else {
+            if existing.is_some() {
+                debug!("Extended reservation for opportunity {} by executor {}",
+                    opportunity_id, executor_id);
+            } else {
+                info!("Executor {} reserved opportunity {}", executor_id, opportunity_id);
+            }
+        }
+        
         Ok(true)
     }
     
@@ -480,19 +501,28 @@ impl TradeCoordinator for TradeCoordinatorImpl {
     }
 }
 
-/// Create a new TradeCoordinator
+/// Create a new TradeCoordinator with background cleanup tasks
 pub fn create_trade_coordinator() -> Arc<dyn TradeCoordinator> {
     let coordinator = TradeCoordinatorImpl::new();
+    let arc_coordinator = Arc::new(coordinator.clone()) as Arc<dyn TradeCoordinator>;
     
-    // Start background tasks 
+    // Start background tasks but handle errors properly
     let coordinator_clone = coordinator.clone();
     tokio::spawn(async move {
         if let Err(e) = coordinator_clone.start().await {
-            error!("Failed to start trade coordinator: {}", e);
+            error!("Failed to start trade coordinator background tasks: {}", e);
+        }
+        
+        // Start cleanup task with proper error handling
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(e) = coordinator_clone.cleanup_expired_opportunities().await {
+                error!("Error cleaning up expired opportunities: {}", e);
+            }
         }
     });
     
-    Arc::new(coordinator)
+    arc_coordinator
 }
 
 #[cfg(test)]

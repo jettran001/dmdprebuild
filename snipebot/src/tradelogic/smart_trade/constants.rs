@@ -4,7 +4,165 @@
 //! used in the smart trading system. Organizing these values as constants allows
 //! for easy modification and configuration of the trading behavior.
 
-// ===== Quick Trade Strategy Constants =====
+// External imports
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use serde::{Serialize, Deserialize};
+
+/// Cấu trúc chứa các giá trị thời gian thực có thể điều chỉnh trong runtime
+/// Các giá trị mặc định được định nghĩa nhưng có thể được thay đổi thông qua cấu hình
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigurableConstants {
+    // ===== Quick Trade Strategy Constants =====
+    /// Ngưỡng giao dịch tối thiểu (BNB) để kích hoạt quick trade
+    pub quick_trade_min_bnb: f64,
+
+    /// Phần trăm lợi nhuận mục tiêu (5%) cho quick trade
+    pub quick_trade_target_profit: f64,
+
+    /// Thời gian giữ tối đa cho quick trade (giây)
+    pub quick_trade_max_hold_time: u64,
+
+    // ===== Smart Trade Strategy Constants =====
+    /// Thời gian giữ tối thiểu cho smart trade (giây)
+    pub smart_trade_min_hold_time: u64,
+
+    /// Thời gian giữ tối đa cho smart trade (giây) 
+    pub smart_trade_max_hold_time: u64,
+
+    /// Phần trăm trailing stop loss cho smart trade
+    pub smart_trade_tsl_percent: f64,
+
+    // ===== General Trading Constants =====
+    /// Phần trăm ngưỡng ngăn lỗ áp dụng cho mọi loại giao dịch
+    pub stop_loss_percent: f64,
+
+    /// Số tiền tối đa (BNB) cho mỗi giao dịch để giới hạn rủi ro
+    pub max_trade_amount_bnb: f64,
+
+    /// Khoảng thời gian kiểm tra giá (milliseconds)
+    pub price_check_interval_ms: u64,
+
+    // ===== Token Analysis Constants =====
+    /// Ngưỡng tax mua tối đa an toàn
+    pub max_safe_buy_tax: f64,
+
+    /// Ngưỡng tax bán tối đa an toàn
+    pub max_safe_sell_tax: f64,
+
+    /// Chênh lệch tax bán-mua nguy hiểm
+    pub dangerous_tax_diff: f64,
+
+    /// Thời gian khóa LP tối thiểu (giây)
+    pub min_pool_lock_time: u64,
+
+    /// Ngưỡng thanh khoản tối thiểu (USD)
+    pub min_liquidity_threshold: f64,
+
+    /// Phần trăm giảm thanh khoản đáng báo động
+    pub liquidity_drop_alert: f64,
+
+    // ===== Monitoring Constants =====
+    /// Tần suất kiểm tra bất thường contract (milliseconds)
+    pub contract_monitor_interval_ms: u64,
+
+    /// Tần suất kiểm tra tax (milliseconds)
+    pub tax_check_interval_ms: u64,
+
+    /// Ngưỡng whale (phần trăm của tổng cung) cho việc theo dõi 
+    pub whale_threshold_percent: f64,
+
+    // ===== Security Constants =====
+    /// Tối thiểu ngày khóa LP an toàn
+    pub min_safe_liquidity_lock_days: u64,
+
+    /// Tối đa phần trăm token trong ví dev/team an toàn
+    pub max_safe_ownership_percentage: f64,
+
+    /// Tối đa thời gian delay giữa các giao dịch (giây)
+    pub max_transfer_delay_seconds: u64,
+
+    // ===== Market Analysis Constants =====
+    /// Phần trăm biến động giá cảnh báo trong 24h
+    pub volatility_warning_threshold: f64,
+
+    /// Phần trăm tăng volume đáng chú ý trong 24h
+    pub volume_surge_threshold: f64,
+
+    // ===== MEV Protection Constants =====
+    /// Ngưỡng rủi ro MEV (thang điểm 0-1)
+    pub mev_risk_threshold: f64,
+
+    /// Hệ số tăng gas để chống front-running
+    pub frontrun_gas_boost: f64,
+}
+
+impl Default for ConfigurableConstants {
+    fn default() -> Self {
+        Self {
+            // Quick Trade Strategy
+            quick_trade_min_bnb: 0.1,
+            quick_trade_target_profit: 5.0,
+            quick_trade_max_hold_time: 300,
+
+            // Smart Trade Strategy
+            smart_trade_min_hold_time: 1200,
+            smart_trade_max_hold_time: 1800,
+            smart_trade_tsl_percent: 2.0,
+
+            // General Trading
+            stop_loss_percent: 5.0,
+            max_trade_amount_bnb: 0.5,
+            price_check_interval_ms: 1000,
+
+            // Token Analysis
+            max_safe_buy_tax: 10.0,
+            max_safe_sell_tax: 10.0,
+            dangerous_tax_diff: 5.0,
+            min_pool_lock_time: 30 * 24 * 60 * 60, // 30 days in seconds
+            min_liquidity_threshold: 5000.0,
+            liquidity_drop_alert: 30.0,
+
+            // Monitoring
+            contract_monitor_interval_ms: 30000,
+            tax_check_interval_ms: 60000,
+            whale_threshold_percent: 3.0,
+
+            // Security
+            min_safe_liquidity_lock_days: 30,
+            max_safe_ownership_percentage: 15.0,
+            max_transfer_delay_seconds: 60,
+
+            // Market Analysis
+            volatility_warning_threshold: 20.0,
+            volume_surge_threshold: 300.0,
+
+            // MEV Protection
+            mev_risk_threshold: 0.7,
+            frontrun_gas_boost: 1.1,
+        }
+    }
+}
+
+/// Đối tượng global cho constants có thể điều chỉnh
+lazy_static::lazy_static! {
+    pub static ref CONSTANTS: Arc<RwLock<ConfigurableConstants>> = Arc::new(RwLock::new(ConfigurableConstants::default()));
+}
+
+/// Cập nhật constants từ cấu hình
+pub async fn update_constants(config: &ConfigurableConstants) {
+    let mut constants = CONSTANTS.write().await;
+    *constants = config.clone();
+}
+
+/// Trả về bản sao của constants hiện tại
+pub async fn get_current_constants() -> ConfigurableConstants {
+    CONSTANTS.read().await.clone()
+}
+
+// ===== Các constants cũ để duy trì tương thích ngược =====
+// Các giá trị này sẽ được thay thế dần bằng CONSTANTS
+
 /// Ngưỡng giao dịch tối thiểu (BNB) để kích hoạt quick trade
 pub const QUICK_TRADE_MIN_BNB: f64 = 0.1;
 

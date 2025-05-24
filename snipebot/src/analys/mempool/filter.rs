@@ -1,202 +1,158 @@
+//! Filtering functions for mempool transactions
+//!
+//! This module provides functions to filter and select transactions from the mempool
+//! based on various criteria such as transaction type, value, gas price, etc.
+
 use std::collections::HashMap;
+use super::types::*;
 
-use crate::analys::mempool::types::{
-    MempoolTransaction, TransactionType, TransactionPriority,
-    TransactionFilterOptions, TransactionSortCriteria
-};
-
-/// Lọc giao dịch mempool theo các tiêu chí
+/// Get filtered transactions based on provided filter options
 ///
-/// # Parameters
-/// - `transactions`: Danh sách giao dịch cần lọc
-/// - `filter_options`: Các tùy chọn lọc
-/// - `limit`: Số lượng tối đa kết quả trả về
+/// # Arguments
+/// * `pending_txs` - Map of pending transactions
+/// * `filter_options` - Filter criteria
+/// * `limit` - Maximum number of transactions to return
 ///
 /// # Returns
-/// - `Vec<MempoolTransaction>`: Danh sách giao dịch sau khi lọc
+/// * `Vec<MempoolTransaction>` - Filtered transactions
 pub fn get_filtered_transactions(
-    transactions: &HashMap<String, MempoolTransaction>,
-    filter_options: &TransactionFilterOptions,
-    limit: usize,
+    pending_txs: &HashMap<String, MempoolTransaction>,
+    filter_options: TransactionFilterOptions,
+    limit: usize
 ) -> Vec<MempoolTransaction> {
-    let mut result: Vec<MempoolTransaction> = Vec::new();
+    // Start with all transactions
+    let mut filtered: Vec<MempoolTransaction> = pending_txs.values().cloned().collect();
     
-    // Áp dụng các bộ lọc
-    for (_, tx) in transactions {
-        // Kiểm tra điều kiện lọc
-        if !passes_filter(tx, filter_options) {
-            continue;
+    // Apply filter by transaction type
+    if let Some(types) = &filter_options.transaction_types {
+        if !types.is_empty() {
+            filtered.retain(|tx| types.contains(&tx.transaction_type));
         }
-        
-        // Thêm vào kết quả
-        result.push(tx.clone());
     }
     
-    // Sắp xếp kết quả theo tiêu chí
+    // Apply filter by priority
+    if let Some(priorities) = &filter_options.priorities {
+        if !priorities.is_empty() {
+            filtered.retain(|tx| priorities.contains(&tx.priority));
+        }
+    }
+    
+    // Apply value filters
+    if let Some(min_value) = filter_options.min_value {
+        filtered.retain(|tx| tx.value >= min_value);
+    }
+    
+    if let Some(max_value) = filter_options.max_value {
+        filtered.retain(|tx| tx.value <= max_value);
+    }
+    
+    // Apply gas price filters
+    if let Some(min_gas) = filter_options.min_gas_price {
+        filtered.retain(|tx| tx.gas_price >= min_gas);
+    }
+    
+    if let Some(max_gas) = filter_options.max_gas_price {
+        filtered.retain(|tx| tx.gas_price <= max_gas);
+    }
+    
+    // Apply address filters
+    if let Some(from_addresses) = &filter_options.from_addresses {
+        if !from_addresses.is_empty() {
+            filtered.retain(|tx| from_addresses.contains(&tx.from_address));
+        }
+    }
+    
+    if let Some(to_addresses) = &filter_options.to_addresses {
+        if !to_addresses.is_empty() {
+            filtered.retain(|tx| {
+                if let Some(to) = &tx.to_address {
+                    to_addresses.contains(to)
+                } else {
+                    false
+                }
+            });
+        }
+    }
+    
+    // Apply function signature filter
+    if let Some(signatures) = &filter_options.function_signatures {
+        if !signatures.is_empty() {
+            filtered.retain(|tx| {
+                if let Some(sig) = &tx.function_signature {
+                    signatures.contains(sig)
+                } else {
+                    false
+                }
+            });
+        }
+    }
+    
+    // Apply time range filters
+    if let Some(start_time) = filter_options.start_time {
+        filtered.retain(|tx| tx.detected_at >= start_time);
+    }
+    
+    if let Some(end_time) = filter_options.end_time {
+        filtered.retain(|tx| tx.detected_at <= end_time);
+    }
+    
+    // Apply input data filter
+    if let Some(has_input) = filter_options.has_input_data {
+        filtered.retain(|tx| {
+            let has_data = tx.input_data.len() > 2; // More than just "0x"
+            has_input == has_data
+        });
+    }
+    
+    // Sort results if specified
     if let Some(sort_by) = &filter_options.sort_by {
-        let ascending = filter_options.sort_ascending.unwrap_or(false);
-        sort_transactions(&mut result, sort_by, ascending);
-    }
-    
-    // Giới hạn số lượng kết quả
-    if result.len() > limit {
-        result.truncate(limit);
-    }
-    
-    result
-}
-
-/// Kiểm tra xem giao dịch có thỏa mãn bộ lọc không
-///
-/// # Parameters
-/// - `tx`: Giao dịch cần kiểm tra
-/// - `filter`: Bộ lọc cần áp dụng
-///
-/// # Returns
-/// - `bool`: True nếu giao dịch thỏa mãn bộ lọc
-fn passes_filter(tx: &MempoolTransaction, filter: &TransactionFilterOptions) -> bool {
-    // Lọc theo loại giao dịch
-    if let Some(types) = &filter.transaction_types {
-        if !types.contains(&tx.transaction_type) {
-            return false;
+        let ascending = filter_options.sort_ascending.unwrap_or(true);
+        
+        match sort_by {
+            TransactionSortCriteria::DetectedTime => {
+                if ascending {
+                    filtered.sort_by_key(|tx| tx.detected_at);
+                } else {
+                    filtered.sort_by_key(|tx| std::cmp::Reverse(tx.detected_at));
+                }
+            },
+            TransactionSortCriteria::Value => {
+                if ascending {
+                    filtered.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+                } else {
+                    filtered.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
+                }
+            },
+            TransactionSortCriteria::GasPrice => {
+                if ascending {
+                    filtered.sort_by(|a, b| a.gas_price.partial_cmp(&b.gas_price).unwrap_or(std::cmp::Ordering::Equal));
+                } else {
+                    filtered.sort_by(|a, b| b.gas_price.partial_cmp(&a.gas_price).unwrap_or(std::cmp::Ordering::Equal));
+                }
+            },
+            TransactionSortCriteria::Nonce => {
+                if ascending {
+                    filtered.sort_by_key(|tx| tx.nonce);
+                } else {
+                    filtered.sort_by_key(|tx| std::cmp::Reverse(tx.nonce));
+                }
+            },
+            TransactionSortCriteria::Priority => {
+                if ascending {
+                    filtered.sort_by_key(|tx| tx.priority.clone());
+                } else {
+                    filtered.sort_by_key(|tx| std::cmp::Reverse(tx.priority.clone()));
+                }
+            },
         }
     }
     
-    // Lọc theo mức độ ưu tiên
-    if let Some(priorities) = &filter.priorities {
-        if !priorities.contains(&tx.priority) {
-            return false;
-        }
+    // Apply limit
+    if filtered.len() > limit {
+        filtered.truncate(limit);
     }
     
-    // Lọc theo giá trị giao dịch
-    if let Some(min_value) = filter.min_value {
-        if tx.value < min_value {
-            return false;
-        }
-    }
-    
-    if let Some(max_value) = filter.max_value {
-        if tx.value > max_value {
-            return false;
-        }
-    }
-    
-    // Lọc theo gas price
-    if let Some(min_gas) = filter.min_gas_price {
-        if tx.gas_price < min_gas {
-            return false;
-        }
-    }
-    
-    if let Some(max_gas) = filter.max_gas_price {
-        if tx.gas_price > max_gas {
-            return false;
-        }
-    }
-    
-    // Lọc theo địa chỉ gửi
-    if let Some(from_addresses) = &filter.from_addresses {
-        if !from_addresses.iter().any(|addr| addr.to_lowercase() == tx.from_address.to_lowercase()) {
-            return false;
-        }
-    }
-    
-    // Lọc theo địa chỉ nhận
-    if let Some(to_addresses) = &filter.to_addresses {
-        if let Some(to) = &tx.to_address {
-            if !to_addresses.iter().any(|addr| addr.to_lowercase() == to.to_lowercase()) {
-                return false;
-            }
-        } else {
-            return false; // Không có địa chỉ nhận
-        }
-    }
-    
-    // Lọc theo function signature
-    if let Some(signatures) = &filter.function_signatures {
-        if let Some(sig) = &tx.function_signature {
-            if !signatures.iter().any(|s| s.to_lowercase() == sig.to_lowercase()) {
-                return false;
-            }
-        } else {
-            return false; // Không có function signature
-        }
-    }
-    
-    // Lọc theo thời gian
-    if let Some(start_time) = filter.start_time {
-        if tx.detected_at < start_time {
-            return false;
-        }
-    }
-    
-    if let Some(end_time) = filter.end_time {
-        if tx.detected_at > end_time {
-            return false;
-        }
-    }
-    
-    // Lọc theo input data
-    if let Some(has_input) = filter.has_input_data {
-        let has_actual_input = tx.input_data.len() > 2; // Dài hơn "0x"
-        if has_input != has_actual_input {
-            return false;
-        }
-    }
-    
-    // Thỏa mãn tất cả điều kiện
-    true
-}
-
-/// Sắp xếp danh sách giao dịch theo tiêu chí
-///
-/// # Parameters
-/// - `transactions`: Danh sách giao dịch cần sắp xếp
-/// - `criteria`: Tiêu chí sắp xếp
-/// - `ascending`: Sắp xếp tăng dần hay giảm dần
-fn sort_transactions(
-    transactions: &mut Vec<MempoolTransaction>,
-    criteria: &TransactionSortCriteria,
-    ascending: bool
-) {
-    match criteria {
-        TransactionSortCriteria::DetectedTime => {
-            if ascending {
-                transactions.sort_by(|a, b| a.detected_at.cmp(&b.detected_at));
-            } else {
-                transactions.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
-            }
-        },
-        TransactionSortCriteria::Value => {
-            if ascending {
-                transactions.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                transactions.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
-            }
-        },
-        TransactionSortCriteria::GasPrice => {
-            if ascending {
-                transactions.sort_by(|a, b| a.gas_price.partial_cmp(&b.gas_price).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                transactions.sort_by(|a, b| b.gas_price.partial_cmp(&a.gas_price).unwrap_or(std::cmp::Ordering::Equal));
-            }
-        },
-        TransactionSortCriteria::Nonce => {
-            if ascending {
-                transactions.sort_by(|a, b| a.nonce.cmp(&b.nonce));
-            } else {
-                transactions.sort_by(|a, b| b.nonce.cmp(&a.nonce));
-            }
-        },
-        TransactionSortCriteria::Priority => {
-            if ascending {
-                transactions.sort_by(|a, b| a.priority.cmp(&b.priority));
-            } else {
-                transactions.sort_by(|a, b| b.priority.cmp(&a.priority));
-            }
-        },
-    }
+    filtered
 }
 
 /// Kiểm tra xem một giao dịch có liên quan đến token cụ thể không
