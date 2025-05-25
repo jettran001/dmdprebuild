@@ -19,33 +19,34 @@
 //! - Phân tích rủi ro dựa trên nhiều nguồn dữ liệu
 
 // Public sub-modules
+pub mod executor;
 pub mod types;
 pub mod constants;
-pub mod executor;
 pub mod token_analysis;
 pub mod trade_strategy;
-pub mod alert;
-pub mod optimization;
 pub mod security;
-pub mod utils;
-pub mod analys_client;
-pub mod optimizer;
+pub mod optimization;
 pub mod anti_mev;
+pub mod analys_client;
 
-// Re-exports for backward compatibility and ease of use
-pub use types::{
-    TokenIssue,
-    TradeStrategy,
-    TradeStatus,
-    TradeResult,
-    TradeTracker,
-    SmartTradeConfig,
-    TradeParams,
-    TokenSafety,
+// Re-exports
+pub use self::executor::SmartTradeExecutor;
+pub use self::types::{
+    TradeResult, TradeStatus, TradeStrategy, TradeTracker, 
+    SmartTradeConfig, TokenSafetyCheck, SafetyCheckResult, 
+    PriceData, StrategyParams
 };
-
-pub use executor::SmartTradeExecutor;
-pub use analys_client::SmartTradeAnalysisClient;
+pub use self::token_analysis::TokenAnalysis;
+pub use self::trade_strategy::TradeStrategyManager;
+pub use self::optimization::{
+    TradeOptimizer, GasOptimizationConfig, PoolInfo,
+    BatchTradeResult, BatchTradeDetail, optimize_trade_order
+};
+pub use self::anti_mev::{
+    AntiMevProtection, AntiMevConfig, MevProtectionResult,
+    DetectedMevPattern, MevType, ProtectionMeasure
+};
+pub use self::analys_client::SmartTradeAnalysisClient;
 
 /// Tạo mới SmartTradeExecutor với cấu hình mặc định
 ///

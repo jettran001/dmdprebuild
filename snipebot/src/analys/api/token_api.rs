@@ -1,275 +1,164 @@
-/// Token Analysis Provider Implementation
+/// Token analysis API implementation
 ///
-/// This module implements the TokenAnalysisProvider trait to provide
-/// standardized access to token analysis functionality.
+/// Module cung cấp API phân tích token sử dụng từ TokenAnalysisProvider
+/// Module này đã được cải tiến để sử dụng các hàm chung từ common/analysis.rs
+/// thay vì định nghĩa lại logic
 
+// External imports
 use std::sync::Arc;
-use std::collections::HashMap;
+use anyhow::{Result, Context, anyhow};
 use async_trait::async_trait;
-use anyhow::{Result, anyhow};
-use tokio::sync::RwLock;
-use uuid::Uuid;
+use tracing::{debug, error, info, warn};
 
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::tradelogic::traits::TokenAnalysisProvider;
-use crate::analys::token_status::{
-    TokenSafety, ContractInfo, is_ownership_renounced, 
-    detect_dynamic_tax, detect_hidden_fees, has_blacklist_or_whitelist
-};
-use crate::tradelogic::common::types::{
-    TokenIssue, SecurityCheckResult, SecurityIssue, SecurityIssueSeverity
+// Internal imports
+use crate::analys::token_status::{TokenStatusAnalyzer, TokenStatus, TokenSafety};
+use crate::tradelogic::common::types::{SecurityCheckResult, TokenIssue};
+use crate::tradelogic::common::analysis::{
+    analyze_token_security,
+    convert_token_safety_to_security_check,
+    detect_token_issues
 };
 
-/// Implementation of TokenAnalysisProvider trait
+/// Provider token analysis API
+#[async_trait]
+pub trait TokenAnalysisProvider: Send + Sync + 'static {
+    /// Analyze token for safety issues
+    async fn analyze_token(&self, chain_id: u32, token_address: &str) -> Result<TokenSafety>;
+    
+    /// Get detailed contract information
+    async fn get_contract_details(&self, chain_id: u32, token_address: &str) -> Result<serde_json::Value>;
+    
+    /// Get token tax information
+    async fn get_token_tax_info(&self, chain_id: u32, token_address: &str) -> Result<TokenTaxInfo>;
+    
+    /// Comprehensive token security check
+    async fn check_token_security(&self, chain_id: u32, token_address: &str) -> Result<SecurityCheckResult>;
+}
+
+/// Token Analysis Provider Implementation
 pub struct TokenAnalysisProviderImpl {
-    /// Chain adapters for blockchain access
-    chain_adapters: HashMap<u32, Arc<EvmAdapter>>,
-    /// Cache of token analysis results
-    token_cache: RwLock<HashMap<(u32, String), TokenSafety>>,
-    /// Active liquidity monitoring callbacks
-    liquidity_monitors: RwLock<HashMap<String, (u32, String, Arc<dyn Fn(f64, bool) -> Result<()> + Send + Sync + 'static>)>>,
+    analyzer: Arc<TokenStatusAnalyzer>,
+    // Có thể thêm các dependencies khác như cache, database, blockchain adapter, etc.
+}
+
+/// Token tax information structure
+#[derive(Debug, Clone)]
+pub struct TokenTaxInfo {
+    pub token_address: String,
+    pub buy_tax: Option<f64>,
+    pub sell_tax: Option<f64>,
+    pub is_dynamic_tax: Option<bool>,
+    pub last_updated: Option<u64>,
 }
 
 impl TokenAnalysisProviderImpl {
-    /// Create a new token analysis provider
-    pub fn new(chain_adapters: HashMap<u32, Arc<EvmAdapter>>) -> Self {
+    /// Create new TokenAnalysisProvider instance
+    pub fn new() -> Self {
         Self {
-            chain_adapters,
-            token_cache: RwLock::new(HashMap::new()),
-            liquidity_monitors: RwLock::new(HashMap::new()),
+            analyzer: Arc::new(TokenStatusAnalyzer::new()),
         }
     }
     
-    /// Get chain adapter for a specific chain
-    fn get_chain_adapter(&self, chain_id: u32) -> Result<Arc<EvmAdapter>> {
-        self.chain_adapters.get(&chain_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("No chain adapter found for chain ID {}", chain_id))
-    }
-    
-    /// Get contract info for a token
-    async fn get_contract_info(&self, chain_id: u32, token_address: &str) -> Result<ContractInfo> {
-        let adapter = self.get_chain_adapter(chain_id)?;
+    /// Get adapter for chain
+    fn get_adapter_for_chain(&self, chain_id: u32) -> Result<Arc<crate::chain_adapters::evm_adapter::EvmAdapter>> {
+        // Trong thực tế, sẽ lấy adapter từ một registry hoặc từ constructor injection
+        let adapter_registry = crate::chain_adapters::get_adapter_registry();
+        let adapter = adapter_registry.get_evm_adapter(chain_id)
+            .ok_or_else(|| anyhow!("Không tìm thấy adapter cho chain ID {}", chain_id))?;
         
-        // For now, create a minimal ContractInfo
-        // In a real implementation, this would call adapter methods to get detailed contract info
-        let contract_info = ContractInfo {
-            address: token_address.to_string(),
-            is_verified: true, // Simplified for now
-            owner_address: Some("0x1234567890123456789012345678901234567890".to_string()), // Placeholder
-            creation_block: 12345678, // Placeholder
-            creation_timestamp: 1672527600, // Placeholder: 2023-01-01
-            code_hash: "0xabcdef123456".to_string(), // Placeholder
-            bytecode: vec![1, 2, 3, 4], // Placeholder
-            is_proxy: false, // Simplified for now
-            implementation_address: None,
-            has_blacklist: false, // Simplified for now
-            has_whitelist: false, // Simplified for now
-            has_mint_function: false, // Simplified for now
-            has_burn_function: true, // Simplified for now
-            sources: None, // Simplified for now
-        };
-        
-        Ok(contract_info)
-    }
-    
-    /// Check token cache or fetch and analyze
-    async fn get_or_analyze_token(&self, chain_id: u32, token_address: &str) -> Result<TokenSafety> {
-        // Check cache first
-        let cache = self.token_cache.read().await;
-        if let Some(safety) = cache.get(&(chain_id, token_address.to_string())) {
-            return Ok(safety.clone());
-        }
-        drop(cache); // Release read lock
-        
-        // Not in cache, analyze token
-        let adapter = self.get_chain_adapter(chain_id)?;
-        let contract_info = self.get_contract_info(chain_id, token_address).await?;
-        
-        // Perform analysis
-        let ownership_renounced = is_ownership_renounced(&contract_info);
-        let has_dynamic_tax = detect_dynamic_tax(&contract_info);
-        let has_hidden_fees = detect_hidden_fees(&contract_info);
-        let has_restriction = has_blacklist_or_whitelist(&contract_info);
-        
-        // Simplified token safety analysis
-        let safety = TokenSafety {
-            token_address: token_address.to_string(),
-            is_safe: ownership_renounced && !has_dynamic_tax && !has_hidden_fees && !has_restriction,
-            risk_score: if ownership_renounced { 20 } else { 80 },
-            issues: vec![],
-            recommendation: "Proceed with caution".to_string(),
-            last_updated: chrono::Utc::now().timestamp() as u64,
-        };
-        
-        // Update cache
-        let mut cache = self.token_cache.write().await;
-        cache.insert((chain_id, token_address.to_string()), safety.clone());
-        
-        Ok(safety)
+        Ok(adapter)
     }
 }
 
 #[async_trait]
 impl TokenAnalysisProvider for TokenAnalysisProviderImpl {
-    /// Phân tích an toàn token
-    async fn analyze_token_safety(&self, chain_id: u32, token_address: &str) -> Result<TokenSafety> {
-        self.get_or_analyze_token(chain_id, token_address).await
+    async fn analyze_token(&self, chain_id: u32, token_address: &str) -> Result<TokenSafety> {
+        debug!("Analyzing token {} on chain {}", token_address, chain_id);
+        
+        // Gọi phân tích từ analyzer
+        self.analyzer.analyze_token(token_address, chain_id).await
+            .context(format!("Failed to analyze token {} on chain {}", token_address, chain_id))
     }
     
-    /// Kiểm tra các vấn đề bảo mật của token
-    async fn check_token_issues(&self, chain_id: u32, token_address: &str) -> Result<Vec<TokenIssue>> {
-        let adapter = self.get_chain_adapter(chain_id)?;
-        let contract_info = self.get_contract_info(chain_id, token_address).await?;
+    async fn get_contract_details(&self, chain_id: u32, token_address: &str) -> Result<serde_json::Value> {
+        debug!("Getting contract details for token {} on chain {}", token_address, chain_id);
         
-        let mut issues = Vec::new();
+        // Lấy adapter cho chain
+        let adapter = self.get_adapter_for_chain(chain_id)?;
         
-        // Check various issues
-        if !is_ownership_renounced(&contract_info) {
-            issues.push(TokenIssue::OwnershipNotRenounced);
-        }
+        // Gọi API blockchain
+        let contract_info = adapter.get_contract_info(token_address).await
+            .context(format!("Failed to get contract info for token {} on chain {}", token_address, chain_id))?;
         
-        if detect_dynamic_tax(&contract_info) {
-            issues.push(TokenIssue::DynamicTax);
-        }
+        // Convert to JSON value
+        let result = serde_json::to_value(contract_info)
+            .context("Failed to serialize contract info to JSON")?;
         
-        if detect_hidden_fees(&contract_info) {
-            issues.push(TokenIssue::HiddenFees);
-        }
-        
-        if has_blacklist_or_whitelist(&contract_info) {
-            if contract_info.has_blacklist {
-                issues.push(TokenIssue::BlacklistFunction);
-            }
-            
-            if contract_info.has_whitelist {
-                issues.push(TokenIssue::WhitelistFunction);
-            }
-        }
-        
-        if contract_info.is_proxy {
-            issues.push(TokenIssue::ProxyContract);
-        }
-        
-        if contract_info.has_mint_function {
-            issues.push(TokenIssue::UnlimitedMintAuthority);
-        }
-        
-        if !contract_info.is_verified {
-            issues.push(TokenIssue::UnverifiedContract);
-        }
-        
-        // More checks can be added as needed
-        
-        Ok(issues)
+        Ok(result)
     }
     
-    /// Đánh giá xem token có an toàn để giao dịch không
-    async fn is_safe_to_trade(&self, chain_id: u32, token_address: &str, max_risk_score: u8) -> Result<bool> {
-        let safety = self.analyze_token_safety(chain_id, token_address).await?;
+    async fn get_token_tax_info(&self, chain_id: u32, token_address: &str) -> Result<TokenTaxInfo> {
+        debug!("Getting tax info for token {} on chain {}", token_address, chain_id);
         
-        // Check if token is safe and risk score is within acceptable limits
-        Ok(safety.is_safe && safety.risk_score <= max_risk_score as u64)
-    }
-    
-    /// Phân tích chi tiết token với kết quả đầy đủ
-    async fn get_detailed_token_analysis(&self, chain_id: u32, token_address: &str) -> Result<SecurityCheckResult> {
-        let safety = self.analyze_token_safety(chain_id, token_address).await?;
-        let issues = self.check_token_issues(chain_id, token_address).await?;
+        // Lấy adapter cho chain
+        let adapter = self.get_adapter_for_chain(chain_id)?;
         
-        // Convert token issues to security issues
-        let security_issues = issues.iter().map(|issue| {
-            let (name, description, severity) = match issue {
-                TokenIssue::Honeypot => (
-                    "Honeypot",
-                    "Token cannot be sold",
-                    SecurityIssueSeverity::Critical
-                ),
-                TokenIssue::HighTax => (
-                    "High Tax",
-                    "Token has abnormally high tax (>10%)",
-                    SecurityIssueSeverity::High
-                ),
-                TokenIssue::DynamicTax => (
-                    "Dynamic Tax",
-                    "Tax can be changed by owner",
-                    SecurityIssueSeverity::High
-                ),
-                TokenIssue::LowLiquidity => (
-                    "Low Liquidity",
-                    "Token has low liquidity (<$5000)",
-                    SecurityIssueSeverity::Medium
-                ),
-                // Add more mappings for other issues
-                _ => (
-                    "Unknown Issue",
-                    "Unspecified security issue",
-                    SecurityIssueSeverity::Medium
-                ),
-            };
-            
-            SecurityIssue {
-                code: format!("ISSUE_{:?}", issue),
-                name: name.to_string(),
-                description: description.to_string(),
-                severity,
-            }
-        }).collect();
+        // Gọi phân tích từ analyzer
+        let (buy_tax, sell_tax, is_dynamic) = self.analyzer.get_token_tax(token_address, chain_id).await
+            .context(format!("Failed to get tax info for token {} on chain {}", token_address, chain_id))?;
         
-        // Create recommendations based on issues
-        let recommendations = if security_issues.is_empty() {
-            vec!["Token appears safe for trading".to_string()]
-        } else {
-            vec![
-                "Set a reasonable slippage to protect against price manipulation".to_string(),
-                "Consider using a smaller position size for this token".to_string(),
-                "Monitor the trade closely to detect any issues".to_string(),
-            ]
-        };
+        // Log kết quả
+        debug!(
+            "Tax info for token {} on chain {}: buy_tax={}, sell_tax={}, dynamic={}",
+            token_address, chain_id, buy_tax, sell_tax, is_dynamic
+        );
         
-        // Create warnings for non-critical issues
-        let warnings = security_issues.iter()
-            .filter(|issue| issue.severity != SecurityIssueSeverity::Critical)
-            .map(|issue| format!("Warning: {}", issue.description))
-            .collect();
-        
-        Ok(SecurityCheckResult {
-            passed: safety.is_safe,
-            issues: security_issues,
-            warnings,
-            recommendations,
-            risk_score: safety.risk_score as u8,
+        // Trả về kết quả
+        Ok(TokenTaxInfo {
+            token_address: token_address.to_string(),
+            buy_tax: Some(buy_tax),
+            sell_tax: Some(sell_tax),
+            is_dynamic_tax: Some(is_dynamic),
+            last_updated: Some(chrono::Utc::now().timestamp() as u64),
         })
     }
     
-    /// Theo dõi thay đổi thanh khoản của token
-    async fn monitor_token_liquidity(
-        &self, 
-        chain_id: u32, 
-        token_address: &str, 
-        callback: Arc<dyn Fn(f64, bool) -> Result<()> + Send + Sync + 'static>
-    ) -> Result<String> {
-        // Generate a monitoring ID
-        let monitoring_id = Uuid::new_v4().to_string();
+    async fn check_token_security(&self, chain_id: u32, token_address: &str) -> Result<SecurityCheckResult> {
+        debug!("Performing security check for token {} on chain {}", token_address, chain_id);
         
-        // Store the monitoring subscription
-        let mut monitors = self.liquidity_monitors.write().await;
-        monitors.insert(monitoring_id.clone(), (chain_id, token_address.to_string(), callback));
+        // Lấy adapter cho chain
+        let adapter = self.get_adapter_for_chain(chain_id)?;
         
-        // In a real implementation, a background task would be started to monitor liquidity
-        // and call the callback when significant changes are detected
+        // Sử dụng hàm analyze_token_security từ common/analysis.rs
+        let base_result = analyze_token_security(token_address, &adapter).await?;
         
-        Ok(monitoring_id)
-    }
-    
-    /// Hủy theo dõi token
-    async fn stop_monitoring(&self, monitoring_id: &str) -> Result<()> {
-        let mut monitors = self.liquidity_monitors.write().await;
-        
-        if monitors.remove(monitoring_id).is_none() {
-            return Err(anyhow!("Monitoring subscription not found"));
+        // Bổ sung phân tích từ analyzer chuyên dụng của TokenAnalysisProvider
+        if let Ok(safety) = self.analyze_token(chain_id, token_address).await {
+            // Convert và kết hợp với kết quả từ analyze_token_security
+            let analyzer_result = convert_token_safety_to_security_check(&safety, token_address);
+            
+            // Kết hợp các vấn đề từ cả hai nguồn
+            let mut combined_issues = base_result.issues.clone();
+            for issue in analyzer_result.issues {
+                if !combined_issues.contains(&issue) {
+                    combined_issues.push(issue);
+                }
+            }
+            
+            // Sử dụng risk score cao hơn
+            let risk_score = base_result.risk_score.max(analyzer_result.risk_score);
+            
+            // Tạo kết quả kết hợp cuối cùng
+            return Ok(SecurityCheckResult {
+                token_address: token_address.to_string(),
+                issues: combined_issues,
+                risk_score,
+                safe_to_trade: risk_score < 70,
+                extra_info: base_result.extra_info,
+            });
         }
         
-        Ok(())
+        // Nếu không lấy được kết quả từ analyzer, trả về kết quả cơ bản
+        Ok(base_result)
     }
 } 

@@ -51,6 +51,9 @@ num_cpus = "1.15.0"
 dotenv = "0.15.0"
 clap = { version = "4.2.4", features = ["derive"] }
 
+# Internal dependencies
+common = { path = "../common" }
+
 [dev-dependencies]
 mockall = "0.11.4"
 tokio-test = "0.4.2"

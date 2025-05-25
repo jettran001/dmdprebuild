@@ -29,67 +29,7 @@ use crate::analys::token_status::{
 };
 
 // Import from common module
-use crate::tradelogic::common::types::{TokenIssue, TraderBehaviorAnalysis, GasBehavior};
-
-/// Các vấn đề có thể gặp phải với token, dùng cho phân tích rủi ro
-#[derive(Debug, Clone, PartialEq)]
-pub enum TokenIssue {
-    // === Vấn đề cơ bản ===
-    /// Token không thể bán (honeypot)
-    Honeypot,
-    /// Tax cao bất thường (>10%)
-    HighTax,
-    /// Tax thay đổi theo thời gian
-    DynamicTax,
-    /// Thanh khoản thấp (<$5000)
-    LowLiquidity,
-    /// Contract chưa được xác minh trên chain explorer
-    UnverifiedContract,
-    /// Owner có toàn quyền kiểm soát token
-    OwnerWithFullControl,
-    
-    // === Vấn đề nâng cao ===
-    /// Quyền sở hữu chưa được từ bỏ
-    OwnershipNotRenounced,
-    /// Có backdoor để lấy lại quyền sở hữu
-    OwnershipRenounceBackdoor,
-    /// Contract là proxy có thể thay đổi logic
-    ProxyContract,
-    /// Có chức năng blacklist
-    BlacklistFunction,
-    /// Có chức năng whitelist
-    WhitelistFunction,
-    /// Có thời gian chờ giữa các giao dịch
-    TradingCooldown,
-    /// Giới hạn số lượng tối đa cho mỗi giao dịch
-    MaxTransactionLimit,
-    /// Giới hạn số lượng tối đa mỗi ví có thể giữ
-    MaxWalletLimit,
-    /// Khả năng mint token vô hạn
-    UnlimitedMintAuthority,
-    /// Phí ẩn không được công bố
-    HiddenFees,
-    /// Sự kiện thanh khoản bất thường
-    AbnormalLiquidityEvents,
-    /// Gọi đến contract bên ngoài
-    ExternalCalls,
-    /// Sử dụng delegatecall (nguy hiểm)
-    DelegateCall,
-    /// Mã nguồn không khớp với bytecode
-    InconsistentSourceCode,
-    /// Tương tác với contract bên ngoài độc hại
-    MaliciousExternalContract,
-    /// Logic có thể nâng cấp sau khi launch
-    UpgradeableLogic,
-    /// Giả mạo việc từ bỏ quyền sở hữu
-    FakeRenounce,
-    /// Hạn chế chuyển token
-    TransferRestriction,
-    /// Contract có thể tự hủy
-    ContractSelfDestruct,
-    /// Thực thi mã tùy ý
-    ArbitraryCodeExecution,
-}
+use crate::tradelogic::common::types::{TokenIssue, TraderBehaviorAnalysis, GasBehavior, TradeStatus};
 
 /// Loại chiến lược giao dịch
 ///
@@ -110,27 +50,6 @@ pub enum TradeStrategy {
     /// lâu hơn và chiến lược thoát vị thế tinh vi hơn. Thích hợp cho các token
     /// có tiềm năng tăng trưởng dài hơn.
     Smart,
-}
-
-/// Trạng thái của một giao dịch trong hệ thống
-///
-/// Theo dõi vòng đời của một giao dịch từ khi bắt đầu đến khi kết thúc.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TradeStatus {
-    /// Đã mở (đã mua vào): Token đã được mua, đang chờ điều kiện bán
-    Open,
-
-    /// Đã đóng (đã bán ra): Giao dịch đã hoàn tất, token đã được bán
-    Closed,
-
-    /// Đã hủy: Giao dịch bị hủy trước khi thực hiện (ví dụ: không đạt yêu cầu an toàn)
-    Canceled,
-
-    /// Đang xử lý: Giao dịch đang được xử lý (ví dụ: đang chờ xác nhận từ blockchain)
-    Pending,
-
-    /// Lỗi: Giao dịch thất bại với lý do cụ thể
-    Error(String),
 }
 
 /// Kết quả của một giao dịch đã hoàn thành

@@ -25,9 +25,12 @@ mod liquidity;
 // Các tiện ích chung
 mod utils;
 
+// Sử dụng TokenIssue từ tradelogic/common/types.rs
+pub use crate::tradelogic::common::types::TokenIssue;
+
 // Re-export các struct và trait quan trọng để giữ nguyên API
 pub use types::{
-    TokenStatus, TokenSafety, TokenIssue, IssueSeverity, TradeRecommendation,
+    TokenStatus, TokenSafety, IssueSeverity, TradeRecommendation,
     ContractInfo, LiquidityEvent, LiquidityEventType, ExternalTokenReport,
     ExternalReportSource, OwnerAnalysis, BytecodeAnalysis, AdvancedTokenAnalysis,
     TokenReport,

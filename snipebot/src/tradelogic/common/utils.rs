@@ -4,14 +4,17 @@
 /// ensuring code reuse and consistent behavior.
 
 use std::collections::HashMap;
-use anyhow::{Result, Context};
+use anyhow::{Result, Context, anyhow};
 use tracing::{debug, error, info, warn};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::sync::Arc;
+use uuid::Uuid;
+use chrono::Utc;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::token_status::{ContractInfo, TokenStatus};
-use super::types::TokenIssue;
+use crate::types::{TradeParams, TradeType};
+use super::types::{TokenIssue, SecurityCheckResult, TradeAction, TradeStatus, ExecutionMethod};
 
 /// Analyzes transactions from mempool to identify patterns
 ///
@@ -302,7 +305,7 @@ pub fn calculate_risk_score(issues: &[TokenIssue]) -> f64 {
 pub fn current_time_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
+        .unwrap_or_default()
         .as_secs()
 }
 
@@ -486,4 +489,325 @@ pub fn detect_price_trend(price_history: &[f64], period: usize) -> (bool, bool, 
     let trend_strength = (uptrend_strength - 0.5).abs() * 2.0; // Convert to 0-1 scale
     
     (is_uptrend, is_downtrend, trend_strength)
+}
+
+/// Generate a unique trade ID
+pub fn generate_trade_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// Validate basic trade parameters
+/// 
+/// This function performs basic validations applicable to all types of trades
+/// 
+/// # Arguments
+/// * `params` - Trade parameters to validate
+/// * `adapter` - EVM adapter for the chain
+/// 
+/// # Returns
+/// * `Result<()>` - Ok if valid, Error with message if invalid
+pub async fn validate_trade_params(params: &TradeParams, adapter: &Arc<EvmAdapter>) -> Result<()> {
+    // Validate amount
+    if params.amount <= 0.0 {
+        return Err(anyhow!("Invalid trade amount: {}", params.amount));
+    }
+    
+    // Validate token address format
+    if params.token_address.is_empty() || !adapter.is_valid_address(&params.token_address) {
+        return Err(anyhow!("Invalid token address: {}", params.token_address));
+    }
+    
+    // Validate trade type
+    match params.trade_type {
+        TradeType::Buy | TradeType::Sell | TradeType::Approve => {
+            // Valid trade types
+        }
+        _ => {
+            return Err(anyhow!("Unsupported trade type: {:?}", params.trade_type));
+        }
+    }
+    
+    Ok(())
+}
+
+/// Simulate a trade execution
+/// 
+/// Simulates a trade to check if it would succeed and get estimated gas/output
+/// 
+/// # Arguments
+/// * `params` - Trade parameters
+/// * `adapter` - EVM adapter for the chain
+/// 
+/// # Returns
+/// * `Result<(f64, f64)>` - (expected_output, estimated_gas) if successful
+pub async fn simulate_trade_execution(params: &TradeParams, adapter: &Arc<EvmAdapter>) -> Result<(f64, f64)> {
+    match params.trade_type {
+        TradeType::Buy => {
+            // Get base token from chain
+            let base_token = params.base_token.clone().unwrap_or_else(|| {
+                match params.chain_id {
+                    1 => "ETH",   // Ethereum
+                    56 => "BNB",  // Binance Smart Chain
+                    137 => "MATIC", // Polygon
+                    43114 => "AVAX", // Avalanche
+                    _ => "ETH"    // Default
+                }.to_string()
+            });
+            
+            // Simulate swap to get expected output tokens and gas
+            let (expected_tokens, estimated_gas) = adapter.simulate_swap_amount_out(
+                &base_token,
+                &params.token_address,
+                params.amount
+            ).await.context("Failed to simulate buy transaction")?;
+            
+            // Return expected output and estimated gas
+            Ok((expected_tokens, estimated_gas))
+        }
+        TradeType::Sell => {
+            // Get base token from chain
+            let base_token = params.base_token.clone().unwrap_or_else(|| {
+                match params.chain_id {
+                    1 => "ETH",   // Ethereum
+                    56 => "BNB",  // Binance Smart Chain
+                    137 => "MATIC", // Polygon
+                    43114 => "AVAX", // Avalanche
+                    _ => "ETH"    // Default
+                }.to_string()
+            });
+            
+            // Simulate swap to get expected output and gas
+            let (expected_base, estimated_gas) = adapter.simulate_swap_amount_out(
+                &params.token_address,
+                &base_token,
+                params.amount
+            ).await.context("Failed to simulate sell transaction")?;
+            
+            // Return expected output and estimated gas
+            Ok((expected_base, estimated_gas))
+        }
+        TradeType::Approve => {
+            // Simulate approve to get estimated gas
+            let estimated_gas = adapter.simulate_approve(
+                &params.token_address,
+                params.amount
+            ).await.context("Failed to simulate approve transaction")?;
+            
+            // Return with 0.0 for expected output (since it's an approval)
+            Ok((0.0, estimated_gas))
+        }
+        _ => {
+            Err(anyhow!("Unsupported trade type for simulation: {:?}", params.trade_type))
+        }
+    }
+}
+
+/// Execute a trade on the blockchain
+/// 
+/// This function executes the actual trade transaction on the blockchain
+/// 
+/// # Arguments
+/// * `params` - Trade parameters
+/// * `adapter` - EVM adapter for the chain
+/// * `wallet_address` - Address of the wallet executing the trade
+/// 
+/// # Returns
+/// * `Result<(String, f64)>` - (tx_hash, gas_used) if successful
+pub async fn execute_blockchain_transaction(
+    params: &TradeParams,
+    adapter: &Arc<EvmAdapter>,
+    wallet_address: &str
+) -> Result<(String, f64)> {
+    match params.trade_type {
+        TradeType::Buy => {
+            // Get base token from chain
+            let base_token = params.base_token.clone().unwrap_or_else(|| {
+                match params.chain_id {
+                    1 => "ETH",   // Ethereum
+                    56 => "BNB",  // Binance Smart Chain
+                    137 => "MATIC", // Polygon
+                    43114 => "AVAX", // Avalanche
+                    _ => "ETH"    // Default
+                }.to_string()
+            });
+            
+            // Calculate slippage if provided
+            let slippage = params.slippage.unwrap_or(1.0); // Default 1%
+            
+            // Execute swap transaction
+            let (tx_hash, gas_used) = adapter.execute_swap(
+                &base_token,
+                &params.token_address,
+                params.amount,
+                wallet_address,
+                slippage
+            ).await.context("Failed to execute buy transaction")?;
+            
+            Ok((tx_hash, gas_used))
+        }
+        TradeType::Sell => {
+            // Get base token from chain
+            let base_token = params.base_token.clone().unwrap_or_else(|| {
+                match params.chain_id {
+                    1 => "ETH",   // Ethereum
+                    56 => "BNB",  // Binance Smart Chain
+                    137 => "MATIC", // Polygon
+                    43114 => "AVAX", // Avalanche
+                    _ => "ETH"    // Default
+                }.to_string()
+            });
+            
+            // Calculate slippage if provided
+            let slippage = params.slippage.unwrap_or(1.0); // Default 1%
+            
+            // Execute swap transaction
+            let (tx_hash, gas_used) = adapter.execute_swap(
+                &params.token_address,
+                &base_token,
+                params.amount,
+                wallet_address,
+                slippage
+            ).await.context("Failed to execute sell transaction")?;
+            
+            Ok((tx_hash, gas_used))
+        }
+        TradeType::Approve => {
+            // Execute approve transaction
+            let (tx_hash, gas_used) = adapter.approve_token(
+                &params.token_address,
+                wallet_address,
+                params.amount
+            ).await.context("Failed to execute approve transaction")?;
+            
+            Ok((tx_hash, gas_used))
+        }
+        _ => {
+            Err(anyhow!("Unsupported trade type for execution: {:?}", params.trade_type))
+        }
+    }
+}
+
+/// Perform security checks on a token
+/// 
+/// Checks token for common security risks like honeypots, rug pulls, etc.
+/// 
+/// # Arguments
+/// * `token_address` - Address of the token to check
+/// * `adapter` - EVM adapter for the chain
+/// 
+/// # Returns
+/// * `Result<SecurityCheckResult>` - Security check result with risk score and issues
+pub async fn perform_token_security_check(
+    token_address: &str,
+    adapter: &Arc<EvmAdapter>
+) -> Result<SecurityCheckResult> {
+    // Get basic token info
+    let token_info = adapter.get_token_info(token_address)
+        .await
+        .context("Failed to get token info")?;
+    
+    // Get contract source/bytecode for analysis
+    let contract_info = adapter.get_contract_info(token_address)
+        .await
+        .context("Failed to get contract info")?;
+    
+    // Detect various security issues
+    let mut issues = Vec::new();
+    let mut risk_score = 0;
+    
+    // Check if it's likely a proxy contract
+    if is_proxy_contract(&contract_info) {
+        issues.push(TokenIssue::ProxyImplementation);
+        risk_score += 15;
+    }
+    
+    // Check for blacklist functionality
+    if has_blacklist_function(&contract_info) {
+        issues.push(TokenIssue::HasBlacklist);
+        risk_score += 10;
+    }
+    
+    // Check for high taxes/fees
+    if let Some(tax_info) = adapter.get_token_tax_info(token_address).await.ok() {
+        if tax_info.buy_tax > 10.0 {
+            issues.push(TokenIssue::HighBuyTax);
+            risk_score += 15;
+        }
+        
+        if tax_info.sell_tax > 10.0 {
+            issues.push(TokenIssue::HighSellTax);
+            risk_score += 20;
+        }
+    }
+    
+    // Check for excessive owner privileges
+    let excessive_privileges = check_owner_privileges(&contract_info);
+    if !excessive_privileges.is_empty() {
+        issues.push(TokenIssue::ExcessiveOwnerPrivileges);
+        risk_score += 25;
+    }
+    
+    // Check token age (new tokens are riskier)
+    if let Some(created_at) = token_info.created_at {
+        let now = current_time_seconds();
+        let age_in_days = (now - created_at) / (24 * 60 * 60);
+        
+        if age_in_days < 1 {
+            issues.push(TokenIssue::NewToken);
+            risk_score += 30;
+        } else if age_in_days < 7 {
+            issues.push(TokenIssue::RecentToken);
+            risk_score += 15;
+        }
+    }
+    
+    // Cap risk score at 100
+    risk_score = risk_score.min(100);
+    
+    // Create final result
+    let result = SecurityCheckResult {
+        token_address: token_address.to_string(),
+        issues,
+        risk_score,
+        safe_to_trade: risk_score < 70, // Threshold for safety
+        // Include any extra information if needed in the future
+        extra_info: HashMap::new(),
+    };
+    
+    Ok(result)
+}
+
+/// Get common information for a token
+/// 
+/// Fetches common token information like name, symbol, decimals etc.
+/// 
+/// # Arguments
+/// * `token_address` - Address of the token
+/// * `adapter` - EVM adapter for the chain
+/// 
+/// # Returns
+/// * `Result<(String, String, u8)>` - (name, symbol, decimals)
+pub async fn get_token_metadata(
+    token_address: &str,
+    adapter: &Arc<EvmAdapter>
+) -> Result<(String, String, u8)> {
+    // Get token name
+    let name = adapter.get_token_name(token_address)
+        .await
+        .context("Failed to get token name")
+        .unwrap_or_else(|_| "Unknown".to_string());
+    
+    // Get token symbol
+    let symbol = adapter.get_token_symbol(token_address)
+        .await
+        .context("Failed to get token symbol")
+        .unwrap_or_else(|_| "???".to_string());
+    
+    // Get token decimals
+    let decimals = adapter.get_token_decimals(token_address)
+        .await
+        .context("Failed to get token decimals")
+        .unwrap_or(18);
+    
+    Ok((name, symbol, decimals))
 } 

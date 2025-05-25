@@ -1308,128 +1308,128 @@ pub fn create_mev_bot(
     ))
 }
 
-/// Thông tin về giao dịch tiềm năng có thể thất bại
+/// Information about a transaction that may potentially fail
 #[derive(Debug, Clone)]
 pub struct PotentialFailingTx {
-    /// Hash của giao dịch
+    /// Transaction hash
     pub tx_hash: String,
     
-    /// Địa chỉ gửi
+    /// From address
     pub from: String,
     
-    /// Địa chỉ nhận
+    /// To address
     pub to: String,
     
-    /// Gas limit đã cấu hình
+    /// Configured gas limit
     pub gas_limit: u64,
     
-    /// Ước tính gas cần thiết
+    /// Estimated gas required
     pub estimated_gas: u64,
     
-    /// Lý do khả năng thất bại
+    /// Reason for potential failure
     pub reason: FailureReason,
     
-    /// Độ tin cậy của dự đoán (0-100)
+    /// Prediction confidence (0-100)
     pub confidence: u8,
 }
 
-/// Lý do giao dịch có thể thất bại
+/// Reasons why a transaction might fail
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailureReason {
-    /// Gas limit không đủ
+    /// Insufficient gas limit
     InsufficientGas,
     
-    /// Gas price quá thấp so với mạng
+    /// Gas price too low compared to network
     GasPriceTooLow,
     
-    /// Số dư không đủ
+    /// Insufficient balance
     InsufficientBalance,
     
-    /// Slippage quá thấp cho token biến động cao
+    /// Slippage too low for high volatility token
     SlippageToLow,
     
-    /// Nonce không hợp lệ
+    /// Invalid nonce
     InvalidNonce,
     
-    /// Lỗi thực thi contract
+    /// Contract execution error
     ContractExecution,
     
-    /// Lý do không xác định
+    /// Unknown reason
     Unknown,
 }
 
-/// Hồ sơ/profile của trader
+/// Trader profile information
 #[derive(Debug, Clone)]
 pub struct TraderProfile {
-    /// Địa chỉ của trader
+    /// Trader's address
     pub address: String,
     
-    /// Tổng số giao dịch
+    /// Total number of trades
     pub trade_count: usize,
     
-    /// Giá trị giao dịch trung bình
+    /// Average trade value
     pub avg_trade_value: f64,
     
-    /// Số giao dịch thành công
+    /// Number of successful trades
     pub successful_trades: usize,
     
-    /// Số giao dịch thất bại
+    /// Number of failed trades
     pub failed_trades: usize,
     
-    /// Thời gian giữ token trung bình (giây)
+    /// Average token hold time (seconds)
     pub avg_hold_time: f64,
     
-    /// Các token ưa thích
+    /// Preferred tokens
     pub preferred_tokens: Vec<String>,
     
-    /// Khẩu vị rủi ro
+    /// Risk appetite
     pub risk_appetite: RiskAppetite,
     
-    /// Mẫu giao dịch
+    /// Trading pattern
     pub trading_pattern: TradingPattern,
     
-    /// Có phải là bot không
+    /// Whether this is a bot
     pub is_bot: bool,
     
-    /// Có phải là arbitrageur không
+    /// Whether this is an arbitrageur
     pub is_arbitrageur: bool,
 }
 
-/// Khẩu vị rủi ro của trader
+/// Trader's risk appetite
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RiskAppetite {
-    /// Rủi ro thấp (ưa thích blue-chip)
+    /// Low risk (prefer blue-chip)
     Low,
     
-    /// Rủi ro trung bình (kết hợp)
+    /// Moderate risk (balanced)
     Moderate,
     
-    /// Chấp nhận rủi ro cao (ưa thích altcoin nhỏ)
+    /// Accept high risk (prefer small altcoin)
     High,
     
-    /// Không xác định được (dữ liệu không đủ)
+    /// Unknown (insufficient data)
     Unknown,
 }
 
-/// Mẫu giao dịch của trader
+/// Trading pattern of a trader
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TradingPattern {
-    /// Scalping (thời gian giữ rất ngắn)
+    /// Scalping (very short holding time)
     Scalping,
     
-    /// Day trading (thời gian giữ <1 ngày)
+    /// Day trading (holding time <1 day)
     DayTrading,
     
-    /// Swing trading (thời gian giữ vài ngày)
+    /// Swing trading (holding time a few days)
     SwingTrading,
     
-    /// Đầu tư dài hạn (thời gian giữ >1 tuần)
+    /// Long-term investing (holding time >1 week)
     LongTermInvesting,
     
-    /// Không có xu hướng rõ rệt
+    /// Neutral (no clear trend)
     Neutral,
     
-    /// Không xác định được
+    /// Unknown
     Unknown,
 } 
 } 

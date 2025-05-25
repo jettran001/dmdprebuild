@@ -11,9 +11,19 @@ use tokio::time::sleep;
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 use futures::future::join_all;
+use anyhow::Result;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::types::{ChainType, TokenPair};
+use crate::chain_adapters::{
+    BridgeProvider,
+    BridgeStatus,
+    Chain,
+    FeeEstimate,
+    BridgeTransaction,
+    MonitorConfig,
+};
+use common::bridge_types::monitoring::monitor_transaction;
 
 use super::constants::*;
 use super::types::*;
@@ -78,48 +88,6 @@ pub struct CrossDomainArbitrage {
     pub risk_score: f64,
 }
 
-/// Cross-domain bridge interface
-#[async_trait]
-pub trait CrossDomainBridge: Send + Sync + 'static {
-    /// Get source chain ID
-    fn source_chain_id(&self) -> u64;
-    
-    /// Get destination chain ID
-    fn destination_chain_id(&self) -> u64;
-    
-    /// Check if token is supported
-    fn is_token_supported(&self, token_address: &str) -> bool;
-    
-    /// Get bridging cost estimate
-    async fn get_bridging_cost_estimate(&self, token_address: &str, amount: f64) -> Result<f64, String>;
-    
-    /// Get bridging time estimate (seconds)
-    async fn get_bridging_time_estimate(&self) -> Result<u64, String>;
-    
-    /// Bridge tokens
-    async fn bridge_tokens(&self, token_address: &str, amount: f64) -> Result<String, String>;
-    
-    /// Check bridge transaction status
-    async fn check_bridge_status(&self, tx_hash: &str) -> Result<BridgeStatus, String>;
-}
-
-/// Bridge transaction status
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeStatus {
-    /// Pending on source chain
-    SourcePending,
-    /// Confirmed on source chain
-    SourceConfirmed,
-    /// In between chains
-    InTransit,
-    /// Pending on destination chain
-    DestinationPending,
-    /// Confirmed on destination
-    Completed,
-    /// Failed
-    Failed(String),
-}
-
 /// Cross-domain MEV manager
 pub struct CrossDomainMevManager {
     /// Configuration
@@ -128,8 +96,8 @@ pub struct CrossDomainMevManager {
     evm_adapters: HashMap<u64, Arc<EvmAdapter>>,
     /// Price data cache
     price_cache: RwLock<HashMap<(String, u64), CrossDomainPriceData>>,
-    /// Bridge implementations
-    bridges: Vec<Arc<dyn CrossDomainBridge>>,
+    /// Bridge implementations - dùng BridgeProvider thay vì CrossDomainBridge
+    bridges: Vec<Arc<dyn BridgeProvider>>,
     /// Running status
     running: RwLock<bool>,
     /// Recent arbitrage opportunities
@@ -154,8 +122,8 @@ impl CrossDomainMevManager {
         self.evm_adapters.insert(chain_id, adapter);
     }
     
-    /// Add a bridge implementation
-    pub fn add_bridge(&mut self, bridge: Arc<dyn CrossDomainBridge>) {
+    /// Add a bridge implementation - sử dụng BridgeProvider thay vì CrossDomainBridge
+    pub fn add_bridge(&mut self, bridge: Arc<dyn BridgeProvider>) {
         self.bridges.push(bridge);
     }
     
@@ -188,7 +156,7 @@ impl CrossDomainMevManager {
         let mut running = self.running.write().await;
         *running = false;
     }
-    
+
     /// Main monitoring loop
     async fn monitor_loop(&self) {
         while *self.running.read().await {
@@ -258,7 +226,10 @@ impl CrossDomainMevManager {
                     recent.push(opp);
                     
                     // Also create a general MEV opportunity
-                    self.create_mev_opportunity_from_cross_domain(&opp).await;
+                    if let Some(mev_opp) = self.create_mev_opportunity_from_cross_domain(&opp).await {
+                        // Trong implementation thực tế, đây là nơi sẽ thêm opportunity vào global list
+                        debug!("Created MEV opportunity from cross-domain arbitrage: {:?}", mev_opp.opportunity_type);
+                    }
                 }
             }
             
@@ -282,60 +253,146 @@ impl CrossDomainMevManager {
         let dest_price = self.get_token_price(&token_address, dest_chain_id).await?;
         
         // Calculate price difference
-        let (price_diff, price_diff_percent) = if source_price.price_usd > dest_price.price_usd {
-            (
-                source_price.price_usd - dest_price.price_usd,
-                (source_price.price_usd - dest_price.price_usd) / dest_price.price_usd * 100.0
-            )
-        } else {
-            (
-                dest_price.price_usd - source_price.price_usd,
-                (dest_price.price_usd - source_price.price_usd) / source_price.price_usd * 100.0
-            )
-        };
+        let (price_diff_percent, price_advantage) = self.calculate_price_difference(
+            source_price.price_usd, 
+            dest_price.price_usd
+        );
         
         // Get optimal bridge
         let bridge = self.find_optimal_bridge(source_chain_id, dest_chain_id, &token_address).await?;
         
-        // Get bridge costs and times
-        let config = self.config.read().await;
-        let bridging_cost = bridge.get_bridging_cost_estimate(&token_address, 1000.0).await.ok()?;
-        let bridging_time = bridge.get_bridging_time_estimate().await.ok()?;
-        
-        // Calculate potential profit (simplified)
-        let trade_amount = 1000.0; // $1000 for calculation
-        let price_advantage = if source_price.price_usd < dest_price.price_usd {
-            trade_amount / source_price.price_usd * dest_price.price_usd - trade_amount
-        } else {
-            trade_amount / dest_price.price_usd * source_price.price_usd - trade_amount
-        };
-        
-        // Account for costs
-        let estimated_profit = price_advantage - bridging_cost - config.estimated_bridge_cost_usd;
+        // Get bridge costs and estimated time
+        let (bridging_cost, bridging_time, estimated_profit) = self.calculate_bridging_costs_and_profit(
+            &token_address,
+            bridge.as_ref(),
+            price_advantage
+        ).await?;
         
         // Only return if profitable
         if estimated_profit <= 0.0 || price_diff_percent < 1.0 {
             return None;
         }
         
-        // Determine which direction is profitable
+        // Determine profitable direction
         let (actual_source, actual_dest, actual_source_price, actual_dest_price) = 
-            if source_price.price_usd < dest_price.price_usd {
-                (source_chain_id, dest_chain_id, source_price.price_usd, dest_price.price_usd)
-            } else {
-                (dest_chain_id, source_chain_id, dest_price.price_usd, source_price.price_usd)
-            };
+            self.determine_profitable_direction(
+                source_chain_id, 
+                dest_chain_id, 
+                source_price.price_usd, 
+                dest_price.price_usd
+            );
+        
+        // Create arbitrage opportunity
+        self.create_arbitrage_opportunity(
+            token_address,
+            actual_source, 
+            actual_dest,
+            actual_source_price,
+            actual_dest_price,
+            price_diff_percent,
+            estimated_profit,
+            bridging_cost,
+            bridging_time
+        )
+    }
+    
+    /// Calculate price difference percentage and potential advantage
+    fn calculate_price_difference(&self, source_price: f64, dest_price: f64) -> (f64, f64) {
+        if source_price > dest_price {
+            (
+                (source_price - dest_price) / dest_price * 100.0,
+                source_price - dest_price
+            )
+        } else {
+            (
+                (dest_price - source_price) / source_price * 100.0,
+                dest_price - source_price
+            )
+        }
+    }
+    
+    /// Calculate bridging costs and potential profit - sử dụng BridgeProvider thay vì CrossDomainBridge
+    async fn calculate_bridging_costs_and_profit(
+        &self,
+        token_address: &str,
+        bridge: &dyn BridgeProvider,
+        price_advantage: f64
+    ) -> Option<(f64, u64, f64)> {
+        let config = self.config.read().await;
+        
+        // Convert to chain enum - sử dụng Chain từ bridge_types
+        let source_chain = Chain::try_from_u64(bridge.source_chain_id()).ok()?;
+        let target_chain = Chain::try_from_u64(bridge.destination_chain_id()).ok()?;
+        
+        // Sử dụng estimate_fee từ BridgeProvider
+        let fee_estimate = bridge.estimate_fee(
+            source_chain,
+            target_chain,
+            // Simulate payload size for token transfer
+            token_address.len() + 32, // address + amount
+        ).await.ok()?;
+        
+        // Extract fee in USD from fee estimate
+        let bridging_cost = fee_estimate.fee_usd;
+        
+        // Use a simplified estimate for bridging time - trong thực tế cần implement trong BridgeProvider
+        let bridging_time = match (source_chain, target_chain) {
+            (Chain::Ethereum, Chain::BSC) => 15 * 60, // 15 minutes
+            (Chain::Ethereum, Chain::Polygon) => 20 * 60, // 20 minutes
+            (Chain::BSC, Chain::Ethereum) => 30 * 60, // 30 minutes
+            (Chain::Polygon, Chain::Ethereum) => 35 * 60, // 35 minutes
+            _ => 40 * 60, // 40 minutes for other combinations
+        };
+        
+        // Calculate potential profit (simplified)
+        let trade_amount = 1000.0; // $1000 for calculation
+        
+        // Account for costs
+        let estimated_profit = price_advantage - bridging_cost - config.estimated_bridge_cost_usd;
+        
+        Some((bridging_cost, bridging_time, estimated_profit))
+    }
+    
+    /// Determine which direction is profitable
+    fn determine_profitable_direction(
+        &self,
+        source_chain_id: u64,
+        dest_chain_id: u64,
+        source_price: f64,
+        dest_price: f64
+    ) -> (u64, u64, f64, f64) {
+        if source_price < dest_price {
+            (source_chain_id, dest_chain_id, source_price, dest_price)
+        } else {
+            (dest_chain_id, source_chain_id, dest_price, source_price)
+        }
+    }
+    
+    /// Create arbitrage opportunity from calculated values
+    fn create_arbitrage_opportunity(
+        &self,
+        token_address: String,
+        source_chain_id: u64,
+        dest_chain_id: u64,
+        source_price: f64,
+        dest_price: f64,
+        price_diff_percent: f64,
+        estimated_profit: f64,
+        bridging_cost: f64,
+        bridging_time: u64
+    ) -> Option<CrossDomainArbitrage> {
+        let config = self.config.read().await.clone();
         
         // Create arbitrage opportunity
         let arbitrage = CrossDomainArbitrage {
             token_address,
             token_name: None, // Would need to be filled from token info
-            source_chain_id: actual_source,
-            destination_chain_id: actual_dest,
-            source_price_usd: actual_source_price,
-            destination_price_usd: actual_dest_price,
+            source_chain_id,
+            destination_chain_id: dest_chain_id,
+            source_price_usd: source_price,
+            destination_price_usd: dest_price,
             price_diff_percent,
-            bridge_method: format!("{}-{}", actual_source, actual_dest),
+            bridge_method: format!("{}-{}", source_chain_id, dest_chain_id),
             estimated_profit_usd: estimated_profit,
             estimated_cost_usd: bridging_cost + config.estimated_bridge_cost_usd,
             estimated_bridging_time_seconds: bridging_time,
@@ -345,13 +402,13 @@ impl CrossDomainMevManager {
         Some(arbitrage)
     }
     
-    /// Find optimal bridge between chains for a token
+    /// Find optimal bridge between chains for a token - sử dụng BridgeProvider thay vì CrossDomainBridge
     async fn find_optimal_bridge(
         &self,
         source_chain_id: u64,
         dest_chain_id: u64,
         token_address: &str
-    ) -> Option<Arc<dyn CrossDomainBridge>> {
+    ) -> Option<Arc<dyn BridgeProvider>> {
         // Filter bridges that support this token and chain pair
         let valid_bridges: Vec<_> = self.bridges.iter()
             .filter(|b| b.source_chain_id() == source_chain_id && 
@@ -491,6 +548,23 @@ impl CrossDomainMevManager {
         // In a real implementation, this would be added to the main opportunity list
         
         Some(opportunity)
+    }
+    
+    /// Monitor cross-chain bridge transaction
+    /// Uses common monitor_transaction from bridge_types
+    pub async fn monitor_bridge_transaction(
+        &self,
+        bridge_provider: Arc<dyn BridgeProvider>,
+        tx_hash: &str,
+        config: Option<MonitorConfig>
+    ) -> Result<BridgeStatus> {
+        // Wrap với Arc để phù hợp với hàm monitor_transaction
+        let provider_ref: &dyn BridgeProvider = bridge_provider.as_ref();
+        
+        // Gọi hàm monitor_transaction từ common
+        let result = monitor_transaction(provider_ref, tx_hash, config).await;
+        
+        result
     }
     
     /// Clone for using in async contexts

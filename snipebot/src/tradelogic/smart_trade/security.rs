@@ -19,6 +19,7 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use anyhow::{Result, Context, anyhow};
+use serde::{Serialize, Deserialize};
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
@@ -29,6 +30,647 @@ use crate::analys::token_status::{ContractInfo, TokenStatus};
 use super::types::{TradeTracker, TradeStatus, TokenIssue};
 use super::constants::*;
 use super::executor::SmartTradeExecutor;
+
+/// Cấu hình bảo mật cho trades
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Có tự động bán khi phát hiện rủi ro cao
+    pub auto_sell_on_high_risk: bool,
+    
+    /// Mức rủi ro tối đa chấp nhận được (0-100)
+    pub max_acceptable_risk: u8,
+    
+    /// Các loại rủi ro cần kiểm tra
+    pub risk_checks_enabled: HashMap<String, bool>,
+    
+    /// Thời gian giữa các lần kiểm tra (seconds)
+    pub check_interval_seconds: u64,
+    
+    /// Có kiểm tra thay đổi trong owner privileges
+    pub check_owner_changes: bool,
+    
+    /// Có kiểm tra tax động
+    pub check_dynamic_tax: bool,
+    
+    /// Có kiểm tra thay đổi liquidity
+    pub check_liquidity_changes: bool,
+    
+    /// Có kiểm tra honeypot
+    pub check_honeypot: bool,
+    
+    /// Có kiểm tra blacklist
+    pub check_blacklist: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        let mut risk_checks = HashMap::new();
+        risk_checks.insert("honeypot".to_string(), true);
+        risk_checks.insert("dynamic_tax".to_string(), true);
+        risk_checks.insert("owner_privileges".to_string(), true);
+        risk_checks.insert("liquidity_removal".to_string(), true);
+        risk_checks.insert("blacklist".to_string(), true);
+        
+        Self {
+            auto_sell_on_high_risk: true,
+            max_acceptable_risk: 70,
+            risk_checks_enabled: risk_checks,
+            check_interval_seconds: 60,
+            check_owner_changes: true,
+            check_dynamic_tax: true,
+            check_liquidity_changes: true,
+            check_honeypot: true,
+            check_blacklist: true,
+        }
+    }
+}
+
+/// Chi tiết về kiểm tra an toàn token
+#[derive(Debug, Clone)]
+pub struct TokenSecurityCheck {
+    /// Token address
+    pub token_address: String,
+    
+    /// Chain ID
+    pub chain_id: u32,
+    
+    /// Danh sách các vấn đề phát hiện được
+    pub issues: Vec<TokenIssue>,
+    
+    /// Có an toàn không
+    pub is_safe: bool,
+    
+    /// Mức độ rủi ro (0-100)
+    pub risk_score: u8,
+    
+    /// Chi tiết các vấn đề
+    pub details: HashMap<String, String>,
+    
+    /// Timestamp kiểm tra
+    pub timestamp: u64,
+}
+
+/// Kết quả kiểm tra an toàn
+#[derive(Debug, Clone)]
+pub struct SecurityCheckResult {
+    /// Có an toàn không
+    pub is_safe: bool,
+    
+    /// Danh sách các vấn đề
+    pub issues: Vec<String>,
+    
+    /// Mô tả chi tiết
+    pub description: Option<String>,
+    
+    /// Có nên bán ngay không
+    pub should_sell_immediately: bool,
+    
+    /// Điểm rủi ro (0-100)
+    pub risk_score: u8,
+}
+
+/// Quản lý bảo mật cho SmartTradeExecutor
+pub struct SecurityManager {
+    /// Cấu hình bảo mật
+    pub config: SecurityConfig,
+    
+    /// Cache kết quả kiểm tra
+    cache: HashMap<String, TokenSecurityCheck>,
+    
+    /// Danh sách các token được coi là an toàn
+    whitelisted_tokens: HashMap<u32, Vec<String>>,
+    
+    /// Danh sách các token được coi là không an toàn
+    blacklisted_tokens: HashMap<u32, Vec<String>>,
+}
+
+impl SecurityManager {
+    /// Tạo SecurityManager mới với cấu hình mặc định
+    pub fn new() -> Self {
+        Self {
+            config: SecurityConfig::default(),
+            cache: HashMap::new(),
+            whitelisted_tokens: HashMap::new(),
+            blacklisted_tokens: HashMap::new(),
+        }
+    }
+    
+    /// Tạo SecurityManager với cấu hình tùy chỉnh
+    pub fn with_config(config: SecurityConfig) -> Self {
+        Self {
+            config,
+            cache: HashMap::new(),
+            whitelisted_tokens: HashMap::new(),
+            blacklisted_tokens: HashMap::new(),
+        }
+    }
+    
+    /// Thêm token vào whitelist
+    pub fn add_to_whitelist(&mut self, chain_id: u32, token_address: &str) {
+        let token_list = self.whitelisted_tokens.entry(chain_id).or_insert_with(Vec::new);
+        if !token_list.contains(&token_address.to_string()) {
+            token_list.push(token_address.to_string());
+            debug!("Đã thêm token {} vào whitelist cho chain {}", token_address, chain_id);
+        }
+    }
+    
+    /// Thêm token vào blacklist
+    pub fn add_to_blacklist(&mut self, chain_id: u32, token_address: &str) {
+        let token_list = self.blacklisted_tokens.entry(chain_id).or_insert_with(Vec::new);
+        if !token_list.contains(&token_address.to_string()) {
+            token_list.push(token_address.to_string());
+            warn!("Đã thêm token {} vào blacklist cho chain {}", token_address, chain_id);
+        }
+    }
+    
+    /// Kiểm tra token có an toàn không
+    /// 
+    /// # Tham số
+    /// * `chain_id` - ID của blockchain
+    /// * `token_address` - Địa chỉ token
+    /// * `adapter` - EVM adapter để tương tác với blockchain
+    ///
+    /// # Returns
+    /// * `Result<SecurityCheckResult>` - Kết quả kiểm tra
+    pub async fn check_token_security(
+        &mut self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<SecurityCheckResult> {
+        // Kiểm tra whitelist/blacklist
+        if let Some(tokens) = self.whitelisted_tokens.get(&chain_id) {
+            if tokens.contains(&token_address.to_string()) {
+                return Ok(SecurityCheckResult {
+                    is_safe: true,
+                    issues: vec![],
+                    description: Some("Token trong whitelist".to_string()),
+                    should_sell_immediately: false,
+                    risk_score: 0,
+                });
+            }
+        }
+        
+        if let Some(tokens) = self.blacklisted_tokens.get(&chain_id) {
+            if tokens.contains(&token_address.to_string()) {
+                return Ok(SecurityCheckResult {
+                    is_safe: false,
+                    issues: vec!["Token trong blacklist".to_string()],
+                    description: Some("Token đã được đánh dấu không an toàn".to_string()),
+                    should_sell_immediately: true,
+                    risk_score: 100,
+                });
+            }
+        }
+        
+        // Kiểm tra cache
+        let cache_key = format!("{}:{}", chain_id, token_address);
+        let now = chrono::Utc::now().timestamp() as u64;
+        
+        if let Some(cached) = self.cache.get(&cache_key) {
+            // Sử dụng cache nếu chưa quá 10 phút
+            if now - cached.timestamp < 600 {
+                debug!("Sử dụng kết quả cache cho token {}", token_address);
+                return Ok(SecurityCheckResult {
+                    is_safe: cached.is_safe,
+                    issues: cached.issues.iter().map(|i| format!("{:?}", i)).collect(),
+                    description: Some(format!("Từ cache: {} vấn đề phát hiện được", cached.issues.len())),
+                    should_sell_immediately: !cached.is_safe && cached.risk_score > self.config.max_acceptable_risk,
+                    risk_score: cached.risk_score,
+                });
+            }
+        }
+        
+        // Thực hiện kiểm tra
+        debug!("Kiểm tra bảo mật cho token {} trên chain {}", token_address, chain_id);
+        
+        // 1. Kiểm tra honeypot nếu được bật
+        let mut issues = Vec::new();
+        let mut details = HashMap::new();
+        let mut risk_score = 0;
+        
+        if self.config.check_honeypot {
+            match self.check_honeypot(chain_id, token_address, adapter).await {
+                Ok((is_honeypot, reason)) => {
+                    if is_honeypot {
+                        issues.push(TokenIssue::Honeypot);
+                        risk_score += 40;
+                        if let Some(reason_str) = reason {
+                            details.insert("honeypot_reason".to_string(), reason_str);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Lỗi khi kiểm tra honeypot: {}", e);
+                    details.insert("honeypot_error".to_string(), format!("{}", e));
+                }
+            }
+        }
+        
+        // 2. Kiểm tra dynamic tax nếu được bật
+        if self.config.check_dynamic_tax {
+            match self.check_dynamic_tax(chain_id, token_address, adapter).await {
+                Ok((has_dynamic_tax, reason)) => {
+                    if has_dynamic_tax {
+                        issues.push(TokenIssue::DynamicTax);
+                        risk_score += 30;
+                        if let Some(reason_str) = reason {
+                            details.insert("dynamic_tax_reason".to_string(), reason_str);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Lỗi khi kiểm tra dynamic tax: {}", e);
+                    details.insert("dynamic_tax_error".to_string(), format!("{}", e));
+                }
+            }
+        }
+        
+        // 3. Kiểm tra owner privileges nếu được bật
+        if self.config.check_owner_changes {
+            match self.check_owner_privileges(chain_id, token_address, adapter).await {
+                Ok((has_privileges, privileges)) => {
+                    if has_privileges && !privileges.is_empty() {
+                        issues.push(TokenIssue::OwnerPrivilege);
+                        risk_score += 20;
+                        details.insert("owner_privileges".to_string(), privileges.join(", "));
+                    }
+                },
+                Err(e) => {
+                    warn!("Lỗi khi kiểm tra owner privileges: {}", e);
+                    details.insert("owner_privileges_error".to_string(), format!("{}", e));
+                }
+            }
+        }
+        
+        // 4. Kiểm tra liquidity changes nếu được bật
+        if self.config.check_liquidity_changes {
+            match self.check_liquidity_risk(chain_id, token_address, adapter).await {
+                Ok((has_liquidity_risk, reason)) => {
+                    if has_liquidity_risk {
+                        issues.push(TokenIssue::LiquidityRisk);
+                        risk_score += 25;
+                        if let Some(reason_str) = reason {
+                            details.insert("liquidity_risk_reason".to_string(), reason_str);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Lỗi khi kiểm tra liquidity risk: {}", e);
+                    details.insert("liquidity_risk_error".to_string(), format!("{}", e));
+                }
+            }
+        }
+        
+        // 5. Kiểm tra blacklist nếu được bật
+        if self.config.check_blacklist {
+            match self.check_blacklist(chain_id, token_address, adapter).await {
+                Ok((has_blacklist, blacklist)) => {
+                    if has_blacklist {
+                        issues.push(TokenIssue::Blacklist);
+                        risk_score += 15;
+                        if let Some(details_vec) = blacklist {
+                            details.insert("blacklist_details".to_string(), details_vec.join(", "));
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Lỗi khi kiểm tra blacklist: {}", e);
+                    details.insert("blacklist_error".to_string(), format!("{}", e));
+                }
+            }
+        }
+        
+        // Đảm bảo risk score nằm trong khoảng 0-100
+        risk_score = risk_score.min(100);
+        
+        // Tạo kết quả và lưu vào cache
+        let is_safe = risk_score <= self.config.max_acceptable_risk;
+        let should_sell = !is_safe && self.config.auto_sell_on_high_risk;
+        
+        let security_check = TokenSecurityCheck {
+            token_address: token_address.to_string(),
+            chain_id,
+            issues: issues.clone(),
+            is_safe,
+            risk_score,
+            details: details.clone(),
+            timestamp: now,
+        };
+        
+        // Cập nhật cache
+        self.cache.insert(cache_key, security_check);
+        
+        // Tự động cập nhật blacklist nếu risk_score = 100
+        if risk_score >= 100 {
+            self.add_to_blacklist(chain_id, token_address);
+        }
+        
+        let result = SecurityCheckResult {
+            is_safe,
+            issues: issues.iter().map(|i| format!("{:?}", i)).collect(),
+            description: Some(format!("Risk score: {}/100, {} vấn đề phát hiện được", 
+                risk_score, issues.len())),
+            should_sell_immediately: should_sell,
+            risk_score,
+        };
+        
+        debug!("Kết quả kiểm tra token {}: safe={}, risk_score={}, issues={}",
+              token_address, is_safe, risk_score, issues.len());
+        
+        Ok(result)
+    }
+    
+    /// Kiểm tra honeypot
+    async fn check_honeypot(
+        &self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<(bool, Option<String>)> {
+        // Mô phỏng giao dịch bán để phát hiện honeypot
+        let small_amount = 0.01; // 0.01 ETH/BNB worth
+        let large_amount = 0.5;  // 0.5 ETH/BNB worth
+        
+        // Mô phỏng bán lượng nhỏ
+        let small_simulation = adapter.simulate_token_sell(token_address, small_amount)
+            .await.context("Không thể mô phỏng bán lượng nhỏ")?;
+        
+        if !small_simulation.can_sell {
+            return Ok((true, Some(format!("Không thể bán: {}", 
+                small_simulation.error.unwrap_or_else(|| "Unknown error".to_string())))));
+        }
+        
+        // Mô phỏng bán lượng lớn
+        let large_simulation = adapter.simulate_token_sell(token_address, large_amount)
+            .await.context("Không thể mô phỏng bán lượng lớn")?;
+        
+        if !large_simulation.can_sell {
+            return Ok((true, Some(format!("Không thể bán lượng lớn: {}", 
+                large_simulation.error.unwrap_or_else(|| "Unknown error".to_string())))));
+        }
+        
+        // Kiểm tra slippage quá cao
+        if let (Some(small_price), Some(large_price)) = (small_simulation.price_impact, large_simulation.price_impact) {
+            if large_price > 50.0 {
+                return Ok((true, Some(format!("Slippage quá cao khi bán lượng lớn: {:.1}%", large_price))));
+            }
+            
+            if large_price > 3.0 * small_price {
+                return Ok((true, Some(format!(
+                    "Slippage không tuyến tính: {:.1}% (nhỏ) vs {:.1}% (lớn)", 
+                    small_price, large_price
+                ))));
+            }
+        }
+        
+        // Kiểm tra các lỗi khác
+        if let Some(error) = &large_simulation.error {
+            if error.contains("cannot sell") || 
+               error.contains("transfer failed") || 
+               error.contains("insufficient") {
+                return Ok((true, Some(format!("Lỗi bán: {}", error))));
+            }
+        }
+        
+        // Kiểm tra buy/sell tax
+        if small_simulation.sell_tax.unwrap_or(0.0) > 30.0 {
+            return Ok((true, Some(format!(
+                "Sell tax quá cao: {:.1}%", 
+                small_simulation.sell_tax.unwrap_or(0.0)
+            ))));
+        }
+        
+        Ok((false, None))
+    }
+    
+    /// Kiểm tra dynamic tax
+    async fn check_dynamic_tax(
+        &self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<(bool, Option<String>)> {
+        // Mô phỏng nhiều giao dịch mua/bán để phát hiện tax động
+        let amount = 0.1; // 0.1 ETH/BNB worth
+        
+        // Mô phỏng lần 1
+        let sim1 = adapter.simulate_buy_sell_slippage(token_address, amount)
+            .await.context("Không thể mô phỏng mua/bán lần 1")?;
+        
+        // Delay một chút
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        // Mô phỏng lần 2
+        let sim2 = adapter.simulate_buy_sell_slippage(token_address, amount)
+            .await.context("Không thể mô phỏng mua/bán lần 2")?;
+        
+        // Delay một chút
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        // Mô phỏng lần 3
+        let sim3 = adapter.simulate_buy_sell_slippage(token_address, amount)
+            .await.context("Không thể mô phỏng mua/bán lần 3")?;
+        
+        // So sánh tax giữa các lần
+        let buy_tax1 = sim1.buy_tax.unwrap_or(0.0);
+        let buy_tax2 = sim2.buy_tax.unwrap_or(0.0);
+        let buy_tax3 = sim3.buy_tax.unwrap_or(0.0);
+        
+        let sell_tax1 = sim1.sell_tax.unwrap_or(0.0);
+        let sell_tax2 = sim2.sell_tax.unwrap_or(0.0);
+        let sell_tax3 = sim3.sell_tax.unwrap_or(0.0);
+        
+        // Phát hiện tax động
+        let buy_tax_diff = f64::max(f64::max((buy_tax1 - buy_tax2).abs(), (buy_tax2 - buy_tax3).abs()), (buy_tax1 - buy_tax3).abs());
+        let sell_tax_diff = f64::max(f64::max((sell_tax1 - sell_tax2).abs(), (sell_tax2 - sell_tax3).abs()), (sell_tax1 - sell_tax3).abs());
+        
+        if buy_tax_diff > 3.0 || sell_tax_diff > 3.0 {
+            return Ok((true, Some(format!(
+                "Phát hiện tax động: Buy tax {:.1}% -> {:.1}% -> {:.1}%, Sell tax {:.1}% -> {:.1}% -> {:.1}%",
+                buy_tax1, buy_tax2, buy_tax3, sell_tax1, sell_tax2, sell_tax3
+            ))));
+        }
+        
+        // Kiểm tra tax quá cao
+        if buy_tax3 > 20.0 || sell_tax3 > 20.0 {
+            return Ok((true, Some(format!(
+                "Tax quá cao: Buy tax {:.1}%, Sell tax {:.1}%",
+                buy_tax3, sell_tax3
+            ))));
+        }
+        
+        Ok((false, None))
+    }
+    
+    /// Kiểm tra owner privileges
+    async fn check_owner_privileges(
+        &self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<(bool, Vec<String>)> {
+        // Lấy thông tin contract để phát hiện các owner privilege
+        let contract_info = adapter.get_contract_info(token_address)
+            .await.context("Không thể lấy thông tin contract")?;
+        
+        let mut privileges = Vec::new();
+        
+        // Phát hiện các quyền đặc biệt
+        if contract_info.can_mint {
+            privileges.push("Can mint arbitrary tokens".to_string());
+        }
+        
+        if contract_info.can_blacklist {
+            privileges.push("Can blacklist addresses".to_string());
+        }
+        
+        if contract_info.can_change_tax {
+            privileges.push("Can change tax".to_string());
+        }
+        
+        if contract_info.can_pause_trading {
+            privileges.push("Can pause trading".to_string());
+        }
+        
+        if contract_info.is_proxy {
+            privileges.push("Is proxy/upgradeable contract".to_string());
+        }
+        
+        if contract_info.can_whitelist {
+            privileges.push("Can whitelist addresses".to_string());
+        }
+        
+        // Phát hiện quyền rút liquidity
+        if contract_info.can_take_back_ownership {
+            privileges.push("Can take back ownership/recover assets".to_string());
+        }
+        
+        if contract_info.has_hidden_owner {
+            privileges.push("Has hidden owner variable".to_string());
+        }
+        
+        // Kiểm tra nếu owner có thể rút token/liquidity
+        if contract_info.can_withdraw_token || contract_info.can_withdraw_eth {
+            privileges.push("Can withdraw tokens/ETH".to_string());
+        }
+        
+        Ok((!privileges.is_empty(), privileges))
+    }
+    
+    /// Kiểm tra liquidity risk
+    async fn check_liquidity_risk(
+        &self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<(bool, Option<String>)> {
+        // Lấy thông tin liquidity
+        let liquidity_info = adapter.get_token_liquidity(token_address)
+            .await.context("Không thể lấy thông tin thanh khoản")?;
+        
+        // Kiểm tra thanh khoản quá thấp
+        if liquidity_info.liquidity_usd < 10000.0 {
+            return Ok((true, Some(format!(
+                "Thanh khoản quá thấp: ${:.2}", liquidity_info.liquidity_usd
+            ))));
+        }
+        
+        // Kiểm tra liquidity lock
+        let lock_status = adapter.check_liquidity_locked(token_address)
+            .await.context("Không thể kiểm tra khóa thanh khoản")?;
+        
+        if !lock_status.is_locked {
+            return Ok((true, Some("Thanh khoản không được khóa".to_string())));
+        } else if lock_status.lock_time_seconds < 7 * 24 * 3600 {
+            return Ok((true, Some(format!(
+                "Thời gian khóa quá ngắn: {} ngày", 
+                lock_status.lock_time_seconds / (24 * 3600)
+            ))));
+        }
+        
+        // Kiểm tra % của liquidity được khóa
+        if lock_status.locked_percent < 80.0 {
+            return Ok((true, Some(format!(
+                "Chỉ {:.1}% thanh khoản được khóa, cần ít nhất 80%",
+                lock_status.locked_percent
+            ))));
+        }
+        
+        // Kiểm tra lịch sử biến động thanh khoản
+        let recent_events = adapter.get_recent_liquidity_events(token_address, 30)
+            .await.context("Không thể lấy lịch sử liquidity")?;
+        
+        let mut suspicious_events = 0;
+        for event in &recent_events {
+            if event.event_type == "remove" && event.amount_usd > 5000.0 {
+                suspicious_events += 1;
+            }
+        }
+        
+        if suspicious_events > 2 {
+            return Ok((true, Some(format!(
+                "Phát hiện {} lần rút thanh khoản lớn trong 30 ngày gần đây",
+                suspicious_events
+            ))));
+        }
+        
+        Ok((false, None))
+    }
+    
+    /// Kiểm tra blacklist
+    async fn check_blacklist(
+        &self,
+        chain_id: u32,
+        token_address: &str,
+        adapter: &Arc<EvmAdapter>
+    ) -> Result<(bool, Option<Vec<String>>)> {
+        // Lấy thông tin contract
+        let contract_info = adapter.get_contract_info(token_address)
+            .await.context("Không thể lấy thông tin contract")?;
+        
+        let mut blacklist_features = Vec::new();
+        
+        // Phát hiện blacklist/whitelist
+        if contract_info.can_blacklist || contract_info.has_blacklist {
+            blacklist_features.push("Has blacklist function or mapping".to_string());
+        }
+        
+        if contract_info.can_whitelist || contract_info.has_whitelist {
+            blacklist_features.push("Has whitelist function or mapping".to_string());
+        }
+        
+        // Phát hiện max tx limit
+        if contract_info.has_max_tx_limit {
+            blacklist_features.push(format!(
+                "Has max transaction limit: {} tokens", 
+                contract_info.max_tx_amount.unwrap_or(0.0)
+            ));
+        }
+        
+        // Phát hiện max wallet limit
+        if contract_info.has_max_wallet_limit {
+            blacklist_features.push(format!(
+                "Has max wallet limit: {} tokens",
+                contract_info.max_wallet_amount.unwrap_or(0.0)
+            ));
+        }
+        
+        // Phát hiện trading cooldown
+        if contract_info.has_trading_cooldown {
+            blacklist_features.push("Has trading cooldown".to_string());
+        }
+        
+        // Phát hiện anti-bot measures
+        if contract_info.has_anti_bot {
+            blacklist_features.push("Has anti-bot measures".to_string());
+        }
+        
+        Ok((!blacklist_features.is_empty(), 
+            if blacklist_features.is_empty() { None } else { Some(blacklist_features) }
+        ))
+    }
+}
 
 impl SmartTradeExecutor {
     /// Lấy thông tin chi tiết contract từ blockchain

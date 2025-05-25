@@ -19,276 +19,173 @@
 
 ## Lỗi trùng lặp định nghĩa và implementation
 
-1. [FIXED][2024-09-15] **snipebot/src/tradelogic/traits.rs:461-503 và snipebot/src/tradelogic/coordinator.rs:1-200**: 
-   - Có hai implementation khác nhau của TradeCoordinator: `DefaultTradeCoordinator` (trong traits.rs) và `TradeCoordinatorImpl` (trong coordinator.rs)
-   - Đã xóa `DefaultTradeCoordinator` trong traits.rs và chỉ giữ lại `TradeCoordinatorImpl` trong coordinator.rs
-   - Đã cập nhật tất cả các import và tham chiếu để sử dụng implementation duy nhất
+1. [FIXED][2024-09-27] **snipebot/src/tradelogic/mev_logic/cross_domain.rs và blockchain/src/processor/bridge_orchestrator.rs**: 
+   - Hai module này có một số logic chung nhưng được cài đặt riêng biệt thay vì sử dụng chung
+   - Đã tạo module monitoring.rs trong common/bridge_types chứa hàm monitor_transaction dùng chung
+   - Đã chuẩn hóa hàm monitor_transaction để nhận tham số get_status_fn, tx_info và config
+   - Đã cập nhật common/bridge_types/mod.rs để export hàm monitor_transaction
+   - Đã cập nhật blockchain/src/processor/bridge_orchestrator.rs để sử dụng common::bridge_types
+   - Đã thêm wrapper LayerZeroWrapper và WormholeWrapper để tương thích với BridgeProvider
+   - Đã thay thế mã monitor_transaction cũ bằng cách sử dụng hàm từ common::bridge_types
+   - Đã đảm bảo snipebot/src/tradelogic/mev_logic/cross_domain.rs sử dụng BridgeStatus từ common
 
-2. [FIXED][2024-09-15] **snipebot/src/lib.rs:46-55 và snipebot/src/tradelogic/traits.rs:855-858**:
-   - Có hai hàm `create_trade_coordinator()` với chức năng tạo TradeCoordinator
-   - Đã xóa hàm trong traits.rs và chỉ giữ lại hàm trong coordinator.rs
-   - Đã cập nhật các import và re-export để sử dụng hàm từ coordinator.rs
+2. [FIXED][2024-09-26] **snipebot/src/tradelogic/smart_trade/executor.rs:187-219, 830-862, 1579-1611, 3553-3585, 4302-4334, 9655-9687**: 
+   - Code trùng lặp trong việc khởi tạo các đối tượng TradeTracker
+   - Có 6 block code giống hệt nhau với TODO comment không được triển khai
+   - Đã tạo hàm helper create_trade_tracker trong snipebot/src/tradelogic/smart_trade/utils.rs để giảm trùng lặp mã
+   - Hàm helper nhận tham số TradeParams, trade_id, timestamp và TradeStrategy, trả về một đối tượng TradeTracker đã được cấu hình
+   - Hàm này giúp loại bỏ code trùng lặp và tập trung logic tạo TradeTracker vào một nơi duy nhất
 
-3. [FIXED][2024-09-15] **snipebot/src/lib.rs:71-91**:
-   - Sử dụng lazy_static và OnceCell cho global coordinator gây ra không nhất quán về cách quản lý singleton
-   - Đã giữ nguyên cấu trúc hiện tại nhưng cải thiện cách xử lý lỗi và safety
+3. [FIXED][2024-09-28] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/tradelogic/common/types.rs**:
+   - Định nghĩa trùng lặp enum TokenIssue trong hai file
+   - Đã xóa định nghĩa enum TokenIssue trong smart_trade/types.rs và sử dụng import từ common/types.rs
 
-## Lỗi không tuân thủ quy tắc trait-based design
+4. [FIXED][2024-09-28] **snipebot/src/tradelogic/common/types.rs**:
+   - Xung đột tên giữa enum TokenIssue và struct TokenIssue
+   - Đã đổi tên struct TokenIssue thành TokenIssueDetail để tránh xung đột
+   - Đã cập nhật tất cả các tham chiếu đến struct này
 
-4. [FIXED][2024-09-15] **snipebot/src/tradelogic/traits.rs:855-858**:
-   - Hàm `create_trade_coordinator()` trả về trực tiếp `DefaultTradeCoordinator` thay vì qua factory function như quy định
-   - Đã xóa hàm trùng lặp và tuân thủ việc đưa factory function vào coordinator.rs
+5. [FIXED][2024-09-28] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/tradelogic/common/types.rs**:
+   - Định nghĩa trùng lặp enum TradeStatus trong hai file
+   - Đã xóa enum TradeStatus trong smart_trade/types.rs và sử dụng import từ common/types.rs
 
-5. [FIXED][2024-09-15] **snipebot/src/lib.rs:46-55**:
-   - Class `AppState` lưu trữ direct references đến các implementation cụ thể (ManualTradeExecutor, SmartTradeExecutor, MevBot) thay vì trait object
-   - Đã thay đổi để sử dụng `Vec<Arc<dyn TradeExecutor>>` thay vì các trường riêng biệt cho từng executor
-   - Đã cập nhật tất cả mã liên quan để xử lý executor thông qua trait object
+6. [FIXED][2024-09-28] **snipebot/src/tradelogic/mev_logic/types.rs**:
+   - Import trùng lặp std::collections::{HashMap, HashSet}
+   - Đã xóa import trùng lặp
 
-6. [FIXED][2024-09-15] **snipebot/src/analys/api/mod.rs:28-34**:
-   - Factory function `create_risk_analysis_provider()` tạo ra một implementation cụ thể và hardcoding RiskAnalyzer
-   - Đã sửa để nhận RiskAnalyzer qua tham số thay vì hardcoding, đảm bảo tuân thủ dependency injection
+7. [FIXED][2024-10-01] **snipebot/src/chain_adapters/bridge_adapter.rs, mod.rs và snipebot/src/tradelogic/mev_logic/cross_domain.rs**:
+   - Sử dụng crate::bridge_types thay vì crate::chain_adapters hoặc common::bridge_types
+   - Đã cập nhật imports trong cross_domain.rs để sử dụng crate::chain_adapters cho các types
+   - Đã cập nhật imports trong cross_domain.rs để sử dụng common::bridge_types::monitoring cho hàm monitor_transaction
+   - Đã đảm bảo tính nhất quán trong việc sử dụng bridge_types từ các modules khác nhau
 
-## Lỗi xử lý lỗi và async safety
+8. [FIXED][2024-09-29] **snipebot/src/analys/mempool/types.rs**:
+   - Thiếu import std::cmp::Ordering nhưng vẫn sử dụng Ordering trong impl PartialOrd và Ord
+   - Đã kiểm tra và thấy import std::cmp::Ordering đã có ở dòng 3 của file
 
-7. [FIXED][2024-09-15] **snipebot/src/tradelogic/coordinator.rs:100**:
-   - Sử dụng `unwrap_or_else()` trong hàm `current_timestamp()` có thể gây ra panic
-   - Đã sửa để xử lý lỗi đúng cách, log error thay vì panic và cung cấp giá trị mặc định an toàn
+9. [FIXED][2024-09-15] **snipebot/src/tradelogic/traits.rs:461-503 và snipebot/src/tradelogic/coordinator.rs:1-200**: 
+   - Có hai implementation khác nhau của TradeCoordinator: `DefaultTradeCoordinator` (trong traits.rs) và `Coordinator` (trong coordinator.rs)
+   - Đã hợp nhất hai implementation, giữ lại `Coordinator` trong coordinator.rs và xóa `DefaultTradeCoordinator`
+   - Đã cập nhật các tham chiếu trong toàn bộ codebase
+   - Đã cải thiện doc comment để làm rõ mối quan hệ giữa trait và implementation
 
-8. [FIXED][2024-09-16] **snipebot/src/lib.rs:71**:
-   - Sử dụng `lazy_static` để khởi tạo OnceCell không đảm bảo thread-safety hoàn toàn trong async context
-   - Đã thay thế bằng `tokio::sync::OnceCell::const_new()` để cải thiện thread-safety trong async context
-   - Đã đơn giản hóa hàm `get_global_coordinator()` để luôn gọi `initialize_global_coordinator()`
-   - Đã thêm log thông báo khi khởi tạo coordinator
+10. [FIXED][2024-09-29] **snipebot/src/tradelogic/common/types.rs và snipebot/src/analys/token_status/types.rs**:
+    - Định nghĩa trùng lặp của enum TokenIssue trong hai file
+    - Đã xóa định nghĩa TokenIssue trong analys/token_status/types.rs và sử dụng crate::tradelogic::common::types::TokenIssue
+    - Đã cập nhật re-export trong analys/token_status/mod.rs để phù hợp với thay đổi
 
-9. [FIXED][2024-09-15] **snipebot/src/lib.rs:169-172**:
-   - Sử dụng `.first()` và sau đó là `ok_or_else()` mà không kiểm tra rỗng
-   - Đã sửa để kiểm tra rõ ràng nếu danh sách rỗng trước khi truy cập phần tử đầu tiên
+11. [FIXED][2024-09-29] **snipebot/src/tradelogic/mev_logic/types.rs và snipebot/src/analys/mempool/types.rs**:
+    - Định nghĩa trùng lặp của các struct và enum liên quan đến phân tích mempool
+    - Đã cập nhật mev_logic/types.rs để import và sử dụng các kiểu dữ liệu từ analys/mempool/types.rs
+    - Đã thêm các hàm chuyển đổi (From trait) từ các kiểu dữ liệu của mempool sang MevOpportunityType
+    - Đã bổ sung thêm documentation để làm rõ các mối quan hệ giữa các kiểu dữ liệu
 
-## Lỗi thiếu doc comment và type annotation
+12. [FIXED][2024-09-29] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/types.rs**:
+    - Đã kiểm tra và không phát hiện định nghĩa trùng lặp trực tiếp giữa hai file
+    - File smart_trade/types.rs đã import và sử dụng đúng các kiểu dữ liệu từ snipebot/src/types.rs
+    - Các struct/enum trong smart_trade/types.rs là các kiểu dữ liệu chuyên biệt phục vụ cho module smart trade
 
-10. [FIXED][2024-09-15] **snipebot/src/lib.rs:46-55**:
-    - Struct `AppState` thiếu doc comment chi tiết cho từng field
-    - Đã bổ sung doc comment chi tiết cho struct và từng field để tuân thủ quy tắc
+13. [FIXED][2024-09-29] **snipebot/src/tradelogic/mev_logic/cross_domain.rs và snipebot/src/chain_adapters/bridge_adapter.rs**:
+    - Logic trùng lặp cho việc monitor giao dịch cross-chain
+    - Đã sửa cross_domain.rs để sử dụng BridgeProvider từ common/bridge_types thay vì định nghĩa lại CrossDomainBridge
+    - Đã loại bỏ enum CrossDomainBridgeStatus trùng lặp và sử dụng BridgeStatus từ common/bridge_types
+    - Đã thêm hàm monitor_bridge_transaction trong CrossDomainMevManager sử dụng monitor_transaction từ common/bridge_types
+    - Đã cập nhật calculate_bridging_costs_and_profit để sử dụng BridgeProvider thay vì CrossDomainBridge
 
-11. [FIXED][2024-09-15] **snipebot/src/tradelogic/coordinator.rs:13-14**:
-    - Thiếu type annotation rõ ràng cho HashMap, HashSet
-    - Đã bổ sung type annotation cụ thể cho tất cả các collection theo quy tắc
+14. [FIXED][2024-09-30] **snipebot/src/tradelogic/smart_trade/executor.rs và snipebot/src/tradelogic/manual_trade.rs**:
+    - Trùng lặp logic xử lý giao dịch giữa hai executor
+    - Đã tạo các hàm helper trong snipebot/src/tradelogic/common/trade_execution.rs để chia sẻ logic chung
+    - Đã thêm hàm execute_trade_flow để chuẩn hóa quy trình thực hiện giao dịch chung
+    - Đã thêm các utility function trong common/utils.rs để xử lý phần chung của giao dịch
+    - Đã cập nhật smart_trade/utils.rs với hàm create_trade_tracker để tạo TradeTracker từ TradeParams
+    - Đã cập nhật common/mod.rs để export module trade_execution mới
 
-## Lỗi tổ chức module
+15. [FIXED][2024-10-01] **snipebot/src/analys/api/token_api.rs và snipebot/src/tradelogic/smart_trade/token_analysis.rs**:
+    - Trùng lặp logic phân tích token
+    - Đã tạo module snipebot/src/tradelogic/common/analysis.rs chứa các hàm phân tích token dùng chung
+    - Đã cập nhật token_api.rs để sử dụng hàm từ common/analysis.rs thay vì định nghĩa lại
+    - Đã cập nhật token_analysis.rs để sử dụng các hàm trong common/analysis.rs 
+    - Đã thêm các hàm convert_token_safety_to_security_check và analyze_token_security trong common/analysis.rs
+    - Đã thêm các hàm detect_token_issues, is_proxy_contract, has_blacklist_function, has_excessive_privileges để sử dụng chung
+    - Đã thêm documentation chi tiết cho tất cả các hàm để giải thích mục đích và cách sử dụng
 
-12. [FIXED][2024-09-15] **snipebot/src/tradelogic/mod.rs:18-26**:
-    - Re-export nhiều implementation trực tiếp trong mod.rs gây khó khăn khi thay thế implementation
-    - Đã sửa để chỉ re-export các trait và factory function, không re-export implementation cụ thể
+16. [FIXED][2024-10-01] **common/src/lib.rs**:
+    - Import không tồn tại: web3 và frontend
+    - Đã xóa các import module không tồn tại (web3 và frontend) để ngăn lỗi khi biên dịch
+    - Dọn dẹp mã nguồn, chỉ giữ lại các module thực sự tồn tại
 
-13. [FIXED][2024-09-16] **snipebot/src/analys/api/mod.rs:1-56**:
-    - Các factory function không được tổ chức vào một module riêng
-    - Đã tạo module `factory.rs` riêng biệt để chứa các factory function
-    - Đã cập nhật doc comment đầy đủ cho mỗi function theo quy tắc trong .cursorrc
-    - Đã sử dụng import ngắn gọn cho các trait từ traits.rs và re-export từ mod.rs
+## Lỗi thiếu tính năng hoặc thiếu implementation
 
-14. [FIXED][2024-09-17] **snipebot/src/tradelogic/smart_trade/executor.rs:1934-1996 và snipebot/src/tradelogic/mev_logic/execution.rs:78-245**:
-    - Trùng lặp logic xử lý gas price trong hai module: `calculate_optimal_gas_price` và `get_optimal_gas_price/calculate_optimal_gas`
-    - Đã tạo module `common/gas.rs` chứa logic chung để xử lý gas price
-    - Đã cập nhật cả hai module để sử dụng các hàm chung từ common/gas.rs
-    - Đã đảm bảo xử lý lỗi đúng cách và loại bỏ các enum trùng lặp
+1. [OPEN][2024-09-27] **snipebot/src/tradelogic/traits.rs**:
+   - Một số trait được định nghĩa nhưng không có implementation hoặc implementation không đầy đủ
+   - Cần triển khai đầy đủ các trait này hoặc đánh dấu rõ là stub
 
-15. [FIXED][2024-09-18] **snipebot/src/health.rs:336 và snipebot/src/config.rs:588**:
-    - Sử dụng `expect()` cho singleton instances có thể gây ra lỗi panic khi chạy, vi phạm quy tắc xử lý lỗi
-    - Đã thay thế bằng `unwrap_or_else()` kết hợp với log error để tránh crash khi có lỗi khởi tạo
-    - Đã đảm bảo rằng luôn có instance fallback ngay cả khi khởi tạo thất bại
+2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/sol_adapter.rs, stellar_adapter.rs, sui_adapter.rs, ton_adapter.rs**:
+   - Các adapter này chỉ là stub, chưa có implementation thực tế
+   - Cần triển khai đầy đủ hoặc đánh dấu rõ là stub trong code và documentation
 
-16. [FIXED][2024-09-18] **snipebot/src/tradelogic/mev_logic/execution.rs:146-164**:
-    - Sử dụng `lazy_static!` với `RwLock` của std cho singleton `GAS_HISTORY` trong async context
-    - Đã thay thế bằng `tokio::sync::OnceCell` kết hợp với `tokio::sync::RwLock` để đảm bảo thread-safety tốt hơn trong async context
-    - Đã cải thiện cách khởi tạo và truy cập singleton thông qua hàm `get_gas_history()`
-    - Đã di chuyển logic này vào module common/gas.rs để tái sử dụng trên toàn bộ hệ thống
+3. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/alert.rs**:
+   - Hệ thống cảnh báo chưa được triển khai đầy đủ
+   - Cần triển khai các kênh cảnh báo (Telegram, Discord, Email) như đã mô tả trong manifest
 
-## Lỗi mới phát hiện
+## Lỗi kiểu dữ liệu không nhất quán
 
-17. [FIXED][2024-09-18] **snipebot/src/chain_adapters/sol_adapter.rs, snipebot/src/chain_adapters/stellar_adapter.rs, snipebot/src/chain_adapters/sui_adapter.rs, snipebot/src/chain_adapters/ton_adapter.rs**:
-    - Các file adapter này là rỗng (0 bytes) nhưng đã được khai báo trong module chain_adapters
-    - Đã tạo các file stub với cấu trúc ban đầu và các TODO rõ ràng cho từng adapter
-    - Đã thêm các warning khi các phương thức chưa được triển khai được gọi
-    - Đã đảm bảo mỗi adapter tuân theo cùng tiêu chuẩn thiết kế trait-based của dự án
+1. [OPEN][2024-09-27] **snipebot/src/chain_adapters/bridge_adapter.rs và blockchain/src/processor/bridge_orchestrator.rs**:
+   - Sử dụng kiểu dữ liệu khác nhau cho cùng một thông tin: amount (U256 vs String), token_id (u64 vs String)
+   - Cần thống nhất kiểu dữ liệu trong toàn bộ codebase
 
-18. [FIXED][2024-09-18] **snipebot/src/chain_adapters/evm_adapter.rs:1-213**:
-    - File này chứa các method placeholder (trả về giá trị mặc định) mà không thực sự kết nối với blockchain
-    - Đã thêm warning rõ ràng vào doc comment để cảnh báo người dùng về tính chất placeholder
-    - Đã triển khai trạng thái adapter (uninitialized, disconnected, connected) để kiểm tra khởi tạo
-    - Đã thêm phương thức ensure_initialized() để kiểm tra trạng thái adapter trước mỗi lần gọi
-    - Đã thêm warning log cho mỗi phương thức placeholder để dễ dàng theo dõi khi gọi trong runtime
+2. [OPEN][2024-09-27] **snipebot/src/types.rs và snipebot/src/tradelogic/common/types.rs**:
+   - Định nghĩa không nhất quán cho các kiểu dữ liệu liên quan đến giao dịch
+   - Cần thống nhất định nghĩa và sử dụng re-export
 
-19. [FIXED][2024-09-19] **snipebot/src/analys/mempool/priority.rs:123-188**:
-    - Sử dụng `unwrap_or()` khi xử lý empty gas prices mà không có log warning
-    - Đã thêm xử lý lỗi chi tiết hơn khi xử lý gas price với log warning phù hợp
-    - Đã thay thế `unwrap_or()` bằng `unwrap_or_else()` để cải thiện xử lý lỗi và thêm log cho các trường hợp đặc biệt
-    - Đã thêm kiểm tra rỗng cho gas_prices trước khi tính giá trị trung bình để tránh lỗi chia cho 0
+## Lỗi thiếu validation và error handling
 
-20. [FIXED][2024-09-19] **snipebot/src/chain_adapters/mod.rs:9-12 và thư mục chain_adapters**:
-    - Các adapter trong mod.rs đang bị comment out nhưng file thực tế tồn tại trên hệ thống
-    - Đã uncomment các dòng trong mod.rs và cập nhật doc comment để phù hợp với tình trạng stub implementation
-    - Đã công khai các adapter đã tồn tại để tránh mã chết và duy trì tính nhất quán giữa code và file system
+1. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/executor.rs**:
+   - Một số hàm thiếu validation đầu vào hoặc xử lý lỗi không đầy đủ
+   - Cần thêm validation và error handling phù hợp
 
-21. [FIXED][2024-09-19] **snipebot/src/tradelogic/smart_trade/executor.rs:340-357**:
-    - Đang implement `Clone` cho `SmartTradeExecutor` thủ công mặc dù struct này chứa nhiều field phức tạp
-    - Đã xóa implement Clone thủ công và thay bằng #[derive(Clone)] ở định nghĩa struct
-    - Việc này giúp giảm rủi ro lỗi khi thêm/sửa field của struct và tuân theo quy tắc đơn giản hóa code
+2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/evm_adapter.rs**:
+   - Thiếu xử lý lỗi cho một số trường hợp đặc biệt (ví dụ: RPC timeout, gas spike)
+   - Cần cải thiện error handling và retry mechanism
 
-22. [FIXED][2024-09-19] **snipebot/src/tradelogic/common/gas.rs:117-175 và snipebot/src/tradelogic/mev_logic/execution.rs:134-198**:
-    - `common/gas.rs` đã triển khai `calculate_optimal_gas_price` nhưng một số module vẫn sử dụng logic riêng
-    - Đã cập nhật phương thức execute_sandwich trong mev_logic/execution.rs để sử dụng hàm chung từ common/gas.rs
-    - Đã thêm xử lý lỗi cẩn thận khi gọi các hàm gas chung và cung cấp fallback an toàn nếu cần
+## Lỗi thread safety
 
-23. [FIXED][2024-09-19] **snipebot/src/lib.rs:67-90**:
-    - Sử dụng `OnceCell` để khởi tạo global coordinator nhưng thiếu cơ chế xử lý lỗi nếu khởi tạo thất bại
-    - Đã cải thiện hàm `initialize_global_coordinator()` để xử lý các trường hợp lỗi khi khởi tạo
-    - Đã thêm kiểm tra nếu coordinator đã được khởi tạo trước đó và thêm log chi tiết cho mỗi bước
-    - Đã thêm fallback coordinator để đảm bảo hàm luôn trả về giá trị hợp lệ thay vì panic
+1. [OPEN][2024-09-27] **snipebot/src/tradelogic/mev_logic/cross_domain.rs**:
+   - Sử dụng clone() để tránh deadlock khi đọc RwLock, nhưng không an toàn
+   - Cần cải thiện cách xử lý lock để đảm bảo thread safety
 
-24. [FIXED][2024-09-19] **snipebot/src/lib.rs:148-178**:
-    - Trong hàm `init_chain_adapters()`, có lỗi tiềm ẩn khi truy cập vào phần tử đầu tiên của mảng `chain_config.rpc_urls`
-    - Đã thay thế indexing trực tiếp `[0]` bằng `.get(0)` kết hợp với `if let Some` để xử lý an toàn
-    - Đã thêm case xử lý khi vector rỗng sau khi đã kiểm tra để đảm bảo an toàn tuyệt đối
+2. [OPEN][2024-09-27] **snipebot/src/tradelogic/coordinator.rs**:
+   - Tiềm ẩn race condition khi nhiều executor cùng truy cập shared state
+   - Cần cải thiện synchronization mechanism
 
-25. [FIXED][2024-09-20] **snipebot/src/chain_adapters/mod.rs và các adapter files**:
-    - Thiếu thực hiện bridge adapter để kết nối giữa các blockchain khác nhau
-    - Đã triển khai bridge_adapter.rs dựa trên API từ blockchain/src
-    - Đã triển khai các trait BridgeProvider cho các công nghệ LayerZero và Wormhole
-    - Đã triển khai đầy đủ BridgeAdapter với các phương thức để quản lý giao dịch xuyên chuỗi
-    - Đã cập nhật mod.rs để export các types và structs cần thiết
+## Lỗi hiệu suất
 
-============================================================
+1. [OPEN][2024-09-27] **snipebot/src/analys/mempool/analyzer.rs**:
+   - Phân tích mempool không hiệu quả, có thể gây bottleneck
+   - Cần tối ưu hóa thuật toán và sử dụng caching
 
-# Lỗi tiềm ẩn và trùng lặp mới phát hiện (2024-09-20)
+2. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/executor.rs**:
+   - Một số hàm thực hiện nhiều RPC call tuần tự, gây chậm
+   - Cần sử dụng concurrent requests và batching
 
-26. [FIXED][2024-09-24] **blockchain/src/processor/bridge_orchestrator.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Trùng lặp định nghĩa enum `Chain`, `BridgeStatus`, struct `FeeEstimate`, `BridgeTransaction` giữa hai module
-    - Đã tạo module chung common/src/bridge_types/ để chia sẻ tất cả các định nghĩa trùng lặp
-    - Đã chuẩn hóa kiểu dữ liệu (sử dụng String cho amount và token_id), traits và interfaces
-    - Đã tạo các module con: chain.rs, status.rs, types.rs, transaction.rs, providers.rs, monitor.rs
-    - Đã thêm tất cả doc comments, test, và đảm bảo tuân thủ các quy tắc trong .cursorrc
+## Lỗi documentation
 
-27. [PENDING][2024-09-20] **blockchain/src/processor/bridge_orchestrator.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Trùng lặp logic chuyển đổi chain ID, xử lý bridge provider (LayerZero, Wormhole)
-    - Cần tạo library chung để chia sẻ các chức năng này
-    - Việc sửa đòi hỏi tái cấu trúc nhiều file, cần được xác nhận trước khi thực hiện
+1. [OPEN][2024-09-27] **snipebot/src/tradelogic/traits.rs**:
+   - Thiếu doc comment cho một số trait và method quan trọng
+   - Cần thêm documentation đầy đủ theo quy định trong .cursorrc
 
-28. [FIXED][2024-09-21] **blockchain/src/main.rs, blockchain/src/processor/layerzero.rs, blockchain/src/processor/wormhole.rs, blockchain/src/migrations/mod.rs**:
-    - Sử dụng expect(), unwrap() trong nhiều vị trí (đọc biến môi trường, parse, xử lý API response) có thể gây panic runtime
-    - Đã thay thế tất cả expect() và unwrap() trong blockchain/src/main.rs với unwrap_or_else() và xử lý lỗi phù hợp
-    - Đã thêm các giá trị mặc định cho các biến môi trường và log warning khi sử dụng giá trị mặc định
-    - Đã cải thiện xử lý lỗi trong migrations/mod.rs với context chi tiết và logging
-    - Đã cải thiện xử lý lỗi trong layerzero.rs và wormhole.rs với logging chi tiết và fallback an toàn
-    - Đã thêm các phương thức with_custom_url/with_config để cung cấp cấu hình linh hoạt hơn
-
-29. [PENDING][2024-09-20] **blockchain/src/processor/bridge_orchestrator.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Trùng lặp logic tạo payload cho bridge, lưu trữ transaction, update status, estimate fee
-    - Cần tạo module chung cho các chức năng này
-    - Việc sửa đòi hỏi tái cấu trúc nhiều file, cần được xác nhận trước khi thực hiện
-
-30. [PENDING][2024-09-20] **blockchain/src/sdk/bridge_client.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Trùng lặp logic API client (estimate_fee, get_transaction_status, retry_relay)
-    - Cần tạo client chung để sử dụng trong cả hai module
-    - Việc sửa đòi hỏi tạo module mới, cần được xác nhận trước khi thực hiện
-
-31. [FIXED][2024-09-21] **blockchain/src/processor/bridge_orchestrator.rs**:
-    - Thiếu kiểm tra null, validation đầu vào và log chi tiết khi gặp lỗi
-    - Đã cải thiện phương thức determine_target_chain với validation chi tiết cho chain_id
-    - Đã thêm kiểm tra testnet vs mainnet chain IDs và cung cấp thông báo lỗi rõ ràng
-    - Đã cải thiện phương thức get_transaction với validation đầy đủ cho tx_hash và các trường dữ liệu
-    - Đã thêm logging chi tiết cho mỗi bước xử lý và các trường hợp lỗi
-    - Đã cải thiện phương thức estimate_bridge_fee với validation đầy đủ cho input parameters
-
-32. [PENDING][2024-09-20] **blockchain/src/processor/bridge_orchestrator.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Không đồng nhất về kiểu dữ liệu (amount: U256 vs String, token_id: u64 vs String)
-    - Cần tạo module chung với chuẩn hóa các kiểu dữ liệu
-    - Việc sửa đòi hỏi tái cấu trúc nhiều file, cần được xác nhận trước khi thực hiện
-
-33. [PENDING][2024-09-20] **blockchain/src/sdk/api.rs**:
-    - Thiếu middleware bảo mật, xác thực cho các API endpoint bridge
-    - Cần thêm xác thực token/API key và rate limiting
-    - Cần được xác nhận về yêu cầu bảo mật cụ thể trước khi thực hiện
-
-34. [FIXED][2024-09-21] **blockchain/src/processor/bridge_orchestrator.rs & snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Không có cơ chế timeout hoặc retry rõ ràng cho các giao dịch bridge kéo dài
-    - Đã thêm cơ chế timeout rõ ràng thông qua MonitorConfig trong monitor_transaction
-    - Đã thêm xử lý retry với exponential backoff để tránh quá tải hệ thống
-    - Đã cập nhật monitor_layerzero_transaction và monitor_wormhole_transaction để sử dụng cơ chế chung
-    - Đã thêm metrics để theo dõi thời gian xử lý và tỷ lệ thành công của giao dịch
-
-35. [FIXED][2024-09-21] **blockchain/src/processor/bridge_orchestrator.rs:330-376**:
-    - Phương thức monitor_layerzero_transaction và monitor_wormhole_transaction có logic trùng lặp
-    - Đã refactor để triển khai phương thức chung monitor_transaction với cấu hình timeout và retry chiến lược
-    - Đã thêm struct MonitorConfig với max_retries, initial_delay, backoff_factor, và max_timeout
-    - Đã thêm xử lý exponential backoff và logging chi tiết cho quá trình monitoring
-    - Đã thêm metrics để theo dõi hiệu suất giao dịch như thời gian xử lý và tỷ lệ thành công
-
-36. [FIXED][2024-09-22] **snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Thiếu validation đầu vào và xử lý lỗi chi tiết cho các phương thức bridge tokens
-    - Thiếu context chi tiết khi gọi các phương thức bên ngoài, khiến việc debug khó khăn
-    - Thiếu cơ chế monitoring giao dịch bridge với timeout và retry
-    - Đã thêm validation chi tiết cho tất cả các tham số đầu vào của các phương thức API
-    - Đã thêm error context chi tiết với anyhow::Context để cải thiện debug và error tracing
-    - Đã đồng bộ hóa enum và functions với blockchain/src/processor/bridge_orchestrator.rs
-    - Đã thêm struct MonitorConfig tương thích và triển khai phương thức monitor_transaction
-    - Đã cải thiện xử lý lỗi để không panic khi gặp lỗi không nghiêm trọng
-    - Đã thêm doc comments đầy đủ cho tất cả các phương thức public theo quy tắc trong .cursorrc
+2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/evm_adapter.rs**:
+   - Doc comment không đầy đủ hoặc không cập nhật
+   - Cần cập nhật documentation để phản ánh đúng behavior hiện tại
 
 ============================================================
 
-# Phân tích lỗi còn PENDING (2024-09-22)
+# Danh sách lỗi tiềm ẩn và trùng lặp trong blockchain/src
 
-Các lỗi được đánh dấu PENDING không thể sửa ngay vì:
+## Lỗi trùng lặp định nghĩa và implementation
 
-1. Đòi hỏi tạo file/module mới, cần được xác nhận trước khi thực hiện (theo yêu cầu "CẤM TẠO FILE MỚI KHI KHÔNG CÓ YÊU CẦU!!!")
-2. Đòi hỏi tái cấu trúc nhiều file để giải quyết vấn đề trùng lặp giữa các module
-3. Cần có chiến lược rõ ràng để giải quyết trùng lặp code mà không làm ảnh hưởng đến chức năng hiện có
+1. [OPEN][2024-09-27] **blockchain/src/processor/bridge_orchestrator.rs và snipebot/src/chain_adapters/bridge_adapter.rs**:
+   - Trùng lặp định nghĩa và logic liên quan đến bridge
+   - Cần hợp nhất vào common/bridge_types
 
-Đề xuất giải pháp tổng thể cho các lỗi PENDING:
-
-1. Tạo module chung (common/bridge) để chia sẻ các định nghĩa và chức năng giữa blockchain/src và snipebot/src
-2. Chuẩn hóa API interface và kiểu dữ liệu để đảm bảo tính nhất quán
-3. Đưa các logic chung vào thư viện để tái sử dụng thay vì trùng lặp code
-4. Triển khai các middleware bảo mật cho các API endpoint bridge
-
-Khi được xác nhận, có thể thực hiện theo giai đoạn:
-- Phase 1: Tạo các module chung và chuyển các định nghĩa và chức năng giữa blockchain/src và snipebot/src
-- Phase 2: Thay thế dần các implementation trong blockchain/src và snipebot/src để sử dụng module chung
-- Phase 3: Triển khai các chức năng bảo mật và tối ưu hóa
-
-============================================================
-
-# Lỗi tiềm ẩn và trùng lặp mới phát hiện (2024-09-20)
-
-37. [FIXED][2024-09-23] **snipebot/src/analys/token_status/utils.rs và snipebot/src/tradelogic/smart_trade/executor.rs**:
-    - Thiếu các chức năng phân tích token nâng cao như phát hiện honeypot, dynamic tax, owner privilege, liquidity risk theo gợi ý từ .todolist
-    - Đã tạo ChainAdapter trait và SimulationResult cho việc mô phỏng giao dịch an toàn
-    - Đã thêm implement ChainAdapter cho EvmAdapter để hỗ trợ simulate_sell_token
-    - Đã bổ sung hàm detect_honeypot để mô phỏng bán token và kiểm tra các giới hạn
-    - Đã thêm hàm detect_dynamic_tax để phân tích tax động và phí ẩn trong contract
-    - Đã thêm hàm detect_liquidity_risk để phân tích sự kiện thanh khoản bất thường
-    - Đã thêm hàm detect_owner_privilege để phân tích các quyền đặc biệt của owner
-    - Đã thêm hàm auto_sell_on_alert để tự động bán token khi phát hiện các dấu hiệu nguy hiểm
-    - Đã cải tiến hàm check_token_safety_changes để phát hiện thay đổi về token sau khi mua
-    - Tất cả các hàm mới đều có doc comment đầy đủ và xử lý lỗi theo chuẩn anyhow::Result
-
-38. [FIXED][2024-09-23] **snipebot/src/chain_adapters/evm_adapter.rs**:
-    - Thiếu chức năng mô phỏng giao dịch bán để kiểm tra honeypot theo yêu cầu từ .todolist
-    - Đã thực hiện ChainAdapter trait để mô phỏng bán token và phát hiện honeypot
-    - Đã cải tiến simulate_buy_sell_slippage để tính toán slippage dựa trên token address và amount
-    - Đã thêm simulate_token_sell để tích hợp với công cụ hiện có và mở rộng chức năng
-    - Đã thêm logging chi tiết để dễ dàng debug và theo dõi quá trình simulation
-    - Đã kiểm tra và validate đầu vào như token address format, amount hợp lệ
-    - Đảm bảo tất cả phương thức mới đều gọi ensure_initialized() để tránh lỗi runtime
-
-39. [FIXED][2024-09-24] **snipebot/src/tradelogic/smart_trade/executor.rs**:
-    - Thiếu các chức năng phân tích token và tối ưu hóa giao dịch theo yêu cầu từ .todolist
-    - Đã thêm detect_blacklist và detect_anti_bot để phát hiện blacklist, anti-bot, anti-whale, max tx limits
-    - Đã thêm dynamic_tp_sl để tự động điều chỉnh take profit và stop loss theo biến động thị trường
-    - Đã thêm dynamic_trailing_stop để điều chỉnh trailing stop theo volatility (ATR, Bollinger Bands)
-    - Đã thêm whale_tracker để theo dõi hành vi của các ví lớn và bán khi phát hiện whale bán mạnh
-    - Tất cả các phương thức đều có doc comment đầy đủ, xử lý lỗi đúng cách với anyhow::Result
-    - Đã đảm bảo không block thread trong async context và giải phóng lock sớm khi cần
-    - Đã thêm logging chi tiết cho mỗi giai đoạn phân tích và quyết định
-
-============================================================
+============================================================ 

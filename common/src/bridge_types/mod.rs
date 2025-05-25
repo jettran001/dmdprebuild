@@ -1,23 +1,21 @@
-//! Bridge types for cross-chain operations
+//! # Bridge Types Module
 //!
-//! This module contains types, traits, and utilities for cross-chain bridge operations
-//! that are shared between the blockchain and snipebot domains. By centralizing these
-//! definitions, we avoid code duplication and ensure consistency across the system.
+//! Định nghĩa các kiểu dữ liệu, traits và hàm utility cho hệ thống bridge
+//! giữa các blockchain.
 
-mod chain;
-mod status;
-mod types;
-mod transaction;
-mod providers;
-mod monitor;
+pub mod chain;
+pub mod status;
+pub mod transaction;
+pub mod types;
+pub mod providers;
+pub mod monitoring;
 
-// Re-export all items from submodules
-pub use chain::*;
-pub use status::*;
-pub use types::*;
-pub use transaction::*;
-pub use providers::*;
-pub use monitor::*;
+pub use chain::Chain;
+pub use status::BridgeStatus;
+pub use transaction::BridgeTransaction;
+pub use types::{FeeEstimate, MonitorConfig};
+pub use providers::{BridgeProvider, BridgeClient, BridgeMonitor, BridgeAdapter};
+pub use monitoring::monitor_transaction;
 
 // Documentation for core concepts
 /// Bridge operations between blockchains, enabling cross-chain token transfers

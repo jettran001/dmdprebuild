@@ -15,12 +15,16 @@ pub mod sui_adapter;
 pub mod ton_adapter;
 pub mod bridge_adapter;
 
-// Re-export các loại dữ liệu quan trọng cho API
-pub use bridge_adapter::{
-    BridgeAdapter, 
-    BridgeStatus, 
-    Chain, 
+// Re-export các loại dữ liệu quan trọng từ crate::bridge_types cho API
+pub use crate::bridge_types::{
+    Chain,
+    BridgeStatus,
     BridgeTransaction,
     FeeEstimate,
+    MonitorConfig,
+    BridgeAdapter as CommonBridgeAdapter,
     BridgeProvider
-}; 
+};
+
+// Re-export BridgeAdapter implementation
+pub use bridge_adapter::BridgeAdapter as SnipeBotBridgeAdapter; 

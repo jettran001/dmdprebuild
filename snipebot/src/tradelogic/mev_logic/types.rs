@@ -10,24 +10,56 @@ use crate::types::{ChainType, TokenPair};
 // Import from common module
 use crate::tradelogic::common::types::{TraderBehaviorType, TraderExpertiseLevel, GasBehavior, TraderBehaviorAnalysis};
 
-/// MEV types and data models
-use std::collections::{HashMap, HashSet};
+// Import from analys/mempool/types để tránh định nghĩa trùng lặp
+use crate::analys::mempool::types::{
+    SuspiciousPattern, MempoolAlertType, TransactionType, TransactionPriority,
+    AlertSeverity, TokenInfo
+};
 
-/// Type of MEV opportunity detected
+/// MEV types and data models
+
+/// Type of MEV opportunity detected - Sử dụng SuspiciousPattern từ mempool làm cơ sở
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MevOpportunityType {
     /// Price difference between DEXes
     Arbitrage,
-    /// Sandwich a large transaction
+    /// Sandwich a large transaction - dùng từ SuspiciousPattern
     Sandwich,
-    /// Front run another transaction
+    /// Front run another transaction - dùng từ SuspiciousPattern
     FrontRun,
-    /// New token creation
+    /// New token creation - dùng từ MempoolAlertType
     NewToken,
-    /// New liquidity added
+    /// New liquidity added - dùng từ MempoolAlertType
     NewLiquidity,
-    /// Opportunity related to liquidity removal
+    /// Opportunity related to liquidity removal - dùng từ MempoolAlertType
     LiquidityRemoval,
+}
+
+// Thêm impl để có thể chuyển đổi từ SuspiciousPattern sang MevOpportunityType
+impl From<SuspiciousPattern> for MevOpportunityType {
+    fn from(pattern: SuspiciousPattern) -> Self {
+        match pattern {
+            SuspiciousPattern::SandwichAttack => MevOpportunityType::Sandwich,
+            SuspiciousPattern::FrontRunning => MevOpportunityType::FrontRun,
+            SuspiciousPattern::SuddenLiquidityRemoval => MevOpportunityType::LiquidityRemoval,
+            // Các trường hợp khác không ánh xạ trực tiếp vào MevOpportunityType
+            _ => MevOpportunityType::Arbitrage, // Mặc định
+        }
+    }
+}
+
+// Thêm impl để có thể chuyển đổi từ MempoolAlertType sang MevOpportunityType
+impl From<MempoolAlertType> for MevOpportunityType {
+    fn from(alert_type: MempoolAlertType) -> Self {
+        match alert_type {
+            MempoolAlertType::NewToken => MevOpportunityType::NewToken,
+            MempoolAlertType::LiquidityAdded => MevOpportunityType::NewLiquidity,
+            MempoolAlertType::LiquidityRemoved => MevOpportunityType::LiquidityRemoval,
+            MempoolAlertType::MevOpportunity => MevOpportunityType::Arbitrage,
+            MempoolAlertType::SuspiciousTransaction(pattern) => Self::from(pattern),
+            _ => MevOpportunityType::Arbitrage, // Mặc định
+        }
+    }
 }
 
 /// MEV execution method
@@ -199,7 +231,13 @@ pub struct CrossDomainMevConfig {
     pub min_profit_threshold_usd: f64,
     /// Maximum latency tolerance (ms)
     pub max_latency_ms: u64,
-    /// Bridging cost estimate (USD)
+    /// Bridge providers (key=provider name, value=endpoint URL)
+    pub bridge_providers: std::collections::HashMap<String, String>,
+    /// Maximum bridging cost allowed (USD)
+    pub max_bridge_cost_usd: f64,
+    /// Estimated bridging time per chain (key=chain ID, value=seconds)
+    pub estimated_bridge_time: std::collections::HashMap<u64, u64>,
+    /// Estimated bridge cost (USD)
     pub estimated_bridge_cost_usd: f64,
     /// Gas oracle endpoints
     pub gas_oracle_endpoints: std::collections::HashMap<u64, String>,
@@ -208,27 +246,36 @@ pub struct CrossDomainMevConfig {
 impl Default for CrossDomainMevConfig {
     fn default() -> Self {
         let mut supported_chains = HashSet::new();
-        supported_chains.insert((1, 10)); // Ethereum-Optimism
-        supported_chains.insert((1, 42161)); // Ethereum-Arbitrum
+        supported_chains.insert((1, 56)); // Ethereum <-> BSC
+        supported_chains.insert((1, 137)); // Ethereum <-> Polygon
+        
+        let mut bridge_providers = HashMap::new();
+        bridge_providers.insert("layerzero".to_string(), "https://api.layerzero.network".to_string());
+        
+        let mut estimated_bridge_time = HashMap::new();
+        estimated_bridge_time.insert(1, 30); // Ethereum: 30s
+        estimated_bridge_time.insert(56, 15); // BSC: 15s
+        estimated_bridge_time.insert(137, 10); // Polygon: 10s
         
         let mut gas_oracle_endpoints = HashMap::new();
-        gas_oracle_endpoints.insert(1, "https://api.etherscan.io/api?module=gastracker&action=gasoracle".to_string());
-        gas_oracle_endpoints.insert(10, "https://api-optimistic.etherscan.io/api?module=gastracker&action=gasoracle".to_string());
-        gas_oracle_endpoints.insert(42161, "https://api.arbiscan.io/api?module=gastracker&action=gasoracle".to_string());
+        gas_oracle_endpoints.insert(1, "https://api.etherscan.io/api?module=gastracker".to_string());
         
         Self {
             enabled: false,
             supported_chains,
             min_profit_threshold_usd: 100.0,
-            max_latency_ms: 500,
-            estimated_bridge_cost_usd: 10.0,
+            max_latency_ms: 5000,
+            bridge_providers,
+            max_bridge_cost_usd: 50.0,
+            estimated_bridge_time,
+            estimated_bridge_cost_usd: 20.0,
             gas_oracle_endpoints,
         }
     }
 }
 
-/// Searcher strategy types
-#[derive(Debug, Clone, PartialEq)]
+/// Searcher strategy for submitting transactions
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SearcherStrategy {
     /// Standard MEV
     Standard,
@@ -240,7 +287,7 @@ pub enum SearcherStrategy {
     OrderFlowAuction,
 }
 
-/// Searcher identity for MEV submission
+/// Searcher identity information
 #[derive(Debug, Clone)]
 pub struct SearcherIdentity {
     /// Searcher name/identifier

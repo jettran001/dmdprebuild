@@ -7,11 +7,13 @@ pub mod types;
 pub mod utils;
 pub mod analysis;
 pub mod gas;
+pub mod trade_execution;
 
 // Re-exports for convenience
 pub use types::*;
 pub use utils::*;
 pub use analysis::*;
+pub use trade_execution::*;
 
 // Re-export gas utilities
 pub use gas::{

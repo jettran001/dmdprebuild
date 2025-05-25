@@ -296,7 +296,7 @@ pub struct SecurityCheckResult {
     pub is_honeypot: bool,
     
     /// List of identified issues
-    pub issues: Vec<TokenIssue>,
+    pub issues: Vec<TokenIssueDetail>,
     
     /// Contract verification status
     pub is_contract_verified: bool,
@@ -319,7 +319,7 @@ impl Default for SecurityCheckResult {
 
 /// Token issues detected during security analysis
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TokenIssue {
+pub struct TokenIssueDetail {
     /// Type of issue
     pub issue_type: TokenIssueType,
     
@@ -330,7 +330,7 @@ pub struct TokenIssue {
     pub severity: u8,
 }
 
-impl Default for TokenIssue {
+impl Default for TokenIssueDetail {
     fn default() -> Self {
         Self {
             issue_type: TokenIssueType::Other,

@@ -14,7 +14,7 @@ use reqwest;
 use std::time::Duration;
 
 // Import from common bridge types
-use common::bridge_types::{
+use crate::bridge_types::{
     Chain,
     BridgeStatus,
     FeeEstimate,
@@ -230,7 +230,9 @@ impl BridgeProvider for WormholeBridge {
     }
 }
 
-/// Main bridge adapter that aggregates multiple bridge providers
+/// SnipeBot implementation of the common BridgeAdapter 
+/// Implements both crate::bridge_types::BridgeAdapter trait and 
+/// additional functionality specific to SnipeBot
 pub struct BridgeAdapter {
     /// Chain ID used for internal referencing
     chain_id: u32,
@@ -242,11 +244,15 @@ pub struct BridgeAdapter {
     max_recent_txs: usize,
 }
 
-#[async_trait]
+/// Implement the common BridgeAdapter trait
 impl CommonBridgeAdapter for BridgeAdapter {
     async fn register_provider(&self, provider_name: &str, provider: Box<dyn BridgeProvider>) -> Result<()> {
+        // Chuyển đổi Box<dyn BridgeProvider> thành Arc<dyn BridgeProvider>
+        let arc_provider = Arc::from(provider);
+        
+        // Sử dụng phương thức nội bộ để đăng ký provider
         let mut providers = self.providers.write().await;
-        providers.push((provider_name.to_string(), Arc::from(provider)));
+        providers.push((provider_name.to_string(), arc_provider));
         info!("Registered bridge provider: {}", provider_name);
         Ok(())
     }
@@ -256,8 +262,8 @@ impl CommonBridgeAdapter for BridgeAdapter {
         
         for (name, provider) in providers.iter() {
             if name == provider_name {
-                // Clone the Arc and convert to Box
-                return Ok(Box::new(BridgeProviderWrapper(provider.clone())));
+                // Quản lý lại Arc để trả về Box
+                return Ok(Box::new(provider.clone()));
             }
         }
         
@@ -292,32 +298,6 @@ impl CommonBridgeAdapter for BridgeAdapter {
     }
 }
 
-/// Wrapper to convert Arc<dyn BridgeProvider> to Box<dyn BridgeProvider>
-struct BridgeProviderWrapper(Arc<dyn BridgeProvider>);
-
-#[async_trait]
-impl BridgeProvider for BridgeProviderWrapper {
-    async fn send_message(&self, from_chain: Chain, to_chain: Chain, receiver: String, payload: Vec<u8>) -> Result<String> {
-        self.0.send_message(from_chain, to_chain, receiver, payload).await
-    }
-    
-    async fn get_transaction_status(&self, tx_hash: &str) -> Result<BridgeStatus> {
-        self.0.get_transaction_status(tx_hash).await
-    }
-    
-    async fn estimate_fee(&self, from_chain: Chain, to_chain: Chain, payload_size: usize) -> Result<FeeEstimate> {
-        self.0.estimate_fee(from_chain, to_chain, payload_size).await
-    }
-    
-    fn supports_chain(&self, chain: Chain) -> bool {
-        self.0.supports_chain(chain)
-    }
-    
-    fn provider_name(&self) -> &str {
-        self.0.provider_name()
-    }
-}
-
 impl BridgeAdapter {
     /// Create a new bridge adapter
     pub fn new(chain_id: u32) -> Self {
@@ -341,6 +321,9 @@ impl BridgeAdapter {
     }
     
     /// Register a bridge provider (compatibility wrapper for existing code)
+    /// 
+    /// Deprecated: Use register_provider from CommonBridgeAdapter trait instead
+    #[deprecated(note = "Use register_provider from CommonBridgeAdapter trait instead")]
     pub async fn register_provider_legacy(&self, name: &str, provider: Arc<dyn BridgeProvider>) -> Result<()> {
         let mut providers = self.providers.write().await;
         providers.push((name.to_string(), provider));
@@ -349,6 +332,9 @@ impl BridgeAdapter {
     }
     
     /// Get a specific bridge provider by name (compatibility wrapper for existing code)
+    /// 
+    /// Deprecated: Use get_provider from CommonBridgeAdapter trait instead
+    #[deprecated(note = "Use get_provider from CommonBridgeAdapter trait instead")]
     pub async fn get_provider_legacy(&self, name: &str) -> Result<Arc<dyn BridgeProvider>> {
         let providers = self.providers.read().await;
         
@@ -464,6 +450,9 @@ impl BridgeAdapter {
     /// 
     /// # Returns
     /// Bridge transaction details
+    /// 
+    /// Deprecated: Use bridge_tokens from CommonBridgeAdapter trait instead
+    #[deprecated(note = "Use bridge_tokens from CommonBridgeAdapter trait instead")]
     pub async fn bridge_tokens(&self, 
                              provider_name: &str,
                              source_chain: Chain, 

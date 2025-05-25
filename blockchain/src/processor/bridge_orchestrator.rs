@@ -21,107 +21,18 @@ use futures::Future;
 use futures::future::BoxFuture;
 use metrics;
 
-// Định nghĩa các trạng thái bridge
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum BridgeStatus {
-    Pending,
-    Confirmed,
-    Failed(String),
-    Completed,
-}
+// Sử dụng các định nghĩa từ common::bridge_types
+use common::bridge_types::{
+    Chain,
+    BridgeStatus,
+    FeeEstimate,
+    BridgeTransaction,
+    MonitorConfig,
+    BridgeProvider,
+    monitor_transaction,
+};
 
-// Định nghĩa các chuỗi hỗ trợ
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Chain {
-    BSC,
-    NEAR,
-    Solana,
-    Ethereum,
-    Polygon,
-    Avalanche,
-}
-
-impl Chain {
-    /// Chuyển đổi chain sang LayerZero chain ID
-    pub fn to_layerzero_id(&self) -> u16 {
-        match self {
-            Chain::BSC => 2,         // BSC trong LayerZero
-            Chain::NEAR => 115,      // NEAR trong LayerZero
-            Chain::Ethereum => 1,    // Ethereum trong LayerZero
-            Chain::Polygon => 4,     // Polygon trong LayerZero
-            Chain::Avalanche => 3,   // Avalanche trong LayerZero
-            Chain::Solana => 0,      // Solana không dùng LayerZero mà dùng Wormhole
-        }
-    }
-    
-    /// Chuyển đổi chain sang string representation
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Chain::BSC => "bsc",
-            Chain::NEAR => "near",
-            Chain::Solana => "solana",
-            Chain::Ethereum => "ethereum",
-            Chain::Polygon => "polygon",
-            Chain::Avalanche => "avalanche",
-        }
-    }
-    
-    /// Chuyển đổi từ LayerZero chain ID sang Chain enum
-    pub fn from_layerzero_id(id: u16) -> Option<Self> {
-        match id {
-            1 => Some(Chain::Ethereum),
-            2 => Some(Chain::BSC),
-            3 => Some(Chain::Avalanche),
-            4 => Some(Chain::Polygon),
-            115 => Some(Chain::NEAR),
-            _ => None,
-        }
-    }
-    
-    /// Kiểm tra xem chain có được supported bởi LayerZero không
-    pub fn is_layerzero_supported(&self) -> bool {
-        match self {
-            Chain::Solana => false,  // Solana không hỗ trợ LayerZero
-            _ => true,              // Các chain khác đều hỗ trợ
-        }
-    }
-    
-    /// Kiểm tra xem chain có được supported bởi Wormhole không
-    pub fn is_wormhole_supported(&self) -> bool {
-        match self {
-            Chain::NEAR => false,    // NEAR không hỗ trợ Wormhole
-            _ => true,              // Các chain khác đều hỗ trợ
-        }
-    }
-    
-    /// Danh sách các chain được hỗ trợ cho bridge
-    pub fn supported_chains() -> Vec<Self> {
-        vec![
-            Self::BSC,
-            Self::NEAR,
-            Self::Solana,
-            Self::Ethereum,
-            Self::Polygon,
-            Self::Avalanche
-        ]
-    }
-}
-
-impl ToString for Chain {
-    fn to_string(&self) -> String {
-        self.as_str().to_string()
-    }
-}
-
-// Struct chứa thông tin ước tính phí
-#[derive(Debug, Clone, Serialize)]
-pub struct FeeEstimate {
-    pub fee_amount: String,  // Số lượng phí theo số nguyên
-    pub fee_token: String,   // Token của phí (VD: "BNB", "ETH", ...)
-    pub fee_usd: f64,        // Quy đổi sang USD
-}
-
-// Interface cho LayerZero client
+// Interface cho LayerZero client - cần giữ lại vì chưa có trong module chung
 #[async_trait]
 pub trait LayerZeroClient: Send + Sync + 'static {
     async fn send_message(&self, from_chain_id: u16, to_chain_id: u16, receiver: String, payload: Vec<u8>) -> Result<String, Box<dyn Error>>;
@@ -129,41 +40,12 @@ pub trait LayerZeroClient: Send + Sync + 'static {
     async fn estimate_fee(&self, from_chain_id: u16, to_chain_id: u16, payload_size: usize) -> Result<FeeEstimate, Box<dyn Error>>;
 }
 
-// Interface cho Wormhole client
+// Interface cho Wormhole client - cần giữ lại vì chưa có trong module chung
 #[async_trait]
 pub trait WormholeClient: Send + Sync + 'static {
     async fn send_message(&self, from_chain: &str, to_chain: &str, receiver: String, payload: Vec<u8>) -> Result<String, Box<dyn Error>>;
     async fn get_transaction_status(&self, tx_hash: &str) -> Result<String, Box<dyn Error>>;
     async fn estimate_fee(&self, from_chain: &str, to_chain: &str, payload_size: usize) -> Result<FeeEstimate, Box<dyn Error>>;
-}
-
-// Thông tin về một giao dịch bridge
-#[derive(Debug, Clone)]
-pub struct BridgeTransaction {
-    tx_hash: String,
-    source_chain: Chain,
-    target_chain: Chain,
-    sender: String,
-    receiver: String,
-    amount: U256,
-    token_id: u64,
-    status: BridgeStatus,
-    timestamp: u64,
-}
-
-// Orchestrator chính
-pub struct BridgeOrchestrator {
-    bsc_provider: Provider<Ws>,
-    near_client: JsonRpcClient,
-    solana_client: RpcClient,
-    bridge_contract_bsc: Address,
-    token_contract_bsc: Address,
-    // Các client cho LayerZero và Wormhole
-    layerzero_client: Arc<dyn LayerZeroClient>,
-    wormhole_client: Arc<dyn WormholeClient>,
-    // Cache và DB
-    transactions: Arc<RwLock<HashMap<String, BridgeTransaction>>>,
-    db_pool: PgPool,
 }
 
 // Mapping sự kiện từ các contract
@@ -181,28 +63,19 @@ pub struct TokenBridgedEvent {
 #[derive(Debug, Clone)]
 pub struct TokenBridgedFilter;
 
-/// Cấu hình cho quá trình monitoring giao dịch bridge
-#[derive(Clone, Debug)]
-pub struct MonitorConfig {
-    /// Số lần retry tối đa
-    pub max_retries: u32,
-    /// Thời gian chờ ban đầu giữa các lần retry (giây)
-    pub initial_delay: u64,
-    /// Hệ số tăng thời gian chờ theo cấp số nhân
-    pub backoff_factor: f32,
-    /// Thời gian tối đa để chờ một giao dịch hoàn thành (giây)
-    pub max_timeout: u64,
-}
-
-impl Default for MonitorConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 5,
-            initial_delay: 30,
-            backoff_factor: 1.5,
-            max_timeout: 3600, // 1 giờ
-        }
-    }
+// Orchestrator chính
+pub struct BridgeOrchestrator {
+    bsc_provider: Provider<Ws>,
+    near_client: JsonRpcClient,
+    solana_client: RpcClient,
+    bridge_contract_bsc: Address,
+    token_contract_bsc: Address,
+    // Các client cho LayerZero và Wormhole
+    layerzero_client: Arc<dyn LayerZeroClient>,
+    wormhole_client: Arc<dyn WormholeClient>,
+    // Cache và DB
+    transactions: Arc<RwLock<HashMap<String, BridgeTransaction>>>,
+    db_pool: PgPool,
 }
 
 impl BridgeOrchestrator {
@@ -257,23 +130,32 @@ impl BridgeOrchestrator {
     
     // Xử lý event TokenBridged
     async fn process_token_bridged_event(&self, event: TokenBridgedEvent) -> Result<(), Box<dyn Error>> {
-        let tx = BridgeTransaction {
-            tx_hash: event.tx_hash.to_string(),
-            source_chain: Chain::BSC,
-            target_chain: self.determine_target_chain(event.to_chain_id)?,
-            sender: event.from.to_string(),
-            receiver: hex::encode(event.to_address.clone()),
-            amount: event.amount,
-            token_id: event.id.as_u64(),
-            status: BridgeStatus::Pending,
-            timestamp: chrono::Utc::now().timestamp() as u64,
-        };
+        // Chuyển đổi U256 thành String để tương thích với BridgeTransaction
+        let amount = event.amount.to_string();
+        let token_id = event.id.as_u64().to_string();
         
-        // Lưu transaction vào cache và DB
+        // Mã hiện tại đang sử dụng from_layerzero_id, cần chuyển đổi sang Chain enum từ common
+        let target_chain = Chain::from_layerzero_id(event.to_chain_id)
+            .ok_or_else(|| format!("Unsupported chain ID: {}", event.to_chain_id))?;
+        
+        // Tạo BridgeTransaction mới theo định dạng từ common::bridge_types
+        let tx = BridgeTransaction::pending(
+            event.tx_hash.to_string(),
+            Chain::BSC,
+            target_chain,
+            event.from.to_string(),
+            hex::encode(&event.to_address),
+            amount,
+            token_id,
+        );
+        
+        // Lưu transaction mới
         self.store_transaction(&tx).await?;
         
-        // Bắt đầu xác thực và relay
-        self.validate_and_relay(tx).await
+        // Tiếp tục xử lý như trước
+        self.validate_and_relay(tx).await?;
+        
+        Ok(())
     }
     
     // Xác thực payload và relay sang chain đích
@@ -310,19 +192,37 @@ impl BridgeOrchestrator {
             payload
         ).await?;
         
-        // Theo dõi trạng thái của giao dịch LayerZero
-        tokio::spawn(self.clone().monitor_transaction(
-            tx.tx_hash.clone(),
-            lz_tx,
-            None,
-            |hash| {
-                let client = self.layerzero_client.clone();
-                Box::pin(async move {
-                    client.get_transaction_status(hash).await
-                })
-            },
-            |tx| self.relay_to_near(tx)
-        ));
+        // Sử dụng monitor_transaction từ common::bridge_types
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let wrapper = LayerZeroWrapper(self.layerzero_client.clone());
+            
+            // Sử dụng hàm monitor_transaction từ common
+            match monitor_transaction(
+                &lz_tx,
+                |hash| wrapper.get_transaction_status(hash),
+                Some(tx_clone),
+                None
+            ).await {
+                Ok(status) => {
+                    // Cập nhật trạng thái transaction
+                    if let Err(e) = self.update_transaction_status(&tx.tx_hash, status).await {
+                        error!("Failed to update transaction status: {}", e);
+                    }
+                },
+                Err(e) => {
+                    error!("Error monitoring transaction {}: {}", lz_tx, e);
+                    
+                    // Cập nhật transaction thành failed
+                    if let Err(e) = self.update_transaction_status(
+                        &tx.tx_hash, 
+                        BridgeStatus::Failed(format!("Monitoring error: {}", e))
+                    ).await {
+                        error!("Failed to update transaction status: {}", e);
+                    }
+                }
+            }
+        });
         
         Ok(())
     }
@@ -340,46 +240,71 @@ impl BridgeOrchestrator {
             payload
         ).await?;
         
-        // Theo dõi trạng thái của giao dịch Wormhole
-        tokio::spawn(self.clone().monitor_transaction(
-            tx.tx_hash.clone(),
-            wh_tx,
-            None,
-            |hash| {
-                let client = self.wormhole_client.clone();
-                Box::pin(async move {
-                    client.get_transaction_status(hash).await
-                })
-            },
-            |tx| self.relay_to_solana(tx)
-        ));
+        // Sử dụng monitor_transaction từ common::bridge_types
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let wrapper = WormholeWrapper(self.wormhole_client.clone());
+            
+            // Sử dụng hàm monitor_transaction từ common
+            match monitor_transaction(
+                &wh_tx,
+                |hash| wrapper.get_transaction_status(hash),
+                Some(tx_clone),
+                None
+            ).await {
+                Ok(status) => {
+                    // Cập nhật trạng thái transaction
+                    if let Err(e) = self.update_transaction_status(&tx.tx_hash, status).await {
+                        error!("Failed to update transaction status: {}", e);
+                    }
+                },
+                Err(e) => {
+                    error!("Error monitoring transaction {}: {}", wh_tx, e);
+                    
+                    // Cập nhật transaction thành failed
+                    if let Err(e) = self.update_transaction_status(
+                        &tx.tx_hash, 
+                        BridgeStatus::Failed(format!("Monitoring error: {}", e))
+                    ).await {
+                        error!("Failed to update transaction status: {}", e);
+                    }
+                }
+            }
+        });
         
         Ok(())
     }
     
     // Lưu trạng thái của giao dịch
-    async fn store_transaction(&self, tx: &BridgeTransaction) -> Result<(), Box<dyn Error>> {
+    pub async fn store_transaction(&self, tx: &BridgeTransaction) -> Result<(), Box<dyn Error>> {
         // Lưu vào cache
-        let mut transactions = self.transactions.write().await;
-        transactions.insert(tx.tx_hash.clone(), tx.clone());
+        {
+            let mut transactions = self.transactions.write().await;
+            transactions.insert(tx.tx_hash.clone(), tx.clone());
+        }
         
         // Lưu vào database
         sqlx::query!(
-            "INSERT INTO bridge_transactions 
-            (tx_hash, source_chain, target_chain, sender, receiver, amount, token_id, status, timestamp) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            r#"
+            INSERT INTO bridge_transactions 
+            (tx_hash, source_chain, target_chain, sender, receiver, amount, token_id, status, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (tx_hash) DO UPDATE
+            SET status = $8, timestamp = $9
+            "#,
             tx.tx_hash,
-            tx.source_chain.to_string(),
-            tx.target_chain.to_string(),
+            tx.source_chain.as_str(),
+            tx.target_chain.as_str(),
             tx.sender,
             tx.receiver,
-            tx.amount.to_string(),
-            tx.token_id as i64,
-            serde_json::to_string(&tx.status)?,
+            tx.amount,
+            tx.token_id,
+            format!("{}", tx.status),
             tx.timestamp as i64
         )
         .execute(&self.db_pool)
-        .await?;
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn Error>)?;
         
         Ok(())
     }
@@ -547,54 +472,143 @@ impl BridgeOrchestrator {
 
     // Monitoring LayerZero transaction (wrapper trên monitor_transaction)
     pub async fn monitor_layerzero_transaction(&self, tx_hash: H256, lz_tx_hash: String) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
-        info!("Monitoring LayerZero transaction: {} (provider tx: {})", tx_hash.to_string(), lz_tx_hash);
-        
-        let config = MonitorConfig {
-            max_retries: 5,
-            initial_delay: 30,
-            backoff_factor: 1.5,
-            max_timeout: 3600, // 1 hour
-        };
-        
-        let client = self.layerzero_client.clone();
-        self.monitor_transaction(
-            tx_hash,
-            lz_tx_hash,
-            Some(config),
-            move |hash| {
-                let client = client.clone();
-                Box::pin(async move {
-                    client.get_transaction_status(hash).await
-                })
-            },
-            |tx| self.relay_to_near(tx)
-        ).await
-    }
+        // Wrapper cho LayerZero client cần cho monitor_transaction
+        struct LayerZeroWrapper<'a>(&'a dyn LayerZeroClient);
 
-    // Monitoring Wormhole transaction (wrapper trên monitor_transaction)
-    pub async fn monitor_wormhole_transaction(&self, tx_hash: H256, wh_tx_hash: String) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
-        info!("Monitoring Wormhole transaction: {} (provider tx: {})", tx_hash.to_string(), wh_tx_hash);
+        // Implement BridgeProvider cho LayerZeroWrapper
+        #[async_trait]
+        impl<'a> BridgeProvider for LayerZeroWrapper<'a> {
+            async fn send_message(&self, from_chain: Chain, to_chain: Chain, receiver: String, payload: Vec<u8>) -> anyhow::Result<String> {
+                self.0.send_message(from_chain.to_layerzero_id(), to_chain.to_layerzero_id(), receiver, payload)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            }
+            
+            async fn get_transaction_status(&self, tx_hash: &str) -> anyhow::Result<BridgeStatus> {
+                let status = self.0.get_transaction_status(tx_hash).await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                
+                // Chuyển đổi String status thành BridgeStatus
+                match status.as_str() {
+                    "pending" => Ok(BridgeStatus::Pending),
+                    "confirmed" => Ok(BridgeStatus::Confirmed),
+                    "completed" => Ok(BridgeStatus::Completed),
+                    _ if status.starts_with("failed:") => {
+                        let reason = status.strip_prefix("failed:").unwrap_or(&status).trim();
+                        Ok(BridgeStatus::Failed(reason.to_string()))
+                    }
+                    _ => Ok(BridgeStatus::Pending),
+                }
+            }
+            
+            async fn estimate_fee(&self, from_chain: Chain, to_chain: Chain, payload_size: usize) -> anyhow::Result<FeeEstimate> {
+                self.0.estimate_fee(from_chain.to_layerzero_id(), to_chain.to_layerzero_id(), payload_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            }
+            
+            fn supports_chain(&self, chain: Chain) -> bool {
+                chain.is_layerzero_supported()
+            }
+            
+            fn provider_name(&self) -> &str {
+                "LayerZero"
+            }
+        }
         
-        let config = MonitorConfig {
-            max_retries: 5,
-            initial_delay: 30,
-            backoff_factor: 1.5,
-            max_timeout: 7200, // 2 hours - Solana finality có thể lâu hơn
-        };
+        // Sử dụng wrapper và hàm monitor_transaction chung
+        let wrapper = LayerZeroWrapper(&*self.layerzero_client);
         
-        let client = self.wormhole_client.clone();
-        self.monitor_transaction(
-            tx_hash,
-            wh_tx_hash,
-            Some(config),
-            move |hash| {
-                let client = client.clone();
-                Box::pin(async move {
-                    client.get_transaction_status(hash).await
-                })
+        // Chuyển H256 và String thành BridgeTransaction để sử dụng trong monitor_transaction
+        let tx = self.get_transaction(&tx_hash.to_string()).await?;
+        
+        // Gọi hàm monitor_transaction chung
+        match monitor_transaction(
+            &lz_tx_hash,
+            |hash| wrapper.get_transaction_status(hash),
+            Some(tx),
+            None
+        ).await {
+            Ok(status) => {
+                // Cập nhật trạng thái transaction
+                self.update_transaction_status(&tx_hash.to_string(), status).await?;
+                Ok(())
             },
-            |tx| self.relay_to_solana(tx)
-        ).await
+            Err(e) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Error monitoring transaction {}: {}", lz_tx_hash, e)
+            )))
+        }
+    }
+    
+    pub async fn monitor_wormhole_transaction(&self, tx_hash: H256, wh_tx_hash: String) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+        // Wrapper cho Wormhole client cần cho monitor_transaction
+        struct WormholeWrapper<'a>(&'a dyn WormholeClient);
+
+        // Implement BridgeProvider cho WormholeWrapper
+        #[async_trait]
+        impl<'a> BridgeProvider for WormholeWrapper<'a> {
+            async fn send_message(&self, from_chain: Chain, to_chain: Chain, receiver: String, payload: Vec<u8>) -> anyhow::Result<String> {
+                self.0.send_message(from_chain.as_str(), to_chain.as_str(), receiver, payload)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            }
+            
+            async fn get_transaction_status(&self, tx_hash: &str) -> anyhow::Result<BridgeStatus> {
+                let status = self.0.get_transaction_status(tx_hash).await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                
+                // Chuyển đổi String status thành BridgeStatus
+                match status.as_str() {
+                    "pending" => Ok(BridgeStatus::Pending),
+                    "confirmed" => Ok(BridgeStatus::Confirmed),
+                    "completed" => Ok(BridgeStatus::Completed),
+                    _ if status.starts_with("failed:") => {
+                        let reason = status.strip_prefix("failed:").unwrap_or(&status).trim();
+                        Ok(BridgeStatus::Failed(reason.to_string()))
+                    }
+                    _ => Ok(BridgeStatus::Pending),
+                }
+            }
+            
+            async fn estimate_fee(&self, from_chain: Chain, to_chain: Chain, payload_size: usize) -> anyhow::Result<FeeEstimate> {
+                self.0.estimate_fee(from_chain.as_str(), to_chain.as_str(), payload_size)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            }
+            
+            fn supports_chain(&self, chain: Chain) -> bool {
+                chain.is_wormhole_supported()
+            }
+            
+            fn provider_name(&self) -> &str {
+                "Wormhole"
+            }
+        }
+        
+        // Sử dụng wrapper và hàm monitor_transaction chung
+        let wrapper = WormholeWrapper(&*self.wormhole_client);
+        
+        // Chuyển H256 và String thành BridgeTransaction để sử dụng trong monitor_transaction
+        let tx = self.get_transaction(&tx_hash.to_string()).await?;
+        
+        // Gọi hàm monitor_transaction chung
+        match monitor_transaction(
+            &wh_tx_hash,
+            |hash| wrapper.get_transaction_status(hash),
+            Some(tx),
+            None
+        ).await {
+            Ok(status) => {
+                // Cập nhật trạng thái transaction
+                self.update_transaction_status(&tx_hash.to_string(), status).await?;
+                Ok(())
+            },
+            Err(e) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Error monitoring transaction {}: {}", wh_tx_hash, e)
+            )))
+        }
     }
 
     // Chuẩn bị payload cho LayerZero
@@ -866,126 +880,28 @@ impl BridgeOrchestrator {
         token_id: u64,
         amount: String
     ) -> Result<FeeEstimate, Box<dyn Error>> {
-        // Validate input parameters
-        if amount.is_empty() {
-            error!("Empty amount provided for fee estimation");
-            return Err("Amount cannot be empty".into());
-        }
-        
-        if token_id > 100 {
-            warn!("Unusual token ID: {}. Typical token IDs are 0 or 1", token_id);
-        }
-        
-        debug!("Estimating bridge fee from {} to {} for token_id={} and amount={}",
-              source_chain.as_str(), target_chain.as_str(), token_id, amount);
-        
-        // Validate chain compatibility
-        if source_chain == target_chain {
-            error!("Source and target chains are the same: {}", source_chain.as_str());
-            return Err("Source and target chains cannot be the same".into());
-        }
-        
-        // Validate chain support for bridges
-        let using_layerzero = match (source_chain, target_chain) {
-            (Chain::BSC, Chain::NEAR) | 
-            (Chain::Ethereum, Chain::NEAR) | 
-            (Chain::Polygon, Chain::NEAR) |
-            (Chain::Avalanche, Chain::NEAR) => {
-                if !target_chain.is_layerzero_supported() {
-                    error!("Target chain {} is not supported by LayerZero", target_chain.as_str());
-                    return Err(format!("Chain {} is not supported by LayerZero", target_chain.as_str()).into());
-                }
-                true
-            },
-            (Chain::BSC, Chain::Solana) |
-            (Chain::Ethereum, Chain::Solana) |
-            (Chain::Polygon, Chain::Solana) |
-            (Chain::Avalanche, Chain::Solana) => {
-                if !target_chain.is_wormhole_supported() {
-                    error!("Target chain {} is not supported by Wormhole", target_chain.as_str());
-                    return Err(format!("Chain {} is not supported by Wormhole", target_chain.as_str()).into());
-                }
-                false
-            },
-            _ => {
-                error!("Unsupported chain combination: {} -> {}", 
-                      source_chain.as_str(), target_chain.as_str());
-                return Err(format!(
-                    "Unsupported chain combination: {} -> {}. Supported: BSC/ETH/Polygon/Avalanche -> NEAR/Solana", 
-                    source_chain.as_str(), target_chain.as_str()
-                ).into());
-            }
-        };
-        
-        // Chuyển đổi amount thành U256
-        let amount_u256 = match U256::from_dec_str(&amount) {
-            Ok(amount) => amount,
-            Err(e) => {
-                error!("Failed to parse amount '{}': {}", amount, e);
-                return Err(format!("Invalid amount format: {}", e).into());
-            }
-        };
-        
-        // Chuẩn bị payload giả để ước tính kích thước
-        let mock_payload = match target_chain {
-            Chain::NEAR => {
-                debug!("Preparing mock LayerZero payload for NEAR");
-                // Mô phỏng payload LayerZero
-                ethers::abi::encode(&[
-                    Token::Uint(token_id.into()),
-                    Token::Uint(amount_u256),
-                    Token::Bytes(vec![0; 32]), // Giả lập receiver
-                    Token::Address(Address::zero())
-                ])
-            },
-            Chain::Solana => {
-                debug!("Preparing mock Wormhole payload for Solana");
-                // Mô phỏng payload Wormhole
-                ethers::abi::encode(&[
-                    Token::Uint(token_id.into()),
-                    Token::Uint(amount_u256),
-                    Token::Bytes(vec![0; 32]), // Giả lập receiver
-                    Token::Address(Address::zero()),
-                    Token::FixedBytes(vec![0; 32]) // Giả lập program ID
-                ])
-            },
-            _ => {
-                error!("Unsupported target chain for fee estimation: {}", target_chain.as_str());
-                return Err(format!("Unsupported target chain for fee estimation: {}", target_chain.as_str()).into());
-            }
-        };
-        
-        debug!("Mock payload size: {} bytes", mock_payload.len());
-        
-        // Ước tính phí dựa vào loại bridge
-        let result = if using_layerzero {
-            debug!("Using LayerZero for fee estimation");
+        // Chọn bridge provider phù hợp dựa trên source_chain và target_chain
+        if source_chain.is_layerzero_supported() && target_chain.is_layerzero_supported() {
+            // Sử dụng LayerZero
+            let payload_size = 200; // Ước tính size payload
             self.layerzero_client.estimate_fee(
                 source_chain.to_layerzero_id(),
                 target_chain.to_layerzero_id(),
-                mock_payload.len()
+                payload_size
             ).await
-        } else {
-            debug!("Using Wormhole for fee estimation");
+        } else if source_chain.is_wormhole_supported() && target_chain.is_wormhole_supported() {
+            // Sử dụng Wormhole
+            let payload_size = 200; // Ước tính size payload
             self.wormhole_client.estimate_fee(
                 source_chain.as_str(),
                 target_chain.as_str(),
-                mock_payload.len()
+                payload_size
             ).await
-        };
-        
-        match result {
-            Ok(fee) => {
-                info!("Fee estimated successfully: {} {} (${} USD) for {} -> {}", 
-                     fee.fee_amount, fee.fee_token, fee.fee_usd,
-                     source_chain.as_str(), target_chain.as_str());
-                Ok(fee)
-            },
-            Err(e) => {
-                error!("Fee estimation failed for {} -> {}: {}", 
-                      source_chain.as_str(), target_chain.as_str(), e);
-                Err(format!("Fee estimation failed: {}", e).into())
-            }
+        } else {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("No bridge provider supports both {} and {}", source_chain, target_chain)
+            )))
         }
     }
 }

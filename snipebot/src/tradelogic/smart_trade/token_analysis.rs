@@ -10,6 +10,7 @@
 /// - Đảm bảo thread safety trong các phương thức async
 /// - Tối ưu hóa các truy vấn blockchain song song
 /// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+/// - Sử dụng common/analysis.rs cho các hàm phân tích chung
 
 // External imports
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::token_status::{
     TokenStatusAnalyzer, TokenStatus, TokenSafety, ContractInfo, 
-    LiquidityEvent, LiquidityEventType, AdvancedTokenAnalysis, TokenIssue
+    LiquidityEvent, LiquidityEventType, AdvancedTokenAnalysis
 };
 
 // Module imports
@@ -29,107 +30,184 @@ use super::types::{TradeTracker, TradeStatus};
 use super::constants::*;
 use super::executor::SmartTradeExecutor;
 
-// Add import for common module
-use crate::tradelogic::common::types::{TokenIssue};
-use crate::tradelogic::common::analysis::{detect_token_issues};
+// Use common analysis functions
+use crate::tradelogic::common::types::{TokenIssue, SecurityCheckResult};
+use crate::tradelogic::common::analysis::{
+    detect_token_issues,
+    is_proxy_contract, 
+    has_blacklist_function,
+    has_excessive_privileges,
+    analyze_token_security,
+    convert_token_safety_to_security_check
+};
 
 impl SmartTradeExecutor {
-    /// Phát hiện honeypot (token không thể bán)
-    /// 
-    /// Sử dụng TokenStatusAnalyzer để phát hiện các token honeypot
-    /// 
+    /// Phát hiện honeypot token
+    ///
+    /// Kiểm tra xem token có cho phép bán hay không
+    ///
     /// # Arguments
     /// * `chain_id` - ID của blockchain
     /// * `token_address` - Địa chỉ token
     /// * `adapter` - EVM adapter
+    ///
+    /// # Returns
+    /// * `bool` - True nếu token là honeypot
+    pub async fn detect_honeypot(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
+        // Sử dụng analys_client để phân tích token
+        if let Ok(safety) = self.analys_client.token_provider()
+            .analyze_token(chain_id, token_address).await {
+            
+            // Kiểm tra honeypot flag từ kết quả phân tích
+            if let Some(is_honeypot) = safety.is_honeypot {
+                if is_honeypot {
+                    info!("Token {} phát hiện là honeypot!", token_address);
+                    return true;
+                }
+            }
+            
+            // Nếu không có flag rõ ràng, thử simulate sell
+            match adapter.simulate_sell_token(token_address, 1.0).await {
+                Ok(_) => {
+                    debug!("Token {} có thể bán (không phải honeypot)", token_address);
+                    false
+                }
+                Err(e) => {
+                    warn!("Không thể simulate bán token {}: {}. Có thể là honeypot.", token_address, e);
+                    true
+                }
+            }
+        } else {
+            // Không thể phân tích, thử simulate sell
+            match adapter.simulate_sell_token(token_address, 1.0).await {
+                Ok(_) => false,
+                Err(_) => {
+                    warn!("Không thể simulate bán token {}. Có thể là honeypot.", token_address);
+                    true
+                }
+            }
+        }
+    }
+
+    /// Phát hiện thuế động (dynamic tax)
+    ///
+    /// Phát hiện tax thay đổi theo thời gian hoặc số lượng giao dịch
+    ///
+    /// # Arguments
+    /// * `chain_id` - ID của blockchain
+    /// * `token_address` - Địa chỉ token
+    /// * `adapter` - EVM adapter
+    ///
+    /// # Returns
+    /// * `(bool, f64, f64)` - (Có thuế động?, buy tax, sell tax)
+    pub async fn detect_dynamic_tax(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
+        // Sử dụng token provider từ analys_client
+        if let Ok(tax_info) = self.analys_client.token_provider()
+            .get_token_tax_info(chain_id, token_address).await {
+            
+            let buy_tax = tax_info.buy_tax.unwrap_or(0.0);
+            let sell_tax = tax_info.sell_tax.unwrap_or(0.0);
+            let is_dynamic = tax_info.is_dynamic_tax.unwrap_or(false);
+            
+            // Log kết quả
+            if is_dynamic {
+                warn!("Phát hiện thuế động trên token {}: buy_tax={}, sell_tax={}", token_address, buy_tax, sell_tax);
+            } else {
+                debug!("Token {} có thuế cố định: buy_tax={}, sell_tax={}", token_address, buy_tax, sell_tax);
+            }
+            
+            return (is_dynamic, buy_tax, sell_tax);
+        }
+        
+        // Nếu không thể lấy thông tin từ provider, thử cách khác
+        // Thực hiện hai giao dịch mua khác nhau để đánh giá thuế
+        debug!("Thử nghiệm thuế bằng cách simulate giao dịch mua với số lượng khác nhau");
+        
+        let small_amount = 0.01; // 0.01 ETH/BNB
+        let large_amount = 0.5;  // 0.5 ETH/BNB
+        
+        // Simulate mua với số lượng nhỏ
+        let (small_out, _) = adapter.simulate_swap_amount_out(
+            "ETH", token_address, small_amount
+        ).await.unwrap_or((0.0, 0.0));
+        
+        // Simulate mua với số lượng lớn
+        let (large_out, _) = adapter.simulate_swap_amount_out(
+            "ETH", token_address, large_amount
+        ).await.unwrap_or((0.0, 0.0));
+        
+        // Tính tỷ lệ output/input và so sánh
+        let small_ratio = if small_amount > 0.0 { small_out / small_amount } else { 0.0 };
+        let large_ratio = if large_amount > 0.0 { large_out / large_amount } else { 0.0 };
+        
+        // Tính chênh lệch phần trăm
+        let difference = if small_ratio > 0.0 {
+            ((large_ratio - small_ratio) / small_ratio).abs() * 100.0
+        } else {
+            0.0
+        };
+        
+        // Nếu chênh lệch > 3%, có thể là thuế động
+        let is_dynamic = difference > 3.0;
+        if is_dynamic {
+            warn!("Phát hiện thuế động trên token {}: chênh lệch {}%", token_address, difference);
+        }
+        
+        // Ước tính thuế
+        let estimated_tax = if small_ratio > 0.0 {
+            (1.0 - (small_ratio / large_ratio)) * 100.0
+        } else {
+            0.0
+        };
+        
+        (is_dynamic, estimated_tax, estimated_tax)
+    }
+
+    /// Phân tích token toàn diện 
+    ///
+    /// Kết hợp phân tích từ common/analysis và analys_client
+    /// 
+    /// # Arguments
+    /// * `chain_id` - Chain ID
+    /// * `token_address` - Token address
     /// 
     /// # Returns
-    /// * `bool` - true nếu phát hiện dấu hiệu honeypot
-    pub async fn detect_honeypot(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
-        // Lấy TokenStatusAnalyzer từ singleton
-        let token_analyzer = match self.get_token_analyzer().await {
-            Some(analyzer) => analyzer,
-            None => {
-                warn!("Không thể lấy TokenStatusAnalyzer, sử dụng phân tích hạn chế");
-                return self.fallback_honeypot_detection(chain_id, token_address, adapter).await;
-            }
+    /// * `Result<SecurityCheckResult>` - Standardized security check result
+    pub async fn analyze_token_comprehensive(&self, chain_id: u32, token_address: &str) -> Result<SecurityCheckResult> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow!("No adapter found for chain ID {}", chain_id)),
         };
         
-        // Gọi phương thức is_honeypot từ TokenStatusAnalyzer
-        match token_analyzer.is_honeypot(token_address, chain_id).await {
-            Ok(is_honeypot) => {
-                if is_honeypot {
-                    debug!("TokenStatusAnalyzer phát hiện token {} là honeypot", token_address);
-                }
-                is_honeypot
-            },
-            Err(e) => {
-                warn!("Lỗi khi kiểm tra honeypot với TokenStatusAnalyzer: {}", e);
-                // Sử dụng phương pháp dự phòng nếu TokenStatusAnalyzer gặp lỗi
-                self.fallback_honeypot_detection(chain_id, token_address, adapter).await
-            }
-        }
-    }
-    
-    /// Phương pháp dự phòng để phát hiện honeypot khi TokenStatusAnalyzer không khả dụng
-    async fn fallback_honeypot_detection(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> bool {
-        // Kiểm tra bằng cách thử simulate bán token
-        match adapter.simulate_sell_token(token_address, 0.01).await {
-            Ok(can_sell) => !can_sell,
-            Err(_) => {
-                // Không thể xác định, áp dụng nguyên tắc cẩn trọng: coi là nguy hiểm
-                true
-            }
-        }
-    }
-    
-        /// Lấy TokenStatusAnalyzer từ module analys
-    async fn get_token_analyzer(&self) -> Option<Arc<TokenStatusAnalyzer>> {
-        // Trong thực tế, đây có thể được khởi tạo một lần và lưu trong struct
-        // Hoặc được truyền vào qua constructor
-        Some(Arc::new(TokenStatusAnalyzer::new()))
-    }
-
-    /// Phát hiện tax động hoặc tax cao
-    pub async fn detect_dynamic_tax(&self, chain_id: u32, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
-        let token_analyzer = match self.get_token_analyzer().await {
-            Some(analyzer) => analyzer,
-            None => {
-                // Sử dụng adapter trực tiếp nếu không lấy được TokenStatusAnalyzer
-                return self.fallback_tax_detection(token_address, adapter).await;
-            }
-        };
+        // Sử dụng analyze_token_security từ common/analysis.rs
+        let base_result = analyze_token_security(token_address, adapter).await?;
         
-        match token_analyzer.get_token_tax(token_address, chain_id).await {
-            Ok((buy_tax, sell_tax)) => {
-                let is_dynamic = (sell_tax - buy_tax).abs() > DANGEROUS_TAX_DIFF
-                    || buy_tax > MAX_SAFE_BUY_TAX
-                    || sell_tax > MAX_SAFE_SELL_TAX;
-                
-                (is_dynamic, buy_tax, sell_tax)
-            },
-            Err(e) => {
-                warn!("Lỗi khi lấy thông tin tax với TokenStatusAnalyzer: {}", e);
-                self.fallback_tax_detection(token_address, adapter).await
-            }
+        // Bổ sung phân tích từ analys_client
+        if let Ok(safety) = self.analys_client.token_provider()
+            .analyze_token(chain_id, token_address).await {
+            
+            // Chuyển đổi và kết hợp kết quả
+            let client_result = convert_token_safety_to_security_check(&safety, token_address);
+            
+            // Kết hợp các vấn đề từ cả hai nguồn
+            let mut combined_issues = base_result.issues;
+            combined_issues.extend(client_result.issues);
+            
+            // Sử dụng risk score cao hơn
+            let risk_score = base_result.risk_score.max(client_result.risk_score);
+            
+            // Tạo kết quả kết hợp
+            return Ok(SecurityCheckResult {
+                token_address: token_address.to_string(),
+                issues: combined_issues,
+                risk_score,
+                safe_to_trade: risk_score < 70,
+                extra_info: base_result.extra_info,
+            });
         }
-    }
-
-    /// Phương pháp dự phòng để phát hiện tax
-    async fn fallback_tax_detection(&self, token_address: &str, adapter: &Arc<EvmAdapter>) -> (bool, f64, f64) {
-        match adapter.get_token_tax_info(token_address).await {
-            Ok((buy_tax, sell_tax)) => {
-                let is_dynamic = (sell_tax - buy_tax).abs() > DANGEROUS_TAX_DIFF
-                    || buy_tax > MAX_SAFE_BUY_TAX
-                    || sell_tax > MAX_SAFE_SELL_TAX;
-                
-                (is_dynamic, buy_tax, sell_tax)
-            },
-            Err(_) => {
-                // Không thể xác định, coi là nguy hiểm
-                (true, 0.0, 0.0)
-            }
-        }
+        
+        // Nếu không thể lấy từ analys_client, trả về kết quả cơ bản
+        Ok(base_result)
     }
 
     /// Phát hiện thanh khoản thấp hoặc rút thanh khoản đột ngột
@@ -660,34 +738,11 @@ impl SmartTradeExecutor {
         (false, "Không thể lấy dữ liệu sự kiện thanh khoản".to_string())
     }
 
-    /// Phân tích token toàn diện với nhiều kiểm tra an toàn
-    ///
-    /// Gọi TokenStatusAnalyzer để thực hiện phân tích toàn diện
-    /// 
-    /// # Arguments
-    /// * `chain_id` - ID của blockchain
-    /// * `token_address` - Địa chỉ token
-    /// * `adapter` - EVM adapter
-    /// 
-    /// # Returns
-    /// * `Result<AdvancedTokenAnalysis>` - Kết quả phân tích token
-    pub async fn analyze_token_comprehensive(
-        &self, 
-        chain_id: u32, 
-        token_address: &str, 
-        adapter: &Arc<EvmAdapter>
-    ) -> Result<AdvancedTokenAnalysis> {
-        let token_analyzer = match self.get_token_analyzer().await {
-            Some(analyzer) => analyzer,
-            None => {
-                return Err(anyhow!("Không thể lấy TokenStatusAnalyzer để phân tích token"));
-            }
-        };
-        
-        // Gọi phân tích toàn diện từ TokenStatusAnalyzer
-        token_analyzer.analyze_token_comprehensive(token_address, chain_id)
-            .await
-            .context(format!("Lỗi khi phân tích toàn diện token {}", token_address))
+    /// Lấy TokenStatusAnalyzer từ module analys
+    async fn get_token_analyzer(&self) -> Option<Arc<TokenStatusAnalyzer>> {
+        // Trong thực tế, đây có thể được khởi tạo một lần và lưu trong struct
+        // Hoặc được truyền vào qua constructor
+        Some(Arc::new(TokenStatusAnalyzer::new()))
     }
 
     /// Tính điểm rủi ro dựa trên các vấn đề đã phát hiện

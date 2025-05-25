@@ -120,85 +120,76 @@ impl RpcAdapter for EvmAdapter {
 
 #[async_trait]
 impl ChainAdapter for EvmAdapter {
-    /// Mô phỏng bán token để phát hiện honeypot
+    /// Mô phỏng việc bán token để kiểm tra token có phải honeypot hay không
+    /// 
+    /// # Arguments
+    /// * `token_address` - Địa chỉ token cần kiểm tra
+    /// * `amount` - Số lượng token muốn bán (dưới dạng chuỗi)
+    /// 
+    /// # Returns
+    /// Kết quả mô phỏng bao gồm trạng thái thành công/thất bại và lý do
     async fn simulate_sell_token(&self, token_address: &str, amount: &str) -> Result<SimulationResult> {
         self.ensure_initialized().await?;
         
-        debug!("Simulating sell for token {} with amount {}", token_address, amount);
+        debug!(
+            "Simulating selling token {} with amount {} on chain {}",
+            token_address, amount, self.chain_id
+        );
         
-        // Parse amount
-        let amount_f64 = match amount.parse::<f64>() {
-            Ok(a) => a,
-            Err(_) => {
-                warn!("Invalid amount format: {}", amount);
-                return Ok(SimulationResult {
-                    success: false,
-                    failure_reason: Some("Invalid amount format".to_string()),
-                    gas_used: None,
-                    output: None,
-                });
-            }
-        };
-        
-        // Lấy WETH/WBNB router theo chain ID
-        let router_address = match self.chain_id {
-            1 => "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D", // Uniswap V2 Router
-            56 => "0x10ED43C718714eb63d5aA57B78B54704E256024E", // PancakeSwap Router
-            137 => "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff", // QuickSwap Router
-            _ => {
-                warn!("Unsupported chain ID for simulation: {}", self.chain_id);
-                return Ok(SimulationResult {
-                    success: false,
-                    failure_reason: Some(format!("Unsupported chain ID: {}", self.chain_id)),
-                    gas_used: None,
-                    output: None,
-                });
-            }
-        };
-        
-        // TODO: Thay thế bằng mô phỏng thực tế khi triển khai production
-        // Hiện tại trả về kết quả giả lập cho mục đích phát triển
-        
-        // Kiểm tra địa chỉ token có format đúng không
+        // Kiểm tra token address có đúng format không
         if !token_address.starts_with("0x") || token_address.len() != 42 {
-            warn!("Invalid token address format: {}", token_address);
+            bail!("Invalid token address format: {}", token_address);
+        }
+        
+        // Kiểm tra số lượng token
+        let amount_float = match amount.parse::<f64>() {
+            Ok(val) => val,
+            Err(_) => bail!("Invalid amount format: {}", amount),
+        };
+        
+        if amount_float <= 0.0 {
+            bail!("Amount must be greater than 0");
+        }
+        
+        // TODO: Thực thi real simulation kết nối với blockchain thực tế
+        // Hiện tại đây là placeholder implementation
+        warn!("simulate_sell_token: Placeholder implementation, returning mock data");
+        
+        // Kiểm tra blacklist hoặc honeypot đơn giản dựa trên địa chỉ token
+        // Đây chỉ là logic mẫu để test, không phản ánh kiểm tra thực tế
+        if token_address.ends_with("dead") {
             return Ok(SimulationResult {
                 success: false,
-                failure_reason: Some("Invalid token address format".to_string()),
-                gas_used: None,
+                failure_reason: Some("Token is blacklisted".to_string()),
+                gas_used: Some(500000),
                 output: None,
             });
         }
         
-        // Giả lập token không thể bán nếu địa chỉ kết thúc bằng các ký tự nhất định
-        // Đây chỉ là ví dụ cho testing, không phản ánh logic thực tế
-        if token_address.ends_with("dead") || token_address.ends_with("1337") || token_address.ends_with("0000") {
-            warn!("Simulation detected potential honeypot for token {}", token_address);
+        if token_address.ends_with("bee") {
             return Ok(SimulationResult {
                 success: false,
-                failure_reason: Some("Transaction would revert: TRANSFER_FROM_FAILED".to_string()),
+                failure_reason: Some("Transfer function reverted: HONEYPOT".to_string()),
+                gas_used: Some(210000),
+                output: None,
+            });
+        }
+        
+        if token_address.ends_with("fee") {
+            return Ok(SimulationResult {
+                success: false,
+                failure_reason: Some("High transfer fee detected".to_string()),
                 gas_used: Some(300000),
                 output: None,
             });
         }
         
-        // Kiểm tra amount có quá lớn không
-        if amount_f64 > 10.0 {
-            return Ok(SimulationResult {
-                success: false,
-                failure_reason: Some("Slippage too high for simulation".to_string()),
-                gas_used: Some(150000),
-                output: None,
-            });
-        }
-        
-        // Thành công
-        debug!("Sell simulation successful for token {}", token_address);
+        // Giả lập cung cấp kết quả thành công trong hầu hết các trường hợp
         Ok(SimulationResult {
             success: true,
             failure_reason: None,
             gas_used: Some(180000),
-            output: Some(format!("0.{}", token_address.chars().last().unwrap())), // Giả lập output
+            output: Some(format!("Simulated selling {} tokens successfully", amount)),
         })
     }
 }

@@ -13,6 +13,9 @@ pub mod chain_adapters;
 pub mod tradelogic;
 pub mod analys;
 
+// Re-export của common::bridge_types để các module trong snipebot có thể sử dụng
+pub use common::bridge_types;
+
 // Thêm re-export cho shared coordinator
 pub use tradelogic::traits::{
     TradeCoordinator, ExecutorType, OpportunityPriority, SharedOpportunity, SharedOpportunityType, 

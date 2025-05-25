@@ -10,6 +10,9 @@ const LIQUIDITY_DANGEROUS: f64 = 1000.0;
 const LIQUIDITY_MODERATE: f64 = 3000.0;
 const LIQUIDITY_SAFE: f64 = 10000.0;
 
+// Import TokenIssue từ tradelogic/common/types.rs để tránh định nghĩa trùng lặp
+use crate::tradelogic::common::types::TokenIssue;
+
 #[derive(Debug, Clone)]
 pub struct TokenStatus {
     /// Điểm audit, giá trị từ 0 đến 100.
@@ -57,38 +60,6 @@ pub enum TokenSafety {
     Moderate,
     /// Tốt (🟢): Token an toàn, đáng tin cậy.
     Safe,
-}
-
-/// Loại vấn đề cụ thể của token
-#[derive(Debug, Clone, PartialEq)]
-pub enum TokenIssue {
-    LowAuditScore,
-    InfiniteMint,
-    LockSell,
-    Honeypot,
-    Rebate,
-    HighTaxBuy,
-    HighTaxSell,
-    UnverifiedContract,
-    Pausable,
-    Blacklist,
-    HiddenOwnership,
-    HighOwnershipConcentration,
-    FakeRenouncedOwnership,
-    LowLiquidity,
-    SuspiciousTransferFunctions,
-    // Các vấn đề mới phát hiện
-    ProxyContract,
-    HiddenFees,
-    DynamicTax,
-    TradingCooldown,
-    MaxTransactionLimit,
-    MaxWalletLimit,
-    AbnormalLiquidityEvents,
-    ExternalCalls,
-    DelegateCall,
-    InconsistentSourceCode,
-    WhitelistRestrictions,
 }
 
 /// Mức độ nghiêm trọng của vấn đề

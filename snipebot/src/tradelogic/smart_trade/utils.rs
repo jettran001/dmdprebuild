@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
@@ -23,7 +24,8 @@ use crate::tradelogic::common::utils::{
     calculate_profit,
     wait_for_transaction,
     convert_to_token_units,
-    current_time_seconds
+    current_time_seconds,
+    generate_trade_id,
 };
 
 impl SmartTradeExecutor {
@@ -147,28 +149,6 @@ impl SmartTradeExecutor {
         true
     }
     
-    /// Tạo ID giao dịch từ các tham số
-    ///
-    /// # Parameters
-    /// - `token_address`: Địa chỉ token
-    /// - `chain_id`: ID của blockchain
-    /// - `timestamp`: Thời gian giao dịch
-    ///
-    /// # Returns
-    /// - `String`: ID giao dịch
-    pub fn generate_trade_id(&self, token_address: &str, chain_id: u32, timestamp: i64) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        token_address.hash(&mut hasher);
-        chain_id.hash(&mut hasher);
-        timestamp.hash(&mut hasher);
-        
-        let hash = hasher.finish();
-        format!("{}_{:x}", chain_id, hash)
-    }
-    
     /// Tính giá trung bình di động (Moving Average)
     ///
     /// # Parameters
@@ -273,5 +253,63 @@ impl SmartTradeExecutor {
         
         let rs = avg_gain / avg_loss;
         100.0 - (100.0 / (1.0 + rs))
+    }
+}
+
+/// Create a TradeTracker from TradeParams
+/// 
+/// Creates a TradeTracker object from the given TradeParams, generating a
+/// unique ID and setting default values where needed.
+///
+/// # Arguments
+/// * `params` - Trade parameters
+/// * `trade_id` - Optional trade ID (generates a new one if None)
+/// * `timestamp` - Optional timestamp (uses current time if None)
+/// * `strategy` - Optional trade strategy (parses from params if None)
+///
+/// # Returns
+/// * `TradeTracker` - Initialized trade tracker object
+pub fn create_trade_tracker(
+    params: &TradeParams,
+    trade_id: Option<String>,
+    timestamp: Option<u64>,
+    strategy: Option<TradeStrategy>,
+) -> TradeTracker {
+    // Generate trade ID if not provided
+    let trade_id = trade_id.unwrap_or_else(generate_trade_id);
+    
+    // Use current time if timestamp not provided
+    let now = timestamp.unwrap_or_else(|| Utc::now().timestamp() as u64);
+    
+    // Determine strategy
+    let strategy = strategy.unwrap_or_else(|| {
+        if let Some(strategy_str) = &params.strategy {
+            match strategy_str.as_str() {
+                "quick" => TradeStrategy::QuickFlip,
+                "tsl" => TradeStrategy::TrailingStopLoss,
+                "hodl" => TradeStrategy::LongTerm,
+                _ => TradeStrategy::default(),
+            }
+        } else {
+            TradeStrategy::default()
+        }
+    });
+    
+    // Create and return trade tracker
+    TradeTracker {
+        id: trade_id,
+        chain_id: params.chain_id,
+        token_address: params.token_address.clone(),
+        amount: params.amount,
+        entry_price: 0.0, // Will be updated after trade execution
+        current_price: 0.0,
+        status: TradeStatus::Pending,
+        strategy,
+        created_at: now,
+        updated_at: now,
+        stop_loss: params.stop_loss,
+        take_profit: params.take_profit,
+        max_hold_time: params.max_hold_time.unwrap_or(DEFAULT_MAX_HOLD_TIME),
+        custom_params: params.custom_params.clone().unwrap_or_default(),
     }
 }

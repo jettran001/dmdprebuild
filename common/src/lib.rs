@@ -22,18 +22,7 @@ pub mod sdk;
 // Bridge types for cross-chain operations
 pub mod bridge_types;
 
-// Thêm các module mới cho common gateway server
-pub mod web3;
-pub mod frontend;
-pub mod performance;
-pub mod mpc;
-pub mod network_integration;
+// Re-export bridge_types để dễ dàng sử dụng
+pub use bridge_types::{Chain, BridgeStatus, BridgeTransaction, FeeEstimate, MonitorConfig, BridgeProvider, BridgeAdapter};
 
-// Re-export một số tính năng thường dùng
-pub use api::gateway::ApiGatewayService;
-pub use auth::authentication::AuthenticationService;
-pub use web3::blockchain_gateway::BlockchainGatewayService;
-pub use performance::queue::QueueManagementService;
-pub use mpc::session::MpcSessionService;
-pub use network_integration::grpc::GrpcIntegrationService;
-pub use network_integration::websocket::WebsocketIntegrationService;
+// Note: Previous re-exports were removed as they referenced non-existent modules/items

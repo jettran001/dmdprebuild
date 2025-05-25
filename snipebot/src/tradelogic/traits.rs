@@ -104,6 +104,8 @@ pub trait StrategyOptimizer: Send + Sync + 'static {
 /// Cross-chain trading interface
 ///
 /// This trait defines methods for executing trades across different blockchains.
+/// It was merged with CrossDomainBridge to provide a unified interface for
+/// cross-chain operations while maintaining backward compatibility.
 #[async_trait]
 pub trait CrossChainTrader: Send + Sync + 'static {
     /// Find arbitrage opportunities between chains
@@ -117,6 +119,36 @@ pub trait CrossChainTrader: Send + Sync + 'static {
     
     /// Estimate cross-chain transfer time and cost
     async fn estimate_cross_chain_transfer(&self, from_chain: ChainType, to_chain: ChainType, token: &str, amount: f64) -> Result<(u64, f64)>;
+    
+    /// Get source chain ID (compatibility with CrossDomainBridge)
+    fn source_chain_id(&self) -> Option<u64> {
+        None
+    }
+    
+    /// Get destination chain ID (compatibility with CrossDomainBridge)
+    fn destination_chain_id(&self) -> Option<u64> {
+        None
+    }
+    
+    /// Check if token is supported (compatibility with CrossDomainBridge)
+    fn is_token_supported(&self, _token_address: &str) -> bool {
+        false
+    }
+    
+    /// Get bridging cost estimate (compatibility with CrossDomainBridge)
+    async fn get_bridging_cost_estimate(&self, _token_address: &str, _amount: f64) -> Result<f64> {
+        Err(anyhow::anyhow!("Not implemented in this CrossChainTrader implementation"))
+    }
+    
+    /// Get bridging time estimate in seconds (compatibility with CrossDomainBridge)
+    async fn get_bridging_time_estimate(&self) -> Result<u64> {
+        Err(anyhow::anyhow!("Not implemented in this CrossChainTrader implementation"))
+    }
+    
+    /// Bridge tokens across chains (compatibility with CrossDomainBridge)
+    async fn bridge_tokens(&self, _token_address: &str, _amount: f64) -> Result<String> {
+        Err(anyhow::anyhow!("Not implemented in this CrossChainTrader implementation"))
+    }
 }
 
 /// Mempool Analysis Provider
