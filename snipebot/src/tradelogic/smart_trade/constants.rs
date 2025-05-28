@@ -244,3 +244,55 @@ pub const MEV_RISK_THRESHOLD: f64 = 0.7;
 
 /// Hệ số tăng gas để chống front-running (tăng 10%)
 pub const FRONTRUN_GAS_BOOST: f64 = 1.1;
+
+// Gas and network settings
+/// Default gas limit for token approval transactions
+pub const DEFAULT_GAS_LIMIT_APPROVAL: u64 = 60000;
+/// Default gas limit for token swap transactions
+pub const DEFAULT_GAS_LIMIT_SWAP: u64 = 350000;
+/// Gas price multiplier for high urgency transactions
+pub const GAS_PRICE_MULTIPLIER_HIGH: f64 = 1.2;
+/// Gas price multiplier for medium urgency transactions
+pub const GAS_PRICE_MULTIPLIER_MEDIUM: f64 = 1.1;
+/// Gas price multiplier for low urgency transactions
+pub const GAS_PRICE_MULTIPLIER_LOW: f64 = 1.0;
+
+// Slippage settings
+/// Default slippage percentage for buys
+pub const DEFAULT_BUY_SLIPPAGE: f64 = 2.0;
+/// Default slippage percentage for sells
+pub const DEFAULT_SELL_SLIPPAGE: f64 = 3.0;
+/// Maximum slippage percentage allowed
+pub const MAX_SLIPPAGE: f64 = 20.0;
+
+// Timeout settings
+/// Default timeout for transactions in seconds
+pub const DEFAULT_TX_TIMEOUT: u64 = 180;
+/// Default polling interval in seconds
+pub const DEFAULT_POLLING_INTERVAL: u64 = 5;
+/// Maximum wait time for transaction confirmation
+pub const MAX_WAIT_TIME: u64 = 300;
+
+// Default values for tracking stop-loss/take-profit
+/// Default percentage for take profit target
+pub const DEFAULT_TAKE_PROFIT_PERCENT: f64 = 30.0;
+/// Default percentage for stop loss target
+pub const DEFAULT_STOP_LOSS_PERCENT: f64 = 15.0;
+/// Default time for trade expiry in seconds
+pub const DEFAULT_TRADE_EXPIRE_TIME: u64 = 24 * 60 * 60; // 1 day
+
+// Error message constants
+/// Default error message for unknown reasons
+pub const UNKNOWN_FAILURE_REASON: &str = "Unknown reason";
+/// Format string for abnormal slippage errors
+pub const HIGH_SLIPPAGE_FORMAT: &str = "Abnormally high sell slippage: {}%";
+/// Default test amount for honeypot detection
+pub const DEFAULT_TEST_AMOUNT: &str = "0.01";
+/// Honeypot detection threshold for slippage percentage
+pub const HONEYPOT_SLIPPAGE_THRESHOLD: f64 = 50.0;
+/// Format string for insufficient liquidity errors
+pub const INSUFFICIENT_LIQUIDITY_FORMAT: &str = "Insufficient liquidity: {}";
+/// Default maximum wait time in seconds
+pub const DEFAULT_MAX_WAIT_TIME: u64 = 300;
+/// Default gas price multiplier for transactions
+pub const DEFAULT_GAS_PRICE_MULTIPLIER: f64 = 1.1;

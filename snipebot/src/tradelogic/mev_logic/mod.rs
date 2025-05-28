@@ -54,8 +54,11 @@ pub use jit_liquidity::{
 // Re-export Cross-domain MEV
 pub use cross_domain::{
     CrossDomainMevManager,
-    CrossDomainArbitrage,
-    CrossDomainBridge,
+    CrossDomainArbitrage
+};
+// Re-export từ common/bridge_types
+pub use common::bridge_types::{
+    BridgeProvider,
     BridgeStatus
 };
 
@@ -71,4 +74,7 @@ pub use analyzer::{
 };
 
 // Factory function
-pub use strategy::create_mev_strategy; 
+pub use strategy::create_mev_strategy;
+
+// Re-export trader behavior analysis function
+pub use trader_behavior::analyze_traders_batch; 

@@ -15,6 +15,7 @@ use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::token_status::{ContractInfo, TokenStatus};
 use crate::types::{TradeParams, TradeType};
 use super::types::{TokenIssue, SecurityCheckResult, TradeAction, TradeStatus, ExecutionMethod};
+use crate::tradelogic::smart_trade::types::TradeTracker;
 
 /// Analyzes transactions from mempool to identify patterns
 ///
@@ -602,27 +603,118 @@ pub async fn simulate_trade_execution(params: &TradeParams, adapter: &Arc<EvmAda
     }
 }
 
-/// Execute a trade on the blockchain
+/// Execute a blockchain transaction
 /// 
-/// This function executes the actual trade transaction on the blockchain
+/// Executes a trade on the blockchain using the provided parameters.
+/// This is a high-level wrapper around the specific adapter methods.
 /// 
 /// # Arguments
 /// * `params` - Trade parameters
 /// * `adapter` - EVM adapter for the chain
-/// * `wallet_address` - Address of the wallet executing the trade
+/// * `wallet_address` - Wallet address to use for transaction
 /// 
 /// # Returns
-/// * `Result<(String, f64)>` - (tx_hash, gas_used) if successful
+/// * `Result<(String, f64)>` - (transaction hash, gas used)
+/// 
+/// # Safety
+/// This function performs critical validation before executing trades.
+/// It will validate slippage settings, check minimum liquidity, and
+/// enforce safety limits as defined in constants.
 pub async fn execute_blockchain_transaction(
     params: &TradeParams,
     adapter: &Arc<EvmAdapter>,
     wallet_address: &str
 ) -> Result<(String, f64)> {
+    use tracing::{info, warn};
+    use crate::tradelogic::common::types::{DEFAULT_SLIPPAGE, DEFAULT_MAX_RISK_SCORE, 
+                                          MIN_LIQUIDITY_USD, MAX_ACCEPTABLE_BUY_TAX, 
+                                          MAX_ACCEPTABLE_SELL_TAX};
+    
+    // SAFETY CHECK 1: Validate params first
+    validate_trade_params(params, adapter).await?;
+    
+    // SAFETY CHECK 2: Check slippage and warn if using default
+    let slippage = if let Some(slippage) = params.slippage {
+        if slippage <= 0.0 {
+            warn!("Invalid slippage value ({}), using default: {}%", slippage, DEFAULT_SLIPPAGE);
+            DEFAULT_SLIPPAGE
+        } else if slippage > 50.0 {
+            warn!("Dangerously high slippage ({}%), limiting to 50%", slippage);
+            50.0
+        } else {
+            info!("Using custom slippage: {}%", slippage);
+            slippage
+        }
+    } else {
+        warn!("No slippage specified, using default: {}%", DEFAULT_SLIPPAGE);
+        DEFAULT_SLIPPAGE
+    };
+    
+    // SAFETY CHECK 3: Check token safety before trading
+    let security_check = perform_token_security_check(&params.token_address, adapter).await
+        .context("Failed to perform security check")?;
+    
+    // Abort if token has critical security issues
+    if security_check.is_honeypot {
+        return Err(anyhow!("Aborting transaction: Token detected as a potential honeypot"));
+    }
+    
+    if security_check.score > DEFAULT_MAX_RISK_SCORE {
+        return Err(anyhow!("Aborting transaction: Token security score too low ({})", security_check.score));
+    }
+    
+    // SAFETY CHECK 4: Check liquidity if this is a buy or sell
+    if params.is_buy() || params.is_sell() {
+        // Get token liquidity
+        if let Ok(liquidity) = adapter.get_token_liquidity(&params.token_address).await {
+            if liquidity < MIN_LIQUIDITY_USD {
+                return Err(anyhow!("Insufficient liquidity (${:.2}) for safe trading", liquidity));
+            }
+        } else {
+            warn!("Could not verify token liquidity, proceeding with caution");
+        }
+        
+        // Check token tax
+        if let Ok(tax_info) = adapter.get_token_tax_info(&params.token_address).await {
+            if params.is_buy() && tax_info.buy_tax > MAX_ACCEPTABLE_BUY_TAX {
+                return Err(anyhow!("Buy tax too high: {:.2}% (max acceptable: {:.2}%)", 
+                                  tax_info.buy_tax, MAX_ACCEPTABLE_BUY_TAX));
+            }
+            
+            if params.is_sell() && tax_info.sell_tax > MAX_ACCEPTABLE_SELL_TAX {
+                return Err(anyhow!("Sell tax too high: {:.2}% (max acceptable: {:.2}%)", 
+                                  tax_info.sell_tax, MAX_ACCEPTABLE_SELL_TAX));
+            }
+        } else {
+            warn!("Could not verify token tax info, proceeding with caution");
+        }
+    }
+    
+    // SAFETY CHECK 5: Simulate transaction for buy/sell to detect potential failures
+    if (params.is_buy() || params.is_sell()) && params.trade_type != TradeType::Approve {
+        match simulate_trade_execution(params, adapter).await {
+            Ok((expected_output, gas_estimate)) => {
+                info!("Transaction simulation successful. Expected output: {}, estimated gas: {}", 
+                     expected_output, gas_estimate);
+                
+                // Check if output is suspiciously low (possible sandwich attack)
+                let min_expected = params.amount * 0.9; // Expect at least 90% of input value
+                if expected_output < min_expected {
+                    warn!("Expected output ({}) abnormally low. Possible MEV attack.", expected_output);
+                }
+            }
+            Err(e) => {
+                return Err(anyhow!("Transaction simulation failed: {}", e));
+            }
+        }
+    }
+    
+    // Execute the transaction based on trade type
     match params.trade_type {
         TradeType::Buy => {
-            // Get base token from chain
+            // Get quote token
             let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id {
+                match params.chain_id() {
                     1 => "ETH",   // Ethereum
                     56 => "BNB",  // Binance Smart Chain
                     137 => "MATIC", // Polygon
@@ -631,10 +723,7 @@ pub async fn execute_blockchain_transaction(
                 }.to_string()
             });
             
-            // Calculate slippage if provided
-            let slippage = params.slippage.unwrap_or(1.0); // Default 1%
-            
-            // Execute swap transaction
+            // Execute swap transaction using the validated slippage
             let (tx_hash, gas_used) = adapter.execute_swap(
                 &base_token,
                 &params.token_address,
@@ -648,7 +737,7 @@ pub async fn execute_blockchain_transaction(
         TradeType::Sell => {
             // Get base token from chain
             let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id {
+                match params.chain_id() {
                     1 => "ETH",   // Ethereum
                     56 => "BNB",  // Binance Smart Chain
                     137 => "MATIC", // Polygon
@@ -657,10 +746,7 @@ pub async fn execute_blockchain_transaction(
                 }.to_string()
             });
             
-            // Calculate slippage if provided
-            let slippage = params.slippage.unwrap_or(1.0); // Default 1%
-            
-            // Execute swap transaction
+            // Execute swap transaction using the validated slippage
             let (tx_hash, gas_used) = adapter.execute_swap(
                 &params.token_address,
                 &base_token,
@@ -810,4 +896,59 @@ pub async fn get_token_metadata(
         .unwrap_or(18);
     
     Ok((name, symbol, decimals))
+}
+
+/// Check trade conditions and determine if action needs to be taken
+///
+/// Analyzes a trade's current conditions against its parameters (stop loss, take profit,
+/// trailing stop loss, etc.) and determines if any action needs to be taken.
+///
+/// # Arguments
+/// * `trade` - The trade to analyze
+/// * `current_price` - Current token price
+/// * `highest_price` - Highest price recorded for this trade
+///
+/// # Returns
+/// * `Option<(String, bool)>` - If action needed: (reason, is_negative)
+///   where is_negative indicates whether it's a negative reason (stop loss vs take profit)
+pub fn check_trade_conditions(
+    trade: &TradeTracker,
+    current_price: f64,
+    highest_price: f64
+) -> Option<(String, bool)> {
+    // Calculate current profit percentage/loss
+    if trade.entry_price <= 0.0 || current_price <= 0.0 {
+        return None;
+    }
+    
+    let profit_percent = ((current_price - trade.entry_price) / trade.entry_price) * 100.0;
+    let current_time = chrono::Utc::now().timestamp() as u64;
+    
+    // 1. Check max hold time
+    if current_time >= trade.max_hold_time {
+        return Some(("Exceeded max hold time".to_string(), true));
+    }
+    
+    // 2. Check take profit condition
+    if profit_percent >= trade.take_profit_percent {
+        return Some(("Reached profit target".to_string(), false));
+    }
+    
+    // 3. Check stop loss condition
+    if profit_percent <= -trade.stop_loss_percent {
+        return Some(("Activated stop loss".to_string(), true));
+    }
+    
+    // 4. Check trailing stop loss (if any)
+    if let Some(tsl_percent) = trade.trailing_stop_percent {
+        let tsl_trigger_price = highest_price * (1.0 - tsl_percent / 100.0);
+        
+        // Only trigger TSL if we've been in profit
+        if current_price <= tsl_trigger_price && highest_price > trade.entry_price {
+            return Some(("Activated trailing stop loss".to_string(), true));
+        }
+    }
+    
+    // No action needed
+    None
 } 

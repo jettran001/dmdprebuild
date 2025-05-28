@@ -3,6 +3,9 @@
 //! This adapter provides functionality to interact with various blockchain bridges
 //! including LayerZero and Wormhole, enabling cross-chain token transfers and
 //! message passing between different blockchains.
+//!
+//! Important: Cập nhật 2024-10-17 - Đã sửa import để sử dụng common::bridge_types
+//! thay vì crate::bridge_types để thống nhất với mod.rs
 
 use std::sync::Arc;
 use anyhow::{Result, bail, Context};
@@ -14,14 +17,14 @@ use reqwest;
 use std::time::Duration;
 
 // Import from common bridge types
-use crate::bridge_types::{
+use common::bridge_types::{
     Chain,
     BridgeStatus,
     FeeEstimate,
     BridgeTransaction,
     MonitorConfig,
     BridgeProvider,
-    BridgeAdapter as CommonBridgeAdapter,
+    BridgeAdapter as BridgeAdapterTrait,
     monitor_transaction,
 };
 
@@ -245,7 +248,7 @@ pub struct BridgeAdapter {
 }
 
 /// Implement the common BridgeAdapter trait
-impl CommonBridgeAdapter for BridgeAdapter {
+impl BridgeAdapterTrait for BridgeAdapter {
     async fn register_provider(&self, provider_name: &str, provider: Box<dyn BridgeProvider>) -> Result<()> {
         // Chuyển đổi Box<dyn BridgeProvider> thành Arc<dyn BridgeProvider>
         let arc_provider = Arc::from(provider);

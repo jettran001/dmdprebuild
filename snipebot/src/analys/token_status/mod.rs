@@ -51,4 +51,4 @@ pub use blacklist::{
 
 pub use liquidity::{
     abnormal_liquidity_events, detect_rugpull_pattern,
-}; 
+};

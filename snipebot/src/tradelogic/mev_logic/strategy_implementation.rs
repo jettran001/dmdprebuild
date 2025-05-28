@@ -23,7 +23,7 @@ use super::analyzer;
 
 impl MevStrategy {
     /// Xử lý token mới được phát hiện
-    pub async fn process_new_token(&self, chain_id: u32, token_address: String, alert: MempoolAlert) {
+    pub async fn process_new_token(&self, chain_id: u32, token_address: &str, alert: MempoolAlert) {
         // Kiểm tra xem chiến lược có được bật không
         let config = self.config.read().await;
         if !config.enabled || !config.allowed_opportunity_types.contains(&MevOpportunityType::NewToken) {
@@ -38,7 +38,7 @@ impl MevStrategy {
             
             if let Some(token_info) = new_token_info {
                 // Sử dụng token_status để phân tích rủi ro
-                let contract_info = self.create_contract_info(chain_id, &token_address, &token_info, adapter).await;
+                let contract_info = self.create_contract_info(chain_id, token_address, &token_info, adapter).await;
                 
                 // Phân tích token
                 let token_status = self.analyze_token_safety(contract_info).await;
@@ -46,14 +46,14 @@ impl MevStrategy {
                 // Chỉ tiếp tục nếu token ít nhất là trung bình an toàn
                 if token_status.evaluate_safety() != TokenSafety::Dangerous {
                     // Đánh giá cơ hội
-                    self.create_new_token_opportunity(chain_id, token_address, token_info, token_status, alert).await;
+                    self.create_new_token_opportunity(chain_id, token_address.to_string(), token_info, token_status, alert).await;
                 } else {
                     // Log token nguy hiểm để theo dõi
                     log::warn!("New dangerous token detected: {}", token_address);
                 }
             } else {
                 // Tạo cơ hội mặc định nếu không có thông tin chi tiết
-                self.create_default_new_token_opportunity(chain_id, token_address, alert).await;
+                self.create_default_new_token_opportunity(chain_id, token_address.to_string(), alert).await;
             }
         }
     }
@@ -455,11 +455,11 @@ impl MevBot for MevStrategy {
         self.add_chain(chain_id, adapter).await;
     }
     
-    async fn evaluate_new_token(&self, chain_id: u32, token_address: String) -> Option<TokenSafety> {
+    async fn evaluate_new_token(&self, chain_id: u32, token_address: &str) -> Option<TokenSafety> {
         if let Some(adapter) = self.evm_adapters.get(&chain_id) {
             // Tạo token info cơ bản
             let token_info = NewTokenInfo {
-                address: token_address.clone(),
+                address: token_address.to_string(),
                 name: None,
                 symbol: None,
                 decimals: None,
@@ -475,7 +475,7 @@ impl MevBot for MevStrategy {
             };
             
             // Tạo contract info
-            let contract_info = self.create_contract_info(chain_id, &token_address, &token_info, adapter).await;
+            let contract_info = self.create_contract_info(chain_id, token_address, &token_info, adapter).await;
             
             // Phân tích token
             let token_status = self.analyze_token_safety(contract_info).await;
@@ -486,13 +486,13 @@ impl MevBot for MevStrategy {
         }
     }
     
-    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: String, token_safety: TokenSafety) -> Option<MevOpportunity> {
+    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity> {
         // Phương thức này tạo một cơ hội giao dịch cho token đã đánh giá
         // Được triển khai trong file gốc
         None
     }
     
-    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: String) {
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str) {
         // Phương thức này theo dõi thanh khoản của token
         // Được triển khai trong file gốc
     }

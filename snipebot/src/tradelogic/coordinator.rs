@@ -230,15 +230,17 @@ impl TradeCoordinatorImpl {
 
 impl Clone for TradeCoordinatorImpl {
     fn clone(&self) -> Self {
-        // Create new instances of RwLocks but with the same broadcaster
-        let (broadcaster, _) = broadcast::channel::<SharedOpportunity>(100);
+        // Tạo receiver mới cho broadcaster hiện có
+        // QUAN TRỌNG: Chỉ cần clone broadcaster, KHÔNG tạo mới channel
+        // Điều này đảm bảo tất cả các instance chia sẻ cùng một channel
         
         Self {
             executors: RwLock::new(HashMap::<String, ExecutorType>::new()),
             opportunities: RwLock::new(HashMap::<String, SharedOpportunity>::new()),
             subscriptions: RwLock::new(HashMap::<String, mpsc::Sender<SharedOpportunity>>::new()),
             executor_subscriptions: RwLock::new(HashMap::<String, HashSet<String>>::new()),
-            opportunity_broadcaster: broadcaster,
+            // Chỉ clone broadcaster, không tạo instance mới
+            opportunity_broadcaster: self.opportunity_broadcaster.clone(),
             global_parameters: RwLock::new(HashMap::<String, f64>::new()),
             statistics: RwLock::new(SharingStatistics::default()),
         }
@@ -289,23 +291,31 @@ impl TradeCoordinator for TradeCoordinatorImpl {
             opportunity.created_at = Self::current_timestamp();
         }
         
-        // Store opportunity
-        let mut opportunities = self.opportunities.write().await;
-        opportunities.insert(opportunity.id.clone(), opportunity.clone());
-        drop(opportunities);
+        // Clone opportunity trước khi thêm vào collections
+        // để tránh borrow sau broadcast
+        let opportunity_id = opportunity.id.clone();
+        let opportunity_type = opportunity.opportunity_type.clone();
         
-        // Broadcast to all subscribers
+        // Store opportunity - critical section ngắn nhất có thể
+        {
+            let mut opportunities = self.opportunities.write().await;
+            opportunities.insert(opportunity_id.clone(), opportunity.clone());
+        } // Drop write lock ngay lập tức
+        
+        // Broadcast to all subscribers - không giữ lock nào
         if let Err(e) = self.opportunity_broadcaster.send(opportunity.clone()) {
             warn!("Failed to broadcast opportunity: {}", e);
         }
         
-        // Update statistics
-        let mut stats = self.statistics.write().await;
-        stats.total_shared += 1;
-        *stats.by_source.entry(from_executor.to_string()).or_insert(0) += 1;
-        *stats.by_type.entry(opportunity.opportunity_type.clone()).or_insert(0) += 1;
+        // Cập nhật statistics trong critical section riêng biệt
+        {
+            let mut stats = self.statistics.write().await;
+            stats.total_shared += 1;
+            *stats.by_source.entry(from_executor.to_string()).or_insert(0) += 1;
+            *stats.by_type.entry(opportunity_type).or_insert(0) += 1;
+        }
         
-        info!("Shared opportunity {} from executor {}", opportunity.id, from_executor);
+        info!("Shared opportunity {} from executor {}", opportunity_id, from_executor);
         Ok(())
     }
     
@@ -388,7 +398,6 @@ impl TradeCoordinator for TradeCoordinatorImpl {
         
         // Biến để theo dõi xung đột reservation
         let mut has_conflict = false;
-        let mut can_reserve = true;
         
         // Kiểm tra nếu đã được đặt trước
         if let Some(reservation) = &existing {
@@ -406,7 +415,7 @@ impl TradeCoordinator for TradeCoordinatorImpl {
             }
         }
         
-        // Tạo reservation mới
+        // Tạo reservation mới - không cần phải nằm trong critical section
         let new_reservation = OpportunityReservation {
             executor_id: executor_id.to_string(),
             priority,
@@ -414,16 +423,22 @@ impl TradeCoordinator for TradeCoordinatorImpl {
             expires_at: expiry,
         };
         
-        // Cập nhật opportunity với reservation mới
-        {
+        // Cập nhật opportunity với reservation mới - critical section ngắn nhất có thể
+        let update_result = {
             let mut opportunities = self.opportunities.write().await;
             
-            // Kiểm tra lại vì có thể đã thay đổi trong lúc xử lý
-            let opportunity = opportunities
-                .get_mut(opportunity_id)
-                .ok_or_else(|| anyhow!("Opportunity not found: {}", opportunity_id))?;
-            
-            opportunity.reservation = Some(new_reservation);
+            match opportunities.get_mut(opportunity_id) {
+                Some(opportunity) => {
+                    opportunity.reservation = Some(new_reservation);
+                    true
+                },
+                None => false
+            }
+        };
+        
+        // Kiểm tra lại kết quả cập nhật
+        if !update_result {
+            return Err(anyhow!("Opportunity not found after initial check: {}", opportunity_id));
         }
         
         // Cập nhật thống kê nếu có xung đột (tách riêng để tránh deadlock)
@@ -535,8 +550,15 @@ mod tests {
         let coordinator = create_trade_coordinator();
         
         // Register executors
-        coordinator.register_executor("smart-trade-1", ExecutorType::SmartTrade).await.unwrap();
-        coordinator.register_executor("mev-bot-1", ExecutorType::MevBot).await.unwrap();
+        if let Err(e) = coordinator.register_executor("smart-trade", ExecutorType::SmartTrade).await {
+            assert!(false, "Failed to register smart-trade executor: {}", e);
+            return;
+        }
+        
+        if let Err(e) = coordinator.register_executor("mev-bot", ExecutorType::MevBot).await {
+            assert!(false, "Failed to register mev-bot executor: {}", e);
+            return;
+        }
         
         // Create opportunity
         let opportunity = SharedOpportunity {
@@ -547,35 +569,63 @@ mod tests {
             estimated_profit_usd: 100.0,
             risk_score: 50,
             time_sensitivity: 60, // 1 minute
-            source: "smart-trade-1".to_string(),
+            source: "smart-trade".to_string(),
             created_at: TradeCoordinatorImpl::current_timestamp(),
             custom_data: HashMap::new(),
             reservation: None,
         };
         
         // Share opportunity
-        coordinator.share_opportunity("smart-trade-1", opportunity.clone()).await.unwrap();
+        if let Err(e) = coordinator.share_opportunity("smart-trade", opportunity.clone()).await {
+            assert!(false, "Failed to share opportunity: {}", e);
+            return;
+        }
         
         // Get opportunities
-        let opportunities = coordinator.get_all_opportunities().await.unwrap();
+        let opportunities = match coordinator.get_all_opportunities().await {
+            Ok(opps) => opps,
+            Err(e) => {
+                assert!(false, "Failed to get opportunities: {}", e);
+                return;
+            }
+        };
         
         // Verify
         assert_eq!(opportunities.len(), 1);
         assert_eq!(opportunities[0].id, opportunity.id);
         
         // Test reservation
-        let reserved = coordinator.reserve_opportunity(
+        let reserved = match coordinator.reserve_opportunity(
             &opportunity.id, 
-            "mev-bot-1", 
+            "mev-bot", 
             OpportunityPriority::Medium
-        ).await.unwrap();
+        ).await {
+            Ok(result) => result,
+            Err(e) => {
+                assert!(false, "Failed to reserve opportunity: {}", e);
+                return;
+            }
+        };
         
         assert!(reserved);
         
         // Verify reservation
-        let opportunities = coordinator.get_all_opportunities().await.unwrap();
-        assert!(opportunities[0].reservation.is_some());
-        let reservation = opportunities[0].reservation.as_ref().unwrap();
-        assert_eq!(reservation.executor_id, "mev-bot-1");
+        let opportunities = match coordinator.get_all_opportunities().await {
+            Ok(opps) => opps,
+            Err(e) => {
+                assert!(false, "Failed to get opportunities after reservation: {}", e);
+                return;
+            }
+        };
+        assert!(opportunities.len() > 0, "Should have at least one opportunity");
+        
+        // Safely check reservation instead of using unwrap
+        if let Some(opportunity) = opportunities.first() {
+            assert!(opportunity.reservation.is_some(), "Opportunity should have a reservation");
+            
+            if let Some(reservation) = &opportunity.reservation {
+                assert_eq!(reservation.executor_id, "mev-bot", "Reservation should be for mev-bot");
+            }
+        }
     }
 } 

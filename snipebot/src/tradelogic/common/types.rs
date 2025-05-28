@@ -6,6 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
+use common::trading_actions::{TradeAction, TradeStatus};
+pub use common::trading_actions::TradeAction as GlobalTradeType;
 
 /// Trader behavior type
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -374,33 +376,6 @@ pub enum TokenIssueType {
     Other,
 }
 
-/// Generic trade status applicable to all trade types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TradeStatus {
-    /// Trade is pending execution
-    Pending,
-    /// Trade is being submitted
-    Submitting,
-    /// Trade has been submitted to blockchain
-    Submitted,
-    /// Trade is being executed/in progress
-    Executing,
-    /// Trade has been completed successfully
-    Completed,
-    /// Trade has failed
-    Failed,
-    /// Trade was canceled by user
-    Canceled,
-    /// Trade was rejected due to validation/safety checks
-    Rejected,
-}
-
-impl Default for TradeStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
 /// Generic execution method for trades
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionMethod {
@@ -422,6 +397,34 @@ impl Default for ExecutionMethod {
     fn default() -> Self {
         Self::Standard
     }
+}
+
+/// Security issue found in token/transaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityIssue {
+    /// Issue code (unique identifier)
+    pub code: String,
+    /// Issue name/title
+    pub name: String,
+    /// Detailed description
+    pub description: String,
+    /// Severity level
+    pub severity: SecurityIssueSeverity,
+}
+
+/// Severity level for security issues
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecurityIssueSeverity {
+    /// Informational only
+    Info,
+    /// Low severity
+    Low,
+    /// Medium severity
+    Medium,
+    /// High severity
+    High,
+    /// Critical severity
+    Critical,
 }
 
 /// Common price and trade pair information
@@ -478,53 +481,6 @@ impl Default for CommonTradeParams {
             custom_params: HashMap::new(),
         }
     }
-}
-
-/// Security issue found in token/transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityIssue {
-    /// Issue code (unique identifier)
-    pub code: String,
-    /// Issue name/title
-    pub name: String,
-    /// Detailed description
-    pub description: String,
-    /// Severity level
-    pub severity: SecurityIssueSeverity,
-}
-
-/// Severity level for security issues
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SecurityIssueSeverity {
-    /// Informational only
-    Info,
-    /// Low severity
-    Low,
-    /// Medium severity
-    Medium,
-    /// High severity
-    High,
-    /// Critical severity
-    Critical,
-}
-
-/// Trade type (common for all strategies)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TradeAction {
-    /// Buy tokens
-    Buy,
-    /// Sell tokens
-    Sell,
-    /// Add liquidity to pool
-    AddLiquidity,
-    /// Remove liquidity from pool
-    RemoveLiquidity,
-    /// Swap tokens (token to token)
-    Swap,
-    /// Bridge tokens cross-chain
-    Bridge,
-    /// Flash swap/loan
-    FlashSwap,
 }
 
 /// Common interface for all trade results

@@ -32,6 +32,10 @@ impl SmartTradeExecutor {
     /// - `severity`: Mức độ nghiêm trọng (0-5, 5 là cao nhất)
     /// - `chain_id`: ID của blockchain
     pub async fn send_alert(&self, token_address: &str, alert_type: &str, message: &str, severity: u8, chain_id: u32) {
+        // Cố gắng sử dụng notification_manager nếu có
+        let mut used_notification_system = false;
+        
+        // Kiểm tra xem có notification_manager trong SmartTradeExecutor không
         if let Some(notification_manager) = &self.notification_manager {
             // Tạo dữ liệu thông báo
             let alert_data = json!({
@@ -57,9 +61,12 @@ impl SmartTradeExecutor {
                 error!("Không thể gửi thông báo: {:?}", e);
             } else {
                 debug!("Đã gửi thông báo: {}", message);
+                used_notification_system = true;
             }
-        } else {
-            // Nếu không có notification manager, chỉ log ra console
+        }
+        
+        // Fallback: Nếu không có notification_manager hoặc có lỗi, log ra console
+        if !used_notification_system {
             info!("ALERT [{}] {}: {}", severity, alert_type, message);
         }
     }
@@ -465,5 +472,51 @@ impl SmartTradeExecutor {
         }
         
         report
+    }
+    
+    /// Khởi tạo notification manager
+    ///
+    /// Tạo và cấu hình notification manager để gửi cảnh báo qua các kênh khác nhau
+    ///
+    /// # Parameters
+    /// - `telegram_token`: Token của bot Telegram
+    /// - `telegram_chat_id`: ID của chat Telegram
+    /// - `discord_webhook`: Webhook URL của Discord
+    ///
+    /// # Returns
+    /// - `Option<Arc<crate::notifications::NotificationManager>>`: Notification manager đã được cấu hình
+    pub async fn init_notification_manager(
+        telegram_token: Option<String>,
+        telegram_chat_id: Option<String>,
+        discord_webhook: Option<String>,
+    ) -> Option<Arc<crate::notifications::NotificationManager>> {
+        // Tạo notification manager mặc định
+        match crate::notifications::NotificationManager::create_default().await {
+            Ok(manager) => {
+                // Cấu hình Telegram nếu có
+                if let (Some(token), Some(chat_id)) = (telegram_token, telegram_chat_id) {
+                    if let Err(e) = manager.init_telegram(token, chat_id).await {
+                        error!("Không thể khởi tạo kênh Telegram: {:?}", e);
+                    } else {
+                        info!("Đã khởi tạo kênh thông báo Telegram");
+                    }
+                }
+                
+                // Cấu hình Discord nếu có
+                if let Some(webhook) = discord_webhook {
+                    if let Err(e) = manager.init_discord(webhook).await {
+                        error!("Không thể khởi tạo kênh Discord: {:?}", e);
+                    } else {
+                        info!("Đã khởi tạo kênh thông báo Discord");
+                    }
+                }
+                
+                Some(manager)
+            },
+            Err(e) => {
+                error!("Không thể tạo notification manager: {:?}", e);
+                None
+            }
+        }
     }
 }

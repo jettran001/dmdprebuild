@@ -235,7 +235,8 @@ impl CrossDomainMevManager {
             
             // Keep only recent opportunities (last 100)
             if recent.len() > 100 {
-                recent.sort_by(|a, b| b.estimated_profit_usd.partial_cmp(&a.estimated_profit_usd).unwrap());
+                recent.sort_by(|a, b| b.estimated_profit_usd.partial_cmp(&a.estimated_profit_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal));
                 recent.truncate(100);
             }
         }
@@ -448,7 +449,13 @@ impl CrossDomainMevManager {
             let key = (token_address.to_string(), chain_id);
             if let Some(cached_data) = cache.get(&key) {
                 // Return cached data if fresh (less than 2 minutes old)
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or_else(|_| {
+                        error!("System time appears to be before UNIX epoch, using 0 as fallback");
+                        0
+                    });
                 if now - cached_data.timestamp < 120 {
                     return Some(cached_data.clone());
                 }
@@ -460,7 +467,13 @@ impl CrossDomainMevManager {
         
         // This is where you'd call the adapter to get price
         // For now, simulate with random prices
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_else(|_| {
+                error!("System time appears to be before UNIX epoch, using 0 as fallback");
+                0
+            });
         
         // Simulate different prices on different chains
         let price_base = match token_address {
@@ -509,8 +522,11 @@ impl CrossDomainMevManager {
         // Convert timestamp to u64
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+            .map(|duration| duration.as_secs())
+            .unwrap_or_else(|_| {
+                error!("System time appears to be before UNIX epoch, using 0 as fallback");
+                0
+            });
         
         // Create expiration time based on estimated bridging time
         let expires_at = now + arb.estimated_bridging_time_seconds;
@@ -569,58 +585,23 @@ impl CrossDomainMevManager {
     
     /// Clone for using in async contexts
     fn clone(&self) -> Self {
-        // Sử dụng blocking read với timeout để đảm bảo không bị treo vô hạn
-        // nhưng vẫn ưu tiên lấy giá trị thực
-        let config = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match tokio::time::timeout(std::time::Duration::from_millis(200), 
-                                          self.config.read()).await {
-                    Ok(guard) => {
-                        let cloned = guard.clone();
-                        Ok(cloned)
-                    },
-                    Err(_) => {
-                        tracing::warn!("Timeout waiting for config lock in CrossDomainMevManager.clone()");
-                        Err(())
-                    }
-                }
-            })
-        }) {
-            Ok(cfg) => cfg,
-            Err(_) => {
-                tracing::warn!("Using default config in CrossDomainMevManager.clone() due to lock timeout");
-                CrossDomainMevConfig::default()
-            }
-        };
-
-        let running = match tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match tokio::time::timeout(std::time::Duration::from_millis(200), 
-                                          self.running.read()).await {
-                    Ok(guard) => {
-                        let running_value = *guard;
-                        Ok(running_value)
-                    },
-                    Err(_) => {
-                        tracing::warn!("Timeout waiting for running lock in CrossDomainMevManager.clone()");
-                        Err(())
-                    }
-                }
-            })
-        }) {
-            Ok(value) => value,
-            Err(_) => {
-                tracing::warn!("Using default running state (false) in CrossDomainMevManager.clone() due to lock timeout");
-                false
-            }
-        };
-
+        // Tạo phiên bản mới với giá trị mặc định cho các RwLock
+        // Tránh sử dụng blocking_read để đảm bảo không có deadlock
+        // Khi clone, không cần copy toàn bộ state cũ, chỉ cần copy thông tin cần thiết để 
+        // đảm bảo rằng instance mới hoạt động được
+        
         Self {
-            config: RwLock::new(config),
+            // Tạo mới RwLock với giá trị mặc định để tránh deadlock
+            config: RwLock::new(CrossDomainMevConfig::default()),
+            // Copy các adapter cho instance mới
             evm_adapters: self.evm_adapters.clone(),
+            // Tạo mới cache trống
             price_cache: RwLock::new(HashMap::new()),
+            // Copy bridges cho instance mới
             bridges: self.bridges.clone(),
-            running: RwLock::new(running),
+            // Mặc định không chạy khi clone
+            running: RwLock::new(false),
+            // Tạo mới danh sách cơ hội trống
             recent_opportunities: RwLock::new(Vec::new()),
         }
     }

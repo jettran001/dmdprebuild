@@ -270,15 +270,18 @@ pub fn detect_contract_template(contract_info: &ContractInfo) -> Option<String> 
 
 /// Phát hiện token có phải honeypot không bằng cách thử mô phỏng bán token
 pub async fn detect_honeypot(contract_info: &ContractInfo, adapter: &dyn ChainAdapter) -> Result<(bool, Option<String>)> {
+    // Các constant cho error message
+    const UNKNOWN_REASON: &str = "Unknown reason";
+    const TEST_AMOUNT: &str = "0.01"; // Số lượng nhỏ để test
+    
     debug!("Testing honeypot for token: {}", contract_info.address);
     
-    let test_amount = "0.01"; // Số lượng nhỏ để test
-    let result = adapter.simulate_sell_token(&contract_info.address, test_amount)
+    let result = adapter.simulate_sell_token(&contract_info.address, TEST_AMOUNT)
         .await
         .context("Failed to simulate selling token")?;
     
     if !result.success {
-        let reason = result.failure_reason.unwrap_or_else(|| "Unknown reason".to_string());
+        let reason = result.failure_reason.unwrap_or_else(|| UNKNOWN_REASON.to_string());
         debug!("Honeypot detected: {}", reason);
         return Ok((true, Some(reason)));
     }

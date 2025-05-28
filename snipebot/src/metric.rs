@@ -467,7 +467,12 @@ impl MetricsRegistry {
         }
         
         // Get chain metrics
-        let metrics = chain_metrics.get_mut(&chain_id).unwrap();
+        let metrics = match chain_metrics.get_mut(&chain_id) {
+            Some(m) => m,
+            None => {
+                return Err(anyhow::anyhow!("Chain metrics for chain ID {} not found", chain_id));
+            }
+        };
         
         // Update RPC requests count
         metrics.rpc_requests += 1;
@@ -508,7 +513,12 @@ impl MetricsRegistry {
         }
         
         // Get chain metrics
-        let metrics = chain_metrics.get_mut(&chain_id).unwrap();
+        let metrics = match chain_metrics.get_mut(&chain_id) {
+            Some(m) => m,
+            None => {
+                return Err(anyhow::anyhow!("Chain metrics for chain ID {} not found", chain_id));
+            }
+        };
         
         // Update gas price
         metrics.gas_price_gwei = gas_price_gwei;
@@ -537,7 +547,12 @@ impl MetricsRegistry {
         }
         
         // Get chain metrics
-        let metrics = chain_metrics.get_mut(&chain_id).unwrap();
+        let metrics = match chain_metrics.get_mut(&chain_id) {
+            Some(m) => m,
+            None => {
+                return Err(anyhow::anyhow!("Chain metrics for chain ID {} not found", chain_id));
+            }
+        };
         
         // Update pending transactions
         metrics.pending_transactions = pending_tx_count;
@@ -586,10 +601,20 @@ impl MetricsServer {
                     Ok::<_, std::convert::Infallible>(warp::service::service_fn(move |_| {
                         let metrics_page = metrics_page.clone();
                         async move {
-                            Ok::<_, std::convert::Infallible>(warp::http::Response::builder()
+                            let response = match warp::http::Response::builder()
                                 .header("Content-Type", "text/plain")
-                                .body(metrics_page.clone())
-                                .unwrap())
+                                .body(metrics_page.clone()) {
+                                    Ok(response) => response,
+                                    Err(e) => {
+                                        eprintln!("Error creating metrics response: {}", e);
+                                        warp::http::Response::builder()
+                                            .status(500)
+                                            .body("Error creating metrics response".to_string())
+                                            .expect("Fallback response creation should not fail")
+                                    }
+                                };
+                            
+                            Ok::<_, std::convert::Infallible>(response)
                         }
                     }))
                 }

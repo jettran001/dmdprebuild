@@ -3,13 +3,29 @@
 /// This module contains analysis utilities that are used by both smart_trade and mev_logic,
 /// providing consistent analysis methods and reducing code duplication.
 
+// External imports
 use std::collections::HashMap;
-use anyhow::{Result, Context};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::{DateTime, Utc};
+
+// Third-party imports
+use anyhow::{Result, Context, anyhow};
 use tracing::{debug, error, info, warn};
 
-use crate::analys::token_status::{ContractInfo, TokenStatus};
+// Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use super::types::{TokenIssue, TraderBehaviorAnalysis, TraderBehaviorType, TraderExpertiseLevel, GasBehavior};
+use crate::analys::token_status::{
+    ContractInfo, TokenStatus, TokenSafety, LiquidityEvent, 
+    TokenIssue as TokenStatusIssue
+};
+use crate::analys::mempool::{MempoolTransaction, TransactionStatus, TransactionType};
+
+// Module imports
+use super::types::{
+    TokenIssue, SecurityCheckResult, TraderBehaviorAnalysis,
+    TraderBehaviorType, TraderExpertiseLevel, GasBehavior
+};
 
 /// Analyzes trader behavior based on transaction history
 ///
@@ -21,7 +37,7 @@ use super::types::{TokenIssue, TraderBehaviorAnalysis, TraderBehaviorType, Trade
 /// * `TraderBehaviorAnalysis` - Analysis of trader behavior
 pub fn analyze_trader_behavior(
     address: &str,
-    transactions: &[crate::analys::mempool::MempoolTransaction]
+    transactions: &[MempoolTransaction]
 ) -> TraderBehaviorAnalysis {
     let behavior_type = determine_trader_type(transactions);
     let expertise_level = determine_expertise_level(transactions);
@@ -89,7 +105,7 @@ pub fn analyze_trader_behavior(
 }
 
 /// Determines trader type based on transaction patterns
-fn determine_trader_type(transactions: &[crate::analys::mempool::MempoolTransaction]) -> TraderBehaviorType {
+fn determine_trader_type(transactions: &[MempoolTransaction]) -> TraderBehaviorType {
     if transactions.is_empty() {
         return TraderBehaviorType::Unknown;
     }
@@ -101,8 +117,8 @@ fn determine_trader_type(transactions: &[crate::analys::mempool::MempoolTransact
     
     for tx in transactions {
         match tx.tx_type {
-            crate::analys::mempool::TransactionType::Arbitrage => arb_count += 1,
-            crate::analys::mempool::TransactionType::Swap => swap_count += 1,
+            TransactionType::Arbitrage => arb_count += 1,
+            TransactionType::Swap => swap_count += 1,
             _ => {},
         }
         
@@ -131,14 +147,14 @@ fn determine_trader_type(transactions: &[crate::analys::mempool::MempoolTransact
 }
 
 /// Determines trader expertise level
-fn determine_expertise_level(transactions: &[crate::analys::mempool::MempoolTransaction]) -> TraderExpertiseLevel {
+fn determine_expertise_level(transactions: &[MempoolTransaction]) -> TraderExpertiseLevel {
     if transactions.is_empty() {
         return TraderExpertiseLevel::Unknown;
     }
     
     // Calculate success rate
     let success_count = transactions.iter()
-        .filter(|tx| tx.status == crate::analys::mempool::TransactionStatus::Success)
+        .filter(|tx| tx.status == TransactionStatus::Success)
         .count();
     let success_rate = success_count as f64 / transactions.len() as f64;
     
@@ -169,7 +185,7 @@ fn determine_expertise_level(transactions: &[crate::analys::mempool::MempoolTran
 }
 
 /// Analyzes gas behavior patterns
-fn analyze_gas_behavior(transactions: &[crate::analys::mempool::MempoolTransaction]) -> GasBehavior {
+fn analyze_gas_behavior(transactions: &[MempoolTransaction]) -> GasBehavior {
     if transactions.is_empty() {
         return GasBehavior {
             average_gas_price: 0.0,
@@ -203,7 +219,7 @@ fn analyze_gas_behavior(transactions: &[crate::analys::mempool::MempoolTransacti
     
     // Calculate success rate
     let success_count = transactions.iter()
-        .filter(|tx| tx.status == crate::analys::mempool::TransactionStatus::Success)
+        .filter(|tx| tx.status == TransactionStatus::Success)
         .count();
     let success_rate = success_count as f64 / transactions.len() as f64;
     
@@ -217,7 +233,7 @@ fn analyze_gas_behavior(transactions: &[crate::analys::mempool::MempoolTransacti
 }
 
 /// Determines active hours of trader
-fn determine_active_hours(transactions: &[crate::analys::mempool::MempoolTransaction]) -> Vec<u8> {
+fn determine_active_hours(transactions: &[MempoolTransaction]) -> Vec<u8> {
     let mut hour_counts = vec![0; 24];
     
     for tx in transactions {
@@ -245,7 +261,7 @@ fn determine_active_hours(transactions: &[crate::analys::mempool::MempoolTransac
 }
 
 /// Calculates prediction score for trader behavior
-fn calculate_prediction_score(transactions: &[crate::analys::mempool::MempoolTransaction]) -> f64 {
+fn calculate_prediction_score(transactions: &[MempoolTransaction]) -> f64 {
     if transactions.len() < 5 {
         return 30.0; // Low confidence with few transactions
     }
@@ -301,174 +317,59 @@ fn calculate_prediction_score(transactions: &[crate::analys::mempool::MempoolTra
     prediction_score.min(100.0)
 }
 
-/// Detects token issues by analyzing contract code and behavior
+/// Detects common security issues in token contracts
+///
+/// Analyzes contract source code and bytecode to identify potential security issues
+/// such as honeypots, backdoors, and other malicious patterns.
 ///
 /// # Arguments
-/// * `contract_info` - Contract information including bytecode and source
-/// * `adapter` - EVM adapter for blockchain interaction
-///
-/// # Returns
-/// * `Result<Vec<TokenIssue>>` - List of detected issues
-pub async fn detect_token_issues(
-    contract_info: &ContractInfo,
-    adapter: &std::sync::Arc<EvmAdapter>
-) -> Result<Vec<TokenIssue>> {
-    let mut issues = Vec::new();
-    let token_status = TokenStatus::from_contract_info(contract_info, &[]);
-    
-    // Basic checks
-    if !contract_info.is_verified {
-        issues.push(TokenIssue::UnverifiedContract);
-    }
-    
-    // Check for honeypot
-    match adapter.simulate_sell_token(&contract_info.address, 0.01).await {
-        Ok(can_sell) => {
-            if !can_sell {
-                issues.push(TokenIssue::Honeypot);
-            }
-        },
-        Err(_) => {
-            // Consider suspicious if can't determine
-            issues.push(TokenIssue::Honeypot);
-        }
-    }
-    
-    // Check owner privileges
-    let owner_analysis = token_status.analyze_owner_privileges(contract_info);
-    if !owner_analysis.is_ownership_renounced {
-        issues.push(TokenIssue::OwnershipNotRenounced);
-        
-        if owner_analysis.has_mint_authority {
-            issues.push(TokenIssue::UnlimitedMintAuthority);
-        }
-        
-        if owner_analysis.has_pause_authority || 
-           owner_analysis.has_blacklist_authority ||
-           owner_analysis.has_burn_authority {
-            issues.push(TokenIssue::OwnerWithFullControl);
-        }
-    }
-    
-    if owner_analysis.can_retrieve_ownership {
-        issues.push(TokenIssue::OwnershipRenounceBackdoor);
-    }
-    
-    // Check proxy status
-    if owner_analysis.is_proxy {
-        issues.push(TokenIssue::ProxyContract);
-        issues.push(TokenIssue::UpgradeableLogic);
-    }
-    
-    // Check for trading restrictions
-    if token_status.has_max_tx_or_wallet_limit(contract_info) {
-        issues.push(TokenIssue::MaxTransactionLimit);
-        issues.push(TokenIssue::MaxWalletLimit);
-    }
-    
-    if token_status.has_trading_cooldown(contract_info) {
-        issues.push(TokenIssue::TradingCooldown);
-    }
-    
-    // Check for external calls and delegatecall
-    if token_status.has_external_delegatecall(contract_info) {
-        issues.push(TokenIssue::ExternalCalls);
-        issues.push(TokenIssue::DelegateCall);
-    }
-    
-    // Check tax information
-    match adapter.get_token_tax_info(&contract_info.address).await {
-        Ok((buy_tax, sell_tax)) => {
-            if buy_tax > 10.0 || sell_tax > 10.0 {
-                issues.push(TokenIssue::HighTax);
-            }
-            
-            if (sell_tax - buy_tax).abs() > 3.0 {
-                issues.push(TokenIssue::DynamicTax);
-            }
-        },
-        Err(_) => {
-            // Suspicious if can't determine tax
-            issues.push(TokenIssue::HiddenFees);
-        }
-    }
-    
-    // Check liquidity
-    match adapter.get_token_liquidity(&contract_info.address).await {
-        Ok(liquidity) => {
-            if liquidity < 5000.0 { // $5000 threshold
-                issues.push(TokenIssue::LowLiquidity);
-            }
-        },
-        Err(_) => {
-            // Suspicious if can't determine liquidity
-            issues.push(TokenIssue::LowLiquidity);
-        }
-    }
-    
-    Ok(issues)
-}
-
-/// Shared token analysis functionality
-///
-/// This module provides common functionality for token analysis that can be used 
-/// by both analys/api/token_api.rs and tradelogic/smart_trade/token_analysis.rs
-/// to avoid code duplication.
-
-use std::sync::Arc;
-use std::collections::HashMap;
-use anyhow::{Result, Context, anyhow};
-use tracing::{debug, error, info, warn};
-
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::token_status::{
-    ContractInfo, TokenStatus, TokenSafety, LiquidityEvent, 
-    TokenIssue as TokenStatusIssue
-};
-use super::types::{TokenIssue, SecurityCheckResult};
-
-/// Detect token issues from contract info
-///
-/// Centralizes the logic to detect various issues with a token contract
-///
-/// # Arguments
-/// * `contract_info` - Contract information
-/// * `token_address` - Token address
+/// * `contract_info` - Contract information including source code and bytecode
 ///
 /// # Returns
 /// * `Vec<TokenIssue>` - List of detected issues
-pub fn detect_token_issues(contract_info: &ContractInfo, token_address: &str) -> Vec<TokenIssue> {
+pub fn detect_token_issues(contract_info: &ContractInfo) -> Vec<TokenIssue> {
     let mut issues = Vec::new();
-    
-    // Check for proxy contract pattern
-    if is_proxy_contract(contract_info) {
-        issues.push(TokenIssue::ProxyImplementation);
-    }
-    
-    // Check for blacklist functionality
-    if has_blacklist_function(contract_info) {
-        issues.push(TokenIssue::HasBlacklist);
-    }
-    
-    // Check for excessive owner privileges
-    if has_excessive_privileges(contract_info) {
-        issues.push(TokenIssue::ExcessiveOwnerPrivileges);
-    }
     
     // Check if contract is unverified
     if !contract_info.is_verified {
         issues.push(TokenIssue::UnverifiedContract);
     }
     
-    // Check for mint function
-    if has_mint_function(contract_info) {
-        issues.push(TokenIssue::MintFunction);
+    // Check for proxy implementation
+    if is_proxy_contract(contract_info) {
+        issues.push(TokenIssue::ProxyImplementation);
+    }
+    
+    // Check for blacklist/whitelist functions
+    let (has_blacklist, has_whitelist) = check_token_lists(contract_info);
+    if has_blacklist {
+        issues.push(TokenIssue::HasBlacklist);
+    }
+    if has_whitelist {
+        issues.push(TokenIssue::HasWhitelist);
+    }
+    
+    // Check for excessive owner privileges
+    let privileges = check_owner_privileges(contract_info);
+    if !privileges.is_empty() {
+        issues.push(TokenIssue::ExcessiveOwnerPrivileges);
+        
+        // Add specific privilege issues
+        if privileges.contains("mint") {
+            issues.push(TokenIssue::UnlimitedMintAuthority);
+        }
+        if privileges.contains("selfdestruct") {
+            issues.push(TokenIssue::ContractSelfDestruct);
+        }
+        if privileges.contains("delegatecall") {
+            issues.push(TokenIssue::DelegateCall);
+        }
     }
     
     issues
 }
 
-/// Check if token contract is likely a proxy
+/// Checks if a token contract is likely a proxy
 ///
 /// # Arguments
 /// * `contract_info` - Contract information
@@ -500,7 +401,45 @@ pub fn is_proxy_contract(contract_info: &ContractInfo) -> bool {
     is_proxy_bytecode || is_proxy_source
 }
 
-/// Check if token has blacklist functionality
+/// Checks if a token has blacklist or whitelist functionality
+///
+/// # Arguments
+/// * `contract_info` - Contract information
+///
+/// # Returns
+/// * `(bool, bool)` - (has_blacklist, has_whitelist)
+pub fn check_token_lists(contract_info: &ContractInfo) -> (bool, bool) {
+    let mut has_blacklist = false;
+    let mut has_whitelist = false;
+    
+    if let Some(source) = &contract_info.source_code {
+        // Check for blacklist patterns
+        has_blacklist = source.contains("blacklist") || 
+                        source.contains("blocklist") ||
+                        source.contains("banned") ||
+                        source.contains("denylist");
+        
+        // Check for whitelist patterns
+        has_whitelist = source.contains("whitelist") ||
+                        source.contains("allowlist");
+    }
+    
+    // Check for blacklist in function signatures
+    if let Some(abi) = &contract_info.abi {
+        has_blacklist = has_blacklist || 
+                        abi.contains("blacklist") ||
+                        abi.contains("blocklist") ||
+                        abi.contains("ban");
+        
+        has_whitelist = has_whitelist ||
+                        abi.contains("whitelist") ||
+                        abi.contains("allowlist");
+    }
+    
+    (has_blacklist, has_whitelist)
+}
+
+/// Checks if a contract has blacklist functionality
 ///
 /// # Arguments
 /// * `contract_info` - Contract information
@@ -508,125 +447,141 @@ pub fn is_proxy_contract(contract_info: &ContractInfo) -> bool {
 /// # Returns
 /// * `bool` - True if the contract has blacklist functionality
 pub fn has_blacklist_function(contract_info: &ContractInfo) -> bool {
-    let has_blacklist_source = if let Some(source) = &contract_info.source_code {
-        source.contains("blacklist") || 
-        source.contains("blocklist") ||
-        source.contains("banned") ||
-        source.contains("denylist")
-    } else {
-        false
-    };
-    
-    let has_blacklist_abi = if let Some(abi) = &contract_info.abi {
-        abi.contains("blacklist") ||
-        abi.contains("blocklist") ||
-        abi.contains("ban")
-    } else {
-        false
-    };
-    
-    has_blacklist_source || has_blacklist_abi
+    let (has_blacklist, _) = check_token_lists(contract_info);
+    has_blacklist
 }
 
-/// Check if token contract has excessive owner privileges
+/// Check owner privileges in a token contract
 ///
 /// # Arguments
 /// * `contract_info` - Contract information
 ///
 /// # Returns
-/// * `bool` - True if the contract grants excessive privileges to owner
-pub fn has_excessive_privileges(contract_info: &ContractInfo) -> bool {
+/// * `Vec<String>` - List of excessive privileges
+pub fn check_owner_privileges(contract_info: &ContractInfo) -> Vec<String> {
+    let mut privileges = Vec::new();
+    
     if let Some(source) = &contract_info.source_code {
-        // Check for functions that grant owner excessive control
-        (source.contains("onlyOwner") || source.contains("only owner")) &&
-        (
-            source.contains("setFee") || 
-            source.contains("enableTrading") ||
-            source.contains("disableTrading") ||
-            source.contains("pause") ||
-            source.contains("unpause") ||
-            source.contains("mint") ||
-            source.contains("burn") ||
-            source.contains("blacklist")
-        )
-    } else {
-        false
+        // Check for unlimited minting
+        if source.contains("mint") && 
+           (source.contains("onlyOwner") || source.contains("only Owner") || source.contains("onlyAdmin")) {
+            privileges.push("mint".to_string());
+        }
+        
+        // Check for ability to pause transfers
+        if source.contains("pause") && 
+           (source.contains("transfer") || source.contains("trading")) {
+            privileges.push("pause".to_string());
+        }
+        
+        // Check for self-destruct capability
+        if source.contains("selfdestruct") || source.contains("self-destruct") {
+            privileges.push("selfdestruct".to_string());
+        }
+        
+        // Check for delegatecall (can be dangerous)
+        if source.contains("delegatecall") {
+            privileges.push("delegatecall".to_string());
+        }
+        
+        // Check for fee modification
+        if (source.contains("fee") || source.contains("tax")) && 
+           source.contains("set") {
+            privileges.push("modify_fees".to_string());
+        }
+        
+        // Check for ownership transfer
+        if source.contains("transferOwnership") || 
+           (source.contains("transfer") && source.contains("ownership")) {
+            privileges.push("transfer_ownership".to_string());
+        }
     }
-}
-
-/// Check if token has mint function
-///
-/// # Arguments
-/// * `contract_info` - Contract information
-///
-/// # Returns
-/// * `bool` - True if the contract has mint functionality
-pub fn has_mint_function(contract_info: &ContractInfo) -> bool {
-    if let Some(source) = &contract_info.source_code {
-        source.contains("mint") && 
-        (source.contains("function mint") || source.contains("function _mint"))
-    } else if let Some(abi) = &contract_info.abi {
-        abi.contains("\"name\":\"mint\"") || abi.contains("\"name\":\"_mint\"")
-    } else {
-        false
-    }
+    
+    privileges
 }
 
 /// Convert TokenSafety to SecurityCheckResult
 ///
-/// Provides a standardized way to convert between analysis/token_status types
-/// and tradelogic/common types
-///
 /// # Arguments
-/// * `safety` - TokenSafety object from analyzer
-/// * `token_address` - Address of the token
+/// * `token_safety` - Token safety analysis result
+/// * `token_address` - Token address
 ///
 /// # Returns
-/// * `SecurityCheckResult` - Standardized security check result
+/// * `SecurityCheckResult` - Security check result
 pub fn convert_token_safety_to_security_check(
-    safety: &TokenSafety,
+    token_safety: &TokenSafety,
     token_address: &str
 ) -> SecurityCheckResult {
     let mut issues = Vec::new();
     
-    // Convert indicators to TokenIssue enum
-    for indicator in &safety.rug_indicators {
-        let issue = match indicator.as_str() {
-            "honeypot" => TokenIssue::Honeypot,
-            "high_buy_tax" => TokenIssue::HighBuyTax,
-            "high_sell_tax" => TokenIssue::HighSellTax,
-            "blacklist" => TokenIssue::HasBlacklist,
-            "owner_privileges" => TokenIssue::ExcessiveOwnerPrivileges,
-            "proxy" => TokenIssue::ProxyImplementation,
-            "anti_bot" => TokenIssue::AntiBot,
-            "dynamic_tax" => TokenIssue::DynamicTax,
-            _ => TokenIssue::Other(indicator.clone())
-        };
-        issues.push(issue);
+    // Convert TokenSafety issues to TokenIssue
+    if token_safety.is_honeypot {
+        issues.push(TokenIssue::Honeypot);
     }
     
-    // Create SecurityCheckResult
+    if token_safety.buy_tax > 10.0 {
+        issues.push(TokenIssue::HighBuyTax);
+    }
+    
+    if token_safety.sell_tax > 10.0 {
+        issues.push(TokenIssue::HighSellTax);
+    }
+    
+    if token_safety.has_anti_whale {
+        issues.push(TokenIssue::MaxWalletLimit);
+    }
+    
+    if token_safety.has_trading_cooldown {
+        issues.push(TokenIssue::TradingCooldown);
+    }
+    
+    if token_safety.has_blacklist {
+        issues.push(TokenIssue::HasBlacklist);
+    }
+    
+    if token_safety.has_whitelist {
+        issues.push(TokenIssue::HasWhitelist);
+    }
+    
+    if token_safety.has_mint_function {
+        issues.push(TokenIssue::UnlimitedMintAuthority);
+    }
+    
+    // Calculate risk score based on issues
+    let risk_score = if token_safety.is_honeypot {
+        100 // Maximum risk for honeypots
+    } else {
+        let base_score = token_safety.risk_score.unwrap_or(50);
+        let issue_penalty = issues.len() as u8 * 5;
+        let final_score = base_score + issue_penalty;
+        final_score.min(100)
+    };
+    
+    // Create and return the result
     SecurityCheckResult {
         token_address: token_address.to_string(),
         issues,
-        risk_score: safety.risk_score as u8,
-        safe_to_trade: safety.risk_score < 70, // Threshold
+        risk_score,
+        safe_to_trade: risk_score < 70, // Threshold for safety
         extra_info: HashMap::new(),
     }
 }
 
-/// Centralized token analysis processing
+/// Analyze token security comprehensively
 ///
-/// Provides a single point for performing comprehensive token analysis
+/// Performs a complete security analysis of a token by combining multiple
+/// sources of information including contract analysis and on-chain behavior.
 ///
 /// # Arguments
-/// * `token_address` - Address of token to analyze
-/// * `adapter` - EVM chain adapter
+/// * `token_address` - Address of the token to check
+/// * `chain_id` - Chain ID where the token exists
+/// * `adapter` - EVM adapter for blockchain interaction
 ///
 /// # Returns
-/// * `Result<SecurityCheckResult>` - Standardized security analysis result
+/// * `Result<SecurityCheckResult>` - Security check result with risk score and issues
 pub async fn analyze_token_security(
     token_address: &str,
+    chain_id: u32,
     adapter: &Arc<EvmAdapter>
 ) -> Result<SecurityCheckResult> {
     // Get basic token info
@@ -639,58 +594,47 @@ pub async fn analyze_token_security(
         .await
         .context("Failed to get contract info")?;
     
-    // Detect various security issues
-    let issues = detect_token_issues(&contract_info, token_address);
+    // Get token safety analysis
+    let token_safety = adapter.analyze_token_safety(token_address)
+        .await
+        .context("Failed to analyze token safety")?;
     
-    // Calculate risk score
-    let risk_score = calculate_risk_score(&issues);
+    // Detect issues from contract info
+    let mut contract_issues = detect_token_issues(&contract_info);
     
-    // Create final result
-    let result = SecurityCheckResult {
-        token_address: token_address.to_string(),
-        issues,
-        risk_score: risk_score as u8,
-        safe_to_trade: risk_score < 70.0, // Threshold for safety
-        extra_info: HashMap::new(),
-    };
+    // Convert token safety to security check result
+    let mut result = convert_token_safety_to_security_check(&token_safety, token_address);
     
-    Ok(result)
-}
-
-/// Calculate risk score based on issues
-///
-/// # Arguments
-/// * `issues` - List of detected token issues
-///
-/// # Returns
-/// * `f64` - Risk score from 0-100
-fn calculate_risk_score(issues: &[TokenIssue]) -> f64 {
-    if issues.is_empty() {
-        return 0.0;
+    // Merge issues from both sources (avoiding duplicates)
+    for issue in contract_issues {
+        if !result.issues.contains(&issue) {
+            result.issues.push(issue);
+        }
     }
     
-    // Define risk weights for each issue type
-    let risk_map: HashMap<_, f64> = [
-        (TokenIssue::Honeypot.to_string(), 100.0),
-        (TokenIssue::HighBuyTax.to_string(), 75.0),
-        (TokenIssue::HighSellTax.to_string(), 85.0),
-        (TokenIssue::DynamicTax.to_string(), 80.0),
-        (TokenIssue::HasBlacklist.to_string(), 65.0),
-        (TokenIssue::ExcessiveOwnerPrivileges.to_string(), 70.0),
-        (TokenIssue::ProxyImplementation.to_string(), 60.0),
-        (TokenIssue::UnverifiedContract.to_string(), 50.0),
-        (TokenIssue::MintFunction.to_string(), 55.0),
-        (TokenIssue::AntiBot.to_string(), 45.0),
-    ].iter().cloned().collect();
+    // Check token age (new tokens are riskier)
+    if let Some(created_at) = token_info.created_at {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        let age_in_days = (now - created_at) / (24 * 60 * 60);
+        
+        if age_in_days < 1 {
+            result.issues.push(TokenIssue::NewToken);
+            result.risk_score += 30;
+        } else if age_in_days < 7 {
+            result.issues.push(TokenIssue::RecentToken);
+            result.risk_score += 15;
+        }
+    }
     
-    // Sum up risk scores
-    let total_risk: f64 = issues.iter()
-        .map(|issue| risk_map.get(&issue.to_string()).unwrap_or(&40.0))
-        .sum();
+    // Cap risk score at 100
+    result.risk_score = result.risk_score.min(100);
     
-    // Apply formula to avoid extreme values with multiple issues
-    let adjusted_risk = total_risk / (1.0 + 0.1 * (issues.len() as f64 - 1.0));
+    // Update safe_to_trade based on final risk score
+    result.safe_to_trade = result.risk_score < 70;
     
-    // Cap at 100
-    adjusted_risk.min(100.0)
+    Ok(result)
 } 

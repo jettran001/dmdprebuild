@@ -27,6 +27,10 @@ pub struct MempoolAnalyzer {
     function_signatures: HashMap<String, (String, TransactionType)>,
     /// Chain ID đang phân tích
     chain_id: u32,
+    /// Cache cho token price để giảm số lượng truy vấn
+    token_price_cache: RwLock<HashMap<String, (f64, Instant)>>,
+    /// Thời gian cache token price (seconds)
+    token_price_cache_ttl: u64,
 }
 
 impl MempoolAnalyzer {
@@ -41,6 +45,8 @@ impl MempoolAnalyzer {
             watched_addresses: RwLock::new(HashSet::new()),
             function_signatures: Self::initialize_function_signatures(),
             chain_id,
+            token_price_cache: RwLock::new(HashMap::new()),
+            token_price_cache_ttl: 60, // 60 giây mặc định
         }
     }
 
@@ -129,337 +135,297 @@ impl MempoolAnalyzer {
         signatures
     }
 
-    /// Thêm giao dịch mới vào danh sách theo dõi
-    pub async fn add_transaction(&self, transaction: MempoolTransaction) {
-        // Phân tích giao dịch trước khi thêm
-        self.analyze_transaction(&transaction).await;
-        
-        // Cập nhật gas price trung bình
-        self.update_average_gas_price(&transaction).await;
-        
-        // Thêm vào danh sách pending
-        let mut pending_txs = self.pending_transactions.write().await;
-        pending_txs.insert(transaction.tx_hash.clone(), transaction);
-    }
-    
-    /// Cập nhật gas price trung bình
-    async fn update_average_gas_price(&self, transaction: &MempoolTransaction) {
-        let mut avg_gas = self.average_gas_price.write().await;
-        
-        if *avg_gas == 0.0 {
-            *avg_gas = transaction.gas_price;
-        } else {
-            // Cập nhật trung bình theo công thức EMA (Exponential Moving Average)
-            const ALPHA: f64 = 0.1; // Hệ số làm mịn
-            *avg_gas = (1.0 - ALPHA) * *avg_gas + ALPHA * transaction.gas_price;
-        }
-    }
-    
-    /// Phân tích giao dịch
-    async fn analyze_transaction(&self, transaction: &MempoolTransaction) {
-        // Phân tích theo loại giao dịch
-        match transaction.transaction_type {
-            TransactionType::TokenCreation => {
-                self.process_potential_token_creation(transaction).await;
-            },
-            TransactionType::AddLiquidity => {
-                self.process_liquidity_event(transaction, true).await;
-            },
-            TransactionType::RemoveLiquidity => {
-                self.process_liquidity_event(transaction, false).await;
-            },
-            _ => {}
+    /// Thêm nhiều giao dịch mới vào danh sách theo dõi (batch processing)
+    pub async fn add_transactions(&self, transactions: Vec<MempoolTransaction>) {
+        if transactions.is_empty() {
+            return;
         }
         
-        // Phát hiện và cảnh báo các giao dịch whale
-        if transaction.value >= WHALE_TRANSACTION_ETH {
-            self.create_whale_alert(transaction).await;
+        // Batch processing cho các phân tích transaction
+        let mut alerts = Vec::new();
+        let mut new_tokens = HashMap::new();
+        let mut sum_gas_price = 0.0;
+        let mut tx_count = 0;
+        
+        // Phân tích từng giao dịch và thu thập kết quả
+        for transaction in &transactions {
+            // Phân tích theo loại giao dịch
+            match transaction.transaction_type {
+                TransactionType::TokenCreation => {
+                    if let Some(token_info) = self.analyze_potential_token_creation(transaction).await {
+                        new_tokens.insert(token_info.token_address.clone(), token_info);
+                    }
+                },
+                TransactionType::AddLiquidity => {
+                    if let Some(alert) = self.analyze_liquidity_event(transaction, true).await {
+                        alerts.push(alert);
+                    }
+                },
+                TransactionType::RemoveLiquidity => {
+                    if let Some(alert) = self.analyze_liquidity_event(transaction, false).await {
+                        alerts.push(alert);
+                    }
+                },
+                _ => {}
+            }
+            
+            // Phát hiện và cảnh báo các giao dịch whale
+            if transaction.value >= WHALE_TRANSACTION_ETH {
+                alerts.push(self.create_whale_alert_without_lock(transaction));
+            }
+            
+            // Phát hiện các pattern đáng ngờ
+            if let Some(pattern) = self.detect_suspicious_pattern(transaction).await {
+                alerts.push(self.create_suspicious_pattern_alert_without_lock(transaction, pattern));
+            }
+            
+            // Thu thập gas price cho tính trung bình
+            sum_gas_price += transaction.gas_price;
+            tx_count += 1;
         }
         
-        // Phát hiện các pattern đáng ngờ
-        self.detect_suspicious_patterns(transaction).await;
-    }
-    
-    /// Phát hiện loại giao dịch từ input data
-    fn detect_transaction_type(&self, transaction: &MempoolTransaction) -> TransactionType {
-        // Nếu không có input data, đây là chuyển native token
-        if transaction.input_data == "0x" || transaction.input_data.len() <= 10 {
-            return TransactionType::NativeTransfer;
-        }
-        
-        // Lấy function signature (4 bytes đầu tiên của input data)
-        let signature = &transaction.input_data[..10].to_lowercase();
-        
-        // Kiểm tra trong danh sách signature đã biết
-        if let Some((_, tx_type)) = self.function_signatures.get(signature) {
-            return tx_type.clone();
-        }
-        
-        // Heuristics để phát hiện loại giao dịch
-        if transaction.to_address.is_none() {
-            // Không có địa chỉ nhận => triển khai contract
-            return TransactionType::ContractDeployment;
-        }
-        
-        // Mặc định là tương tác với contract
-        TransactionType::ContractInteraction
-    }
-    
-    /// Xử lý giao dịch có thể là tạo token mới
-    async fn process_potential_token_creation(&self, transaction: &MempoolTransaction) {
-        // Lấy địa chỉ contract mới tạo (nếu có)
-        let contract_address = match transaction.to_address {
-            None => {
-                // Tạm tính địa chỉ contract dựa trên from và nonce
-                let creator = utils::normalize_address(&transaction.from_address);
-                let nonce = transaction.nonce;
-                format!("0x{:x}", nonce) // Đây chỉ là placeholder, cần tính chính xác hơn
-            },
-            Some(_) => return, // Có địa chỉ nhận => không phải tạo contract mới
-        };
-        
-        // Thêm vào danh sách token mới
-        let new_token = NewTokenInfo {
-            token_address: contract_address.clone(),
-            chain_id: self.chain_id,
-            creation_tx: transaction.tx_hash.clone(),
-            creator_address: transaction.from_address.clone(),
-            detected_at: transaction.detected_at,
-            liquidity_added: false,
-            liquidity_tx: None,
-            liquidity_value: None,
-            dex_type: None,
-        };
-        
-        let mut new_tokens = self.new_tokens.write().await;
-        new_tokens.insert(contract_address.clone(), new_token);
-        
-        // Tạo cảnh báo token mới
-        let alert = MempoolAlert {
-            alert_type: MempoolAlertType::NewToken,
-            severity: AlertSeverity::Info,
-            detected_at: transaction.detected_at,
-            description: format!("Phát hiện token mới được tạo: {}", contract_address),
-            related_transactions: vec![transaction.tx_hash.clone()],
-            related_token: Some(contract_address),
-            related_addresses: vec![transaction.from_address.clone()],
-        };
-        
-        let mut alerts = self.alerts.write().await;
-        alerts.push(alert);
-    }
-    
-    /// Xử lý sự kiện thêm/rút thanh khoản
-    async fn process_liquidity_event(&self, transaction: &MempoolTransaction, is_adding: bool) {
-        // Trích xuất thông tin token từ input data
-        let token_address = match self.extract_token_from_liquidity_event(transaction) {
-            Some(addr) => addr,
-            None => return,
-        };
-        
-        // Cập nhật token nếu đã trong danh sách theo dõi
-        let mut new_tokens = self.new_tokens.write().await;
-        if let Some(token) = new_tokens.get_mut(&token_address) {
-            if is_adding && !token.liquidity_added {
-                token.liquidity_added = true;
-                token.liquidity_tx = Some(transaction.tx_hash.clone());
-                // Sử dụng hàm từ utils để tính liquidity_value
-                if let Some(token_price) = self.get_token_price(&token_address).await {
-                    token.liquidity_value = Some(utils::calculate_liquidity_value(&transaction.input_data, token_price));
-                } else {
-                    token.liquidity_value = Some(transaction.value * 2.0); // Giá trị ước tính
-                }
-                
-                // Xác định DEX từ địa chỉ nhận
-                if let Some(to) = &transaction.to_address {
-                    token.dex_type = Some(utils::detect_dex_from_router(to));
-                }
+        // Cập nhật transaction pool với một write lock duy nhất
+        {
+            let mut pending_txs = self.pending_transactions.write().await;
+            for transaction in transactions {
+                pending_txs.insert(transaction.tx_hash.clone(), transaction);
             }
         }
         
-        // Tạo cảnh báo sự kiện thanh khoản
-        let alert_type = if is_adding {
-            MempoolAlertType::LiquidityAdded
-        } else {
-            MempoolAlertType::LiquidityRemoved
-        };
+        // Cập nhật new tokens với một write lock duy nhất
+        if !new_tokens.is_empty() {
+            let mut tokens = self.new_tokens.write().await;
+            tokens.extend(new_tokens);
+        }
         
-        let description = if is_adding {
-            format!("Thêm thanh khoản cho token: {}", token_address)
-        } else {
-            format!("Rút thanh khoản từ token: {}", token_address)
-        };
+        // Cập nhật alerts với một write lock duy nhất
+        if !alerts.is_empty() {
+            let mut all_alerts = self.alerts.write().await;
+            all_alerts.extend(alerts);
+        }
         
-        let severity = if is_adding {
-            AlertSeverity::Info
-        } else {
-            AlertSeverity::Medium // Rút thanh khoản có thể là dấu hiệu rug pull
-        };
-        
-        let alert = MempoolAlert {
-            alert_type,
-            severity,
-            detected_at: transaction.detected_at,
-            description,
-            related_transactions: vec![transaction.tx_hash.clone()],
-            related_token: Some(token_address),
-            related_addresses: vec![transaction.from_address.clone()],
-        };
-        
-        let mut alerts = self.alerts.write().await;
-        alerts.push(alert);
+        // Cập nhật gas price trung bình
+        if tx_count > 0 {
+            let new_avg_gas = sum_gas_price / tx_count as f64;
+            let mut avg_gas = self.average_gas_price.write().await;
+            
+            if *avg_gas == 0.0 {
+                *avg_gas = new_avg_gas;
+            } else {
+                // Cập nhật trung bình theo công thức EMA (Exponential Moving Average)
+                const ALPHA: f64 = 0.1; // Hệ số làm mịn
+                *avg_gas = (1.0 - ALPHA) * *avg_gas + ALPHA * new_avg_gas;
+            }
+        }
     }
     
-    /// Tạo cảnh báo giao dịch whale
-    async fn create_whale_alert(&self, transaction: &MempoolTransaction) {
-        let alert = MempoolAlert {
+    /// Thêm giao dịch mới vào danh sách theo dõi
+    pub async fn add_transaction(&self, transaction: MempoolTransaction) {
+        // Sử dụng phương thức batch cho một giao dịch đơn lẻ
+        self.add_transactions(vec![transaction]).await;
+    }
+    
+    /// Phân tích token creation mà không ghi vào new_tokens
+    async fn analyze_potential_token_creation(&self, transaction: &MempoolTransaction) -> Option<NewTokenInfo> {
+        // Kiểm tra nếu đây là giao dịch tạo contract
+        if transaction.to_address.is_none() {
+            // Thông tin token mới
+            let token_info = NewTokenInfo {
+                token_address: transaction.contract_address.clone().unwrap_or_default(),
+                creator_address: transaction.from_address.clone(),
+                creation_tx: transaction.tx_hash.clone(),
+                detected_at: transaction.detected_at,
+                initial_liquidity: None,
+                initial_price: None,
+                token_name: None,
+                token_symbol: None,
+                deployment_block: None,
+                risk_score: 0,
+            };
+            
+            return Some(token_info);
+        }
+        
+        None
+    }
+    
+    /// Phân tích token creation mà không ghi vào new_tokens
+    async fn analyze_liquidity_event(&self, transaction: &MempoolTransaction, is_adding: bool) -> Option<MempoolAlert> {
+        let token_address = match self.extract_token_from_liquidity_event(transaction) {
+            Some(addr) => addr,
+            None => return None,
+        };
+        
+        // Lấy giá token từ cache hoặc API
+        let token_price = self.get_token_price_with_cache(&token_address).await.unwrap_or(0.0);
+        
+        // Ví dụ đơn giản: Cảnh báo nếu có ai đó remove nhiều liquidity
+        if !is_adding && token_price > 0.0 && transaction.value > SIGNIFICANT_LIQUIDITY_CHANGE_ETH {
+            let alert_type = MempoolAlertType::LiquidityChange {
+                token_address: token_address.clone(),
+                is_adding,
+                value_estimate: transaction.value * token_price,
+            };
+            
+            let alert = MempoolAlert {
+                alert_type,
+                severity: AlertSeverity::High,
+                detected_at: transaction.detected_at,
+                description: format!(
+                    "Significant liquidity removal detected: {} ETH worth of {}",
+                    transaction.value, token_address
+                ),
+                related_transactions: vec![transaction.tx_hash.clone()],
+                related_token: Some(token_address),
+                related_addresses: vec![transaction.from_address.clone()],
+            };
+            
+            return Some(alert);
+        }
+        
+        None
+    }
+    
+    /// Tạo cảnh báo whale mà không cần lock alerts
+    fn create_whale_alert_without_lock(&self, transaction: &MempoolTransaction) -> MempoolAlert {
+        MempoolAlert {
             alert_type: MempoolAlertType::WhaleTransaction,
             severity: AlertSeverity::Medium,
             detected_at: transaction.detected_at,
             description: format!(
-                "Giao dịch whale phát hiện: {} ETH/BNB từ {}",
-                transaction.value, transaction.from_address
+                "Whale transaction detected: {} ETH from {} to {}",
+                transaction.value,
+                transaction.from_address,
+                transaction.to_address.clone().unwrap_or_default()
             ),
             related_transactions: vec![transaction.tx_hash.clone()],
             related_token: None,
-            related_addresses: vec![transaction.from_address.clone()],
-        };
-        
-        let mut alerts = self.alerts.write().await;
-        alerts.push(alert);
-        
-        // Tự động thêm địa chỉ whale vào danh sách theo dõi
-        self.add_watched_address(&transaction.from_address).await;
+            related_addresses: vec![
+                transaction.from_address.clone(),
+                transaction.to_address.clone().unwrap_or_default(),
+            ],
+        }
     }
     
-    /// Phát hiện các pattern đáng ngờ
-    async fn detect_suspicious_patterns(&self, transaction: &MempoolTransaction) {
+    /// Phát hiện pattern đáng ngờ mà không lock alert
+    async fn detect_suspicious_pattern(&self, transaction: &MempoolTransaction) -> Option<SuspiciousPattern> {
+        // Lấy tất cả giao dịch đang pending
         let pending_txs = self.pending_transactions.read().await;
         
-        // Phát hiện front-running
-        if let Some(pattern) = detection::detect_front_running(transaction, &pending_txs, FRONT_RUNNING_TIME_WINDOW_MS).await {
-            self.create_suspicious_pattern_alert(transaction, pattern).await;
+        // Tìm front-running
+        if let Some(pattern) = detection::detect_front_running(
+            transaction,
+            &pending_txs,
+            1000, // 1000ms
+        ).await {
+            return Some(pattern);
         }
         
-        // Phát hiện sandwich attack
-        if let Some(pattern) = detection::detect_sandwich_attack(transaction, &pending_txs, MAX_SANDWICH_TIME_WINDOW_MS).await {
-            self.create_suspicious_pattern_alert(transaction, pattern).await;
+        // Tìm sandwich attack
+        if let Some(pattern) = detection::detect_sandwich_attack(
+            transaction,
+            &pending_txs,
+            1000, // 1000ms
+        ).await {
+            return Some(pattern);
         }
         
-        // Phát hiện high frequency trading
-        if let Some(pattern) = detection::detect_high_frequency_trading(transaction, &pending_txs).await {
-            self.create_suspicious_pattern_alert(transaction, pattern).await;
-        }
+        None
     }
     
-    /// Tạo cảnh báo cho pattern đáng ngờ
-    async fn create_suspicious_pattern_alert(&self, transaction: &MempoolTransaction, pattern: SuspiciousPattern) {
-        let (description, severity) = match pattern {
-            SuspiciousPattern::FrontRunning => (
-                format!(
-                    "Phát hiện front-running: {} với gas price cao {}",
-                    transaction.tx_hash, transaction.gas_price
-                ),
-                AlertSeverity::High
-            ),
-            SuspiciousPattern::SandwichAttack => (
-                format!(
-                    "Phát hiện sandwich attack: {} đang kẹp một giao dịch swap lớn",
-                    transaction.tx_hash
-                ),
-                AlertSeverity::High
-            ),
-            SuspiciousPattern::MevBot => (
-                format!(
-                    "Phát hiện MEV bot: {} từ địa chỉ {}",
-                    transaction.tx_hash, transaction.from_address
-                ),
-                AlertSeverity::Medium
-            ),
-            SuspiciousPattern::SuddenLiquidityRemoval => (
-                format!(
-                    "CẢNH BÁO: Rút thanh khoản đột ngột trong {}",
-                    transaction.tx_hash
-                ),
-                AlertSeverity::Critical
-            ),
-            SuspiciousPattern::WhaleMovement => (
-                format!(
-                    "Whale đang di chuyển tiền: {} ETH/BNB từ {}",
-                    transaction.value, transaction.from_address
-                ),
-                AlertSeverity::Medium
-            ),
-            SuspiciousPattern::HighFrequencyTrading => (
-                format!(
-                    "Giao dịch tần suất cao từ {}",
-                    transaction.from_address
-                ),
-                AlertSeverity::Low
-            ),
-            SuspiciousPattern::TokenLiquidityPattern => (
-                format!(
-                    "Token + LP được tạo cùng lúc: {} (có thể là scam)",
-                    transaction.tx_hash
-                ),
-                AlertSeverity::High
-            ),
+    /// Tạo cảnh báo pattern đáng ngờ mà không cần lock alerts
+    fn create_suspicious_pattern_alert_without_lock(&self, transaction: &MempoolTransaction, pattern: SuspiciousPattern) -> MempoolAlert {
+        // Xác định severity của alert
+        let severity = match &pattern {
+            SuspiciousPattern::FrontRunning => AlertSeverity::High,
+            SuspiciousPattern::SandwichAttack => AlertSeverity::High,
+            SuspiciousPattern::MevBot => AlertSeverity::Medium,
+            _ => AlertSeverity::Low,
         };
         
-        let alert = MempoolAlert {
+        // Tạo mô tả chi tiết
+        let description = match &pattern {
+            SuspiciousPattern::FrontRunning => 
+                format!("Front-running detected: Transaction {} may be front-running another transaction", 
+                        transaction.tx_hash),
+            SuspiciousPattern::SandwichAttack => 
+                format!("Sandwich attack detected: Transaction {} may be part of a sandwich attack", 
+                        transaction.tx_hash),
+            SuspiciousPattern::MevBot => 
+                format!("MEV bot detected: Address {} appears to be an MEV bot", 
+                        transaction.from_address),
+            SuspiciousPattern::SuddenLiquidityRemoval => 
+                format!("Sudden liquidity removal detected from address {}", 
+                        transaction.from_address),
+            _ => format!("Suspicious pattern detected: {:?}", pattern),
+        };
+        
+        MempoolAlert {
             alert_type: MempoolAlertType::SuspiciousTransaction(pattern),
             severity,
             detected_at: transaction.detected_at,
             description,
             related_transactions: vec![transaction.tx_hash.clone()],
-            related_token: None, // TODO: Xác định token liên quan nếu có
+            related_token: None,
             related_addresses: vec![transaction.from_address.clone()],
-        };
-        
-        let mut alerts = self.alerts.write().await;
-        alerts.push(alert);
+        }
     }
     
-    /// Xóa các giao dịch cũ khỏi mempool
-    pub async fn cleanup_old_transactions(&self) {
+    /// Lấy giá token từ cache hoặc API
+    async fn get_token_price_with_cache(&self, token_address: &str) -> Option<f64> {
+        // Kiểm tra cache trước
+        {
+            let cache = self.token_price_cache.read().await;
+            if let Some((price, timestamp)) = cache.get(token_address) {
+                // Nếu cache còn hạn, trả về giá đã cache
+                if timestamp.elapsed().as_secs() < self.token_price_cache_ttl {
+                    return Some(*price);
+                }
+            }
+        }
+        
+        // Nếu không có trong cache hoặc cache hết hạn, truy vấn API
+        if let Some(price) = self.get_token_price(token_address).await {
+            // Cập nhật cache
+            let mut cache = self.token_price_cache.write().await;
+            cache.insert(token_address.to_string(), (price, Instant::now()));
+            return Some(price);
+        }
+        
+        None
+    }
+
+    /// Xóa các giao dịch cũ khỏi mempool và làm sạch cache
+    pub async fn cleanup_old_data(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_secs();
         
-        let mut pending_txs = self.pending_transactions.write().await;
+        // Xóa các giao dịch cũ
+        {
+            let mut pending_txs = self.pending_transactions.write().await;
+            pending_txs.retain(|_, tx| now - tx.detected_at < MAX_PENDING_TX_AGE_SECONDS);
+        }
         
-        // Xóa các giao dịch quá cũ
-        pending_txs.retain(|_, tx| {
-            now - tx.detected_at < MAX_PENDING_TX_AGE_SECONDS
-        });
-    }
-    
-    /// Lấy danh sách cảnh báo hiện tại
-    pub async fn get_alerts(&self, min_severity: Option<AlertSeverity>) -> Vec<MempoolAlert> {
-        let alerts = self.alerts.read().await;
-        
-        match min_severity {
-            Some(min_sev) => alerts.iter()
-                .filter(|alert| alert.severity >= min_sev)
-                .cloned()
-                .collect(),
-            None => alerts.clone(),
+        // Làm sạch token price cache hết hạn
+        {
+            let mut cache = self.token_price_cache.write().await;
+            cache.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.token_price_cache_ttl * 2);
         }
     }
-    
-    /// Lấy danh sách token mới phát hiện
-    pub async fn get_new_tokens(&self) -> Vec<NewTokenInfo> {
-        let new_tokens = self.new_tokens.read().await;
-        new_tokens.values().cloned().collect()
-    }
-    
-    /// Lấy số lượng giao dịch đang theo dõi
-    pub async fn get_pending_transaction_count(&self) -> usize {
+
+    /// Lấy tất cả giao dịch đang chờ xử lý
+    pub async fn get_all_pending_transactions(&self) -> Vec<MempoolTransaction> {
         let pending_txs = self.pending_transactions.read().await;
-        pending_txs.len()
+        pending_txs.values().cloned().collect()
     }
     
+    /// Đặt TTL cho cache giá token
+    pub fn set_token_price_cache_ttl(&mut self, ttl_seconds: u64) {
+        self.token_price_cache_ttl = ttl_seconds;
+    }
+
     /// Thêm địa chỉ vào danh sách theo dõi
     pub async fn add_watched_address(&self, address: &str) {
         let normalized = utils::normalize_address(address);

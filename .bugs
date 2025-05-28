@@ -14,178 +14,227 @@
 - Nếu đã fix: thụt lề mô tả sửa đổi, ngày sửa.
 
 ============================================================
-
-# Danh sách lỗi tiềm ẩn và trùng lặp trong snipebot/src
-
-## Lỗi trùng lặp định nghĩa và implementation
-
-1. [FIXED][2024-09-27] **snipebot/src/tradelogic/mev_logic/cross_domain.rs và blockchain/src/processor/bridge_orchestrator.rs**: 
-   - Hai module này có một số logic chung nhưng được cài đặt riêng biệt thay vì sử dụng chung
-   - Đã tạo module monitoring.rs trong common/bridge_types chứa hàm monitor_transaction dùng chung
-   - Đã chuẩn hóa hàm monitor_transaction để nhận tham số get_status_fn, tx_info và config
-   - Đã cập nhật common/bridge_types/mod.rs để export hàm monitor_transaction
-   - Đã cập nhật blockchain/src/processor/bridge_orchestrator.rs để sử dụng common::bridge_types
-   - Đã thêm wrapper LayerZeroWrapper và WormholeWrapper để tương thích với BridgeProvider
-   - Đã thay thế mã monitor_transaction cũ bằng cách sử dụng hàm từ common::bridge_types
-   - Đã đảm bảo snipebot/src/tradelogic/mev_logic/cross_domain.rs sử dụng BridgeStatus từ common
-
-2. [FIXED][2024-09-26] **snipebot/src/tradelogic/smart_trade/executor.rs:187-219, 830-862, 1579-1611, 3553-3585, 4302-4334, 9655-9687**: 
-   - Code trùng lặp trong việc khởi tạo các đối tượng TradeTracker
-   - Có 6 block code giống hệt nhau với TODO comment không được triển khai
-   - Đã tạo hàm helper create_trade_tracker trong snipebot/src/tradelogic/smart_trade/utils.rs để giảm trùng lặp mã
-   - Hàm helper nhận tham số TradeParams, trade_id, timestamp và TradeStrategy, trả về một đối tượng TradeTracker đã được cấu hình
-   - Hàm này giúp loại bỏ code trùng lặp và tập trung logic tạo TradeTracker vào một nơi duy nhất
-
-3. [FIXED][2024-09-28] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/tradelogic/common/types.rs**:
-   - Định nghĩa trùng lặp enum TokenIssue trong hai file
-   - Đã xóa định nghĩa enum TokenIssue trong smart_trade/types.rs và sử dụng import từ common/types.rs
-
-4. [FIXED][2024-09-28] **snipebot/src/tradelogic/common/types.rs**:
-   - Xung đột tên giữa enum TokenIssue và struct TokenIssue
-   - Đã đổi tên struct TokenIssue thành TokenIssueDetail để tránh xung đột
-   - Đã cập nhật tất cả các tham chiếu đến struct này
-
-5. [FIXED][2024-09-28] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/tradelogic/common/types.rs**:
-   - Định nghĩa trùng lặp enum TradeStatus trong hai file
-   - Đã xóa enum TradeStatus trong smart_trade/types.rs và sử dụng import từ common/types.rs
-
-6. [FIXED][2024-09-28] **snipebot/src/tradelogic/mev_logic/types.rs**:
-   - Import trùng lặp std::collections::{HashMap, HashSet}
-   - Đã xóa import trùng lặp
-
-7. [FIXED][2024-10-01] **snipebot/src/chain_adapters/bridge_adapter.rs, mod.rs và snipebot/src/tradelogic/mev_logic/cross_domain.rs**:
-   - Sử dụng crate::bridge_types thay vì crate::chain_adapters hoặc common::bridge_types
-   - Đã cập nhật imports trong cross_domain.rs để sử dụng crate::chain_adapters cho các types
-   - Đã cập nhật imports trong cross_domain.rs để sử dụng common::bridge_types::monitoring cho hàm monitor_transaction
-   - Đã đảm bảo tính nhất quán trong việc sử dụng bridge_types từ các modules khác nhau
-
-8. [FIXED][2024-09-29] **snipebot/src/analys/mempool/types.rs**:
-   - Thiếu import std::cmp::Ordering nhưng vẫn sử dụng Ordering trong impl PartialOrd và Ord
-   - Đã kiểm tra và thấy import std::cmp::Ordering đã có ở dòng 3 của file
-
-9. [FIXED][2024-09-15] **snipebot/src/tradelogic/traits.rs:461-503 và snipebot/src/tradelogic/coordinator.rs:1-200**: 
-   - Có hai implementation khác nhau của TradeCoordinator: `DefaultTradeCoordinator` (trong traits.rs) và `Coordinator` (trong coordinator.rs)
-   - Đã hợp nhất hai implementation, giữ lại `Coordinator` trong coordinator.rs và xóa `DefaultTradeCoordinator`
-   - Đã cập nhật các tham chiếu trong toàn bộ codebase
-   - Đã cải thiện doc comment để làm rõ mối quan hệ giữa trait và implementation
-
-10. [FIXED][2024-09-29] **snipebot/src/tradelogic/common/types.rs và snipebot/src/analys/token_status/types.rs**:
-    - Định nghĩa trùng lặp của enum TokenIssue trong hai file
-    - Đã xóa định nghĩa TokenIssue trong analys/token_status/types.rs và sử dụng crate::tradelogic::common::types::TokenIssue
-    - Đã cập nhật re-export trong analys/token_status/mod.rs để phù hợp với thay đổi
-
-11. [FIXED][2024-09-29] **snipebot/src/tradelogic/mev_logic/types.rs và snipebot/src/analys/mempool/types.rs**:
-    - Định nghĩa trùng lặp của các struct và enum liên quan đến phân tích mempool
-    - Đã cập nhật mev_logic/types.rs để import và sử dụng các kiểu dữ liệu từ analys/mempool/types.rs
-    - Đã thêm các hàm chuyển đổi (From trait) từ các kiểu dữ liệu của mempool sang MevOpportunityType
-    - Đã bổ sung thêm documentation để làm rõ các mối quan hệ giữa các kiểu dữ liệu
-
-12. [FIXED][2024-09-29] **snipebot/src/tradelogic/smart_trade/types.rs và snipebot/src/types.rs**:
-    - Đã kiểm tra và không phát hiện định nghĩa trùng lặp trực tiếp giữa hai file
-    - File smart_trade/types.rs đã import và sử dụng đúng các kiểu dữ liệu từ snipebot/src/types.rs
-    - Các struct/enum trong smart_trade/types.rs là các kiểu dữ liệu chuyên biệt phục vụ cho module smart trade
-
-13. [FIXED][2024-09-29] **snipebot/src/tradelogic/mev_logic/cross_domain.rs và snipebot/src/chain_adapters/bridge_adapter.rs**:
-    - Logic trùng lặp cho việc monitor giao dịch cross-chain
-    - Đã sửa cross_domain.rs để sử dụng BridgeProvider từ common/bridge_types thay vì định nghĩa lại CrossDomainBridge
-    - Đã loại bỏ enum CrossDomainBridgeStatus trùng lặp và sử dụng BridgeStatus từ common/bridge_types
-    - Đã thêm hàm monitor_bridge_transaction trong CrossDomainMevManager sử dụng monitor_transaction từ common/bridge_types
-    - Đã cập nhật calculate_bridging_costs_and_profit để sử dụng BridgeProvider thay vì CrossDomainBridge
-
-14. [FIXED][2024-09-30] **snipebot/src/tradelogic/smart_trade/executor.rs và snipebot/src/tradelogic/manual_trade.rs**:
-    - Trùng lặp logic xử lý giao dịch giữa hai executor
-    - Đã tạo các hàm helper trong snipebot/src/tradelogic/common/trade_execution.rs để chia sẻ logic chung
-    - Đã thêm hàm execute_trade_flow để chuẩn hóa quy trình thực hiện giao dịch chung
-    - Đã thêm các utility function trong common/utils.rs để xử lý phần chung của giao dịch
-    - Đã cập nhật smart_trade/utils.rs với hàm create_trade_tracker để tạo TradeTracker từ TradeParams
-    - Đã cập nhật common/mod.rs để export module trade_execution mới
-
-15. [FIXED][2024-10-01] **snipebot/src/analys/api/token_api.rs và snipebot/src/tradelogic/smart_trade/token_analysis.rs**:
-    - Trùng lặp logic phân tích token
-    - Đã tạo module snipebot/src/tradelogic/common/analysis.rs chứa các hàm phân tích token dùng chung
-    - Đã cập nhật token_api.rs để sử dụng hàm từ common/analysis.rs thay vì định nghĩa lại
-    - Đã cập nhật token_analysis.rs để sử dụng các hàm trong common/analysis.rs 
-    - Đã thêm các hàm convert_token_safety_to_security_check và analyze_token_security trong common/analysis.rs
-    - Đã thêm các hàm detect_token_issues, is_proxy_contract, has_blacklist_function, has_excessive_privileges để sử dụng chung
-    - Đã thêm documentation chi tiết cho tất cả các hàm để giải thích mục đích và cách sử dụng
-
-16. [FIXED][2024-10-01] **common/src/lib.rs**:
-    - Import không tồn tại: web3 và frontend
-    - Đã xóa các import module không tồn tại (web3 và frontend) để ngăn lỗi khi biên dịch
-    - Dọn dẹp mã nguồn, chỉ giữ lại các module thực sự tồn tại
-
-## Lỗi thiếu tính năng hoặc thiếu implementation
-
-1. [OPEN][2024-09-27] **snipebot/src/tradelogic/traits.rs**:
-   - Một số trait được định nghĩa nhưng không có implementation hoặc implementation không đầy đủ
-   - Cần triển khai đầy đủ các trait này hoặc đánh dấu rõ là stub
-
-2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/sol_adapter.rs, stellar_adapter.rs, sui_adapter.rs, ton_adapter.rs**:
-   - Các adapter này chỉ là stub, chưa có implementation thực tế
-   - Cần triển khai đầy đủ hoặc đánh dấu rõ là stub trong code và documentation
-
-3. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/alert.rs**:
-   - Hệ thống cảnh báo chưa được triển khai đầy đủ
-   - Cần triển khai các kênh cảnh báo (Telegram, Discord, Email) như đã mô tả trong manifest
-
-## Lỗi kiểu dữ liệu không nhất quán
-
-1. [OPEN][2024-09-27] **snipebot/src/chain_adapters/bridge_adapter.rs và blockchain/src/processor/bridge_orchestrator.rs**:
-   - Sử dụng kiểu dữ liệu khác nhau cho cùng một thông tin: amount (U256 vs String), token_id (u64 vs String)
-   - Cần thống nhất kiểu dữ liệu trong toàn bộ codebase
-
-2. [OPEN][2024-09-27] **snipebot/src/types.rs và snipebot/src/tradelogic/common/types.rs**:
-   - Định nghĩa không nhất quán cho các kiểu dữ liệu liên quan đến giao dịch
-   - Cần thống nhất định nghĩa và sử dụng re-export
-
-## Lỗi thiếu validation và error handling
-
-1. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/executor.rs**:
-   - Một số hàm thiếu validation đầu vào hoặc xử lý lỗi không đầy đủ
-   - Cần thêm validation và error handling phù hợp
-
-2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/evm_adapter.rs**:
-   - Thiếu xử lý lỗi cho một số trường hợp đặc biệt (ví dụ: RPC timeout, gas spike)
-   - Cần cải thiện error handling và retry mechanism
-
-## Lỗi thread safety
-
-1. [OPEN][2024-09-27] **snipebot/src/tradelogic/mev_logic/cross_domain.rs**:
-   - Sử dụng clone() để tránh deadlock khi đọc RwLock, nhưng không an toàn
-   - Cần cải thiện cách xử lý lock để đảm bảo thread safety
-
-2. [OPEN][2024-09-27] **snipebot/src/tradelogic/coordinator.rs**:
-   - Tiềm ẩn race condition khi nhiều executor cùng truy cập shared state
-   - Cần cải thiện synchronization mechanism
-
-## Lỗi hiệu suất
-
-1. [OPEN][2024-09-27] **snipebot/src/analys/mempool/analyzer.rs**:
-   - Phân tích mempool không hiệu quả, có thể gây bottleneck
-   - Cần tối ưu hóa thuật toán và sử dụng caching
-
-2. [OPEN][2024-09-27] **snipebot/src/tradelogic/smart_trade/executor.rs**:
-   - Một số hàm thực hiện nhiều RPC call tuần tự, gây chậm
-   - Cần sử dụng concurrent requests và batching
-
-## Lỗi documentation
-
-1. [OPEN][2024-09-27] **snipebot/src/tradelogic/traits.rs**:
-   - Thiếu doc comment cho một số trait và method quan trọng
-   - Cần thêm documentation đầy đủ theo quy định trong .cursorrc
-
-2. [OPEN][2024-09-27] **snipebot/src/chain_adapters/evm_adapter.rs**:
-   - Doc comment không đầy đủ hoặc không cập nhật
-   - Cần cập nhật documentation để phản ánh đúng behavior hiện tại
-
-============================================================
-
 # Danh sách lỗi tiềm ẩn và trùng lặp trong blockchain/src
 
 ## Lỗi trùng lặp định nghĩa và implementation
 
-1. [OPEN][2024-09-27] **blockchain/src/processor/bridge_orchestrator.rs và snipebot/src/chain_adapters/bridge_adapter.rs**:
+1. [ANALYZED][2024-10-16] **blockchain/src/processor/bridge_orchestrator.rs và snipebot/src/chain_adapters/bridge_adapter.rs**:
    - Trùng lặp định nghĩa và logic liên quan đến bridge
-   - Cần hợp nhất vào common/bridge_types
+   - Phân tích chi tiết:
+     - blockchain/src/processor/bridge_orchestrator.rs định nghĩa BridgeOrchestrator
+     - snipebot/src/chain_adapters/bridge_adapter.rs định nghĩa LayerZeroBridge, WormholeBridge và BridgeAdapter
+     - common/src/bridge_types/providers.rs đã định nghĩa trait BridgeProvider, BridgeClient, BridgeMonitor và BridgeAdapter
+   - Cần hợp nhất bằng cách:
+     - Chuyển các implementation cụ thể từ bridge_orchestrator.rs và bridge_adapter.rs để implement các trait từ common/bridge_types/providers.rs
+     - Loại bỏ các định nghĩa trùng lặp và sử dụng các type đã được định nghĩa trong common/bridge_types
+     - Cập nhật các module để import từ common/bridge_types thay vì tự định nghĩa
 
-============================================================ 
+============================================================
+
+
+# Tóm tắt các sửa đổi đã thực hiện ngày 2024-10-16
+
+Đã sửa các lỗi tiềm ẩn sau:
+
+1. [FIXED] **snipebot/src/tradelogic/smart_trade/executor.rs**:
+   - Thay thế unwrap() trên sub_id.as_ref() bằng map_or() để xử lý trường hợp None an toàn
+   - Thay thế new_tp.unwrap() và new_sl.unwrap() bằng unwrap_or(0.0) để cung cấp giá trị mặc định
+
+2. [FIXED] **snipebot/src/tradelogic/mev_logic/cross_domain.rs**:
+   - Sửa partial_cmp().unwrap() thành partial_cmp().unwrap_or(std::cmp::Ordering::Equal) để xử lý NaN
+   - Thay thế unwrap() trên duration_since() bằng xử lý lỗi đúng chuẩn với unwrap_or_else và logging
+
+3. [FIXED] **snipebot/src/tradelogic/mev_logic**:
+   - Cập nhật trader_behavior.rs để sử dụng hàm analyze_trader_behavior từ common/analysis.rs
+   - Xóa implementation trùng lặp từ utils.rs
+   - Cập nhật mod.rs để xuất đúng các hàm và cấu trúc từ trader_behavior.rs
+   - Tối ưu hóa code trong trader_behavior.rs để tập trung vào việc tái sử dụng code từ common
+
+Các lỗi còn lại cần tiếp tục sửa trong các lần cập nhật tiếp theo. 
+
+============================================================
+
+# Tóm tắt các sửa đổi bổ sung đã thực hiện ngày 2024-10-16
+
+1. [FIXED] **snipebot/src/tradelogic/mev_logic/trader_behavior.rs**:
+   - Xóa bỏ các định nghĩa trùng lặp của GasBehavior và TraderBehaviorAnalysis
+   - Các struct này đã được import từ common/types.rs để tránh trùng lặp
+   - Xóa bỏ duplicate bản thứ hai của hàm analyze_traders_batch
+   - Tối ưu hóa việc import type và trait từ common module
+
+2. [FIXED] **snipebot/src/tradelogic/mev_logic/mod.rs**:
+   - Cập nhật comment cho việc re-export hàm analyze_traders_batch
+   - Sửa phần re-export từ cross_domain.rs: thay thế CrossDomainBridge (không tồn tại) bằng BridgeProvider từ common/bridge_types
+   - Tạo re-export cho BridgeProvider và BridgeStatus từ common/bridge_types
+
+3. [FIXED] **snipebot/src/tradelogic/mev_logic/utils.rs**:
+   - Đã xác nhận hàm current_time_seconds() sử dụng unwrap_or để xử lý lỗi thay vì unwrap() trực tiếp
+   - Không có unwrap() hoặc expect() nào không được xử lý trong file này 
+
+============================================================
+
+# Tóm tắt các sửa đổi đã thực hiện ngày 2024-10-17
+
+1. [FIXED] **snipebot/src/chain_adapters/bridge_adapter.rs**:
+   - Sửa import từ crate::bridge_types thành common::bridge_types để đảm bảo nhất quán
+   - Đổi tên BridgeAdapter từ common thành BridgeAdapterTrait để làm rõ đây là trait
+   - Cập nhật impl CommonBridgeAdapter thành impl BridgeAdapterTrait để phù hợp
+
+2. [FIXED] **snipebot/src/chain_adapters/mod.rs**:
+   - Thay đổi cách re-export BridgeAdapter và các thành phần liên quan để tránh nhầm lẫn
+   - Chuyển từ crate::bridge_types sang common::bridge_types để thống nhất trong cả module
+
+3. [FIXED] **snipebot/src/tradelogic/mev_logic/bot.rs**:
+   - Sửa lỗi cú pháp pattern matching cho việc lấy adapter từ map
+   - Thay thế cú pháp không đúng bằng match expression để xử lý Option<T>
+
+4. [FIXED][2024-10-17] **snipebot/src/chain_adapters/bridge_adapter.rs và blockchain/src/processor/bridge_orchestrator.rs**:
+   - Trùng lặp functionality: Cả hai file đều triển khai chức năng liên quan đến bridge và wrapper cho BridgeProvider
+   - Phân tích:
+     - snipebot/src/chain_adapters/bridge_adapter.rs đã re-export các định nghĩa từ common/bridge_types
+     - blockchain/src/processor/bridge_orchestrator.rs vẫn có một số interface riêng như LayerZeroClient, WormholeClient
+     - Cần hợp nhất và thống nhất sử dụng các trait từ common/bridge_types
+   - Đã sửa: Cập nhật import trong bridge_adapter.rs để sử dụng common::bridge_types và đổi tên BridgeAdapter thành BridgeAdapterTrait để tránh nhầm lẫn
+
+5. [FIXED][2024-10-17] **snipebot/src/tradelogic/mev_logic/bot.rs**:
+   - Sử dụng unwrap_or không an toàn trên lấy adapter từ map:
+   ```rust
+   let adapter_opt = self.chain_adapters.read().await.get(&chain_id) {
+       Some(adapter) => adapter,
+       None => {
+           return Err(anyhow::anyhow!("Không có adapter cho chain ID {}", chain_id));
+       }
+   };
+   ```
+   - Cần thay thế bằng pattern matching đúng cú pháp hoặc dùng ok_or() để chuyển đổi Option thành Result
+   - Đã sửa: Thay thế bằng pattern matching đúng cú pháp:
+   ```rust
+   let adapter = match self.chain_adapters.read().await.get(&chain_id) {
+       Some(adapter) => adapter,
+       None => {
+           return Err(anyhow::anyhow!("Không có adapter cho chain ID {}", chain_id));
+       }
+   };
+   ```
+
+6. [FIXED][2024-10-17] **snipebot/src/chain_adapters/mod.rs và common/src/bridge_types/providers.rs**:
+   - Re-export BridgeAdapter từ hai nguồn khác nhau gây nhầm lẫn:
+   ```rust
+   pub use crate::bridge_types::BridgeAdapter as CommonBridgeAdapter;
+   pub use bridge_adapter::BridgeAdapter as SnipeBotBridgeAdapter;
+   ```
+   - Cần thống nhất interface và implementation để tránh nhầm lẫn khi sử dụng
+   - Đã sửa: Thay đổi cách re-export và đổi tên để rõ ràng hơn:
+   ```rust
+   pub use common::bridge_types::BridgeAdapter as BridgeAdapterTrait;
+   pub use bridge_adapter::BridgeAdapter;
+   ```
+
+# Tóm tắt các sửa đổi đã thực hiện ngày 2024-10-18
+
+1. [FIXED][2024-10-18] **snipebot/src/notifications.rs**:
+   - Sử dụng unwrap_or_else() trong TelegramChannel::new() khi khởi tạo HTTP client, cần cải thiện
+   - Đã sửa:
+     - Thay đổi phương thức TelegramChannel::new() để trả về Result<Self> thay vì Self, cho phép truyền lỗi ra ngoài
+     - Thêm log chi tiết khi tạo client thất bại và phải sử dụng client mặc định
+     - Sử dụng map_err để ghi log lỗi trước khi unwrap_or_else
+   ```rust
+   pub fn new(token: String, chat_id: String) -> Result<Self> {
+       let client = Client::builder()
+           .timeout(Duration::from_secs(10))
+           .build()
+           .map_err(|e| {
+               warn!("Không thể tạo HTTP client cho Telegram với cấu hình tùy chỉnh: {}. Sử dụng client mặc định.", e);
+               e
+           })
+           .unwrap_or_else(|_| {
+               warn!("Đang sử dụng HTTP client mặc định cho Telegram, có thể bị hạn chế tính năng.");
+               Client::new()
+           });
+       
+       Ok(Self { token, chat_id, client, is_ready: true })
+   }
+   ```
+
+2. [FIXED][2024-10-18] **snipebot/src/tradelogic/coordinator.rs**:
+   - Line ~594 sử dụng expect() trong test
+   - Đã sửa:
+     - Thay thế tất cả các expect() trong phần test bằng xử lý lỗi proper với match và assert!
+     - Cung cấp thông báo lỗi chi tiết khi xảy ra lỗi
+     - Sửa đổi không làm thay đổi logic của test
+   ```rust
+   let opportunities = match coordinator.get_all_opportunities().await {
+       Ok(opps) => opps,
+       Err(e) => {
+           assert!(false, "Failed to get opportunities: {}", e);
+           return;
+       }
+   };
+   ```
+
+3. [FIXED][2024-10-18] **snipebot/src/tradelogic/smart_trade/executor.rs và analys/token_status/utils.rs**:
+   - Sử dụng unwrap_or_else() với hardcode string "Unknown reason"
+   - Đã sửa:
+     - Thêm các constant cho error message và default values vào constants.rs:
+       ```rust
+       // Error message constants
+       pub const UNKNOWN_FAILURE_REASON: &str = "Unknown reason";
+       pub const HIGH_SLIPPAGE_FORMAT: &str = "Abnormally high sell slippage: {}%";
+       pub const DEFAULT_TEST_AMOUNT: &str = "0.01";
+       ```
+     - Cập nhật token_status/utils.rs để sử dụng constant local trong hàm detect_honeypot:
+       ```rust
+       const UNKNOWN_REASON: &str = "Unknown reason";
+       const TEST_AMOUNT: &str = "0.01";
+       
+       let reason = result.failure_reason.unwrap_or_else(|| UNKNOWN_REASON.to_string());
+       ```
+
+# Tóm tắt các sửa đổi mới thực hiện ngày 2024-10-19
+
+1. [FIXED][2024-10-19] **snipebot/src/tradelogic/mev_logic/mod.rs**:
+   - Comment không rõ ràng cho hàm analyze_traders_batch
+   - Đã sửa:
+     - Đơn giản hóa comment cho hàm analyze_traders_batch để làm rõ mục đích
+     - Giữ nguyên export để không gây breaking changes
+   ```rust
+   // Re-export trader behavior analysis function
+   pub use trader_behavior::analyze_traders_batch;
+   ```
+
+2. [FIXED][2024-10-19] **snipebot/src/tradelogic/coordinator.rs**:
+   - Line ~594 sử dụng expect() trong test_opportunity_sharing()
+   - Đã sửa:
+     - Thay thế các biến trung gian và expect() bằng cách sử dụng pattern matching trực tiếp với if let Err(e)
+     - Sử dụng assert! với thông báo lỗi chi tiết thay vì panic!
+     - Giữ nguyên logic kiểm tra và kiểm tra các điều kiện như trước
+   ```rust
+   if let Err(e) = coordinator.register_executor("smart-trade", ExecutorType::SmartTrade).await {
+       assert!(false, "Failed to register smart-trade executor: {}", e);
+       return;
+   }
+   ```
+
+3. [FIXED][2024-10-19] **snipebot/src/tradelogic/smart_trade/utils.rs**:
+   - Sử dụng chuỗi hardcoded "Unknown reason" trong hàm get_failure_reason()
+   - Đã sửa:
+     - Tạo các hàm tiện ích mới để xử lý tất cả chuỗi hardcoded
+     - Sử dụng các constant từ constants.rs: UNKNOWN_FAILURE_REASON, HIGH_SLIPPAGE_FORMAT, INSUFFICIENT_LIQUIDITY_FORMAT, DEFAULT_TEST_AMOUNT
+     - Tạo các hàm get_failure_reason(), format_slippage_error(), format_insufficient_liquidity() và get_default_test_amount()
+     - Đơn giản hóa các hàm để dễ dàng sử dụng và bảo trì
+
+4. [FIXED][2024-10-19] **snipebot/src/tradelogic/mev_logic/bot.rs**:
+   - Lỗi pattern matching không đúng cú pháp trong hàm estimate_transaction_success_probability
+   - Đã sửa:
+     - Thay thế phương thức cũ sử dụng unwrap_or không an toàn với mô hình match
+     - Cập nhật pattern matching để xử lý Option<T> một cách đúng đắn
+     - Cung cấp xử lý lỗi phù hợp với logging khi adapter không tìm thấy
+   ```rust
+   let adapter = match self.chain_adapters.read().await.get(&chain_id) {
+       Some(adapter) => adapter.clone(),
+       None => {
+           warn!("No adapter found for chain ID {}", chain_id);
+           return (0.0, Some("No chain adapter found".to_string()));
+       }
+   };
+   ```

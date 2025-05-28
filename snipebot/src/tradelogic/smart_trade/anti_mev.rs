@@ -16,32 +16,12 @@ use chrono::{DateTime, Utc, Duration};
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::mempool::{MempoolTransaction, TransactionType};
-use super::optimizer::GasOptimizer;
+use crate::tradelogic::common::mev_detection::{
+    MevAttackType, MevAnalysisResult, AntiMevTxParams, 
+    analyze_mempool_for_mev, generate_anti_mev_tx_params
+};
 
-/// Loại MEV attack
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MevAttackType {
-    /// Front-running: Bot thấy giao dịch có lợi nhuận, chèn giao dịch của nó lên trước
-    FrontRunning,
-    
-    /// Back-running: Bot đợi giao dịch lớn, sau đó chèn giao dịch của nó sau
-    BackRunning,
-    
-    /// Sandwich attack: Bot chèn giao dịch trước và sau một giao dịch target
-    SandwichAttack,
-    
-    /// Arbitrage thông thường
-    Arbitrage,
-    
-    /// Liquidation thông thường
-    Liquidation,
-    
-    /// JIT (just-in-time) Liquidity
-    JitLiquidity,
-    
-    /// Loại MEV khác
-    Other(String),
-}
+use super::optimizer::GasOptimizer;
 
 /// Mức độ bảo vệ MEV
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,40 +86,6 @@ impl Default for MevProtectionConfig {
     }
 }
 
-/// Kết quả phân tích MEV
-#[derive(Debug, Clone)]
-pub struct MevAnalysisResult {
-    /// Token address being analyzed
-    pub token_address: String,
-    
-    /// Chain ID
-    pub chain_id: u32,
-    
-    /// Liệu có phát hiện MEV activity không
-    pub mev_activity_detected: bool,
-    
-    /// Loại MEV attack đã phát hiện
-    pub attack_types: Vec<MevAttackType>,
-    
-    /// Địa chỉ của các bot đã phát hiện
-    pub mev_bot_addresses: Vec<String>,
-    
-    /// Mempool transactions liên quan
-    pub related_transactions: Vec<MempoolTransaction>,
-    
-    /// Ước tính profit của MEV bot
-    pub estimated_profit: Option<f64>,
-    
-    /// Risk score (0-100)
-    pub risk_score: u8,
-    
-    /// Đề xuất giao dịch
-    pub recommendation: String,
-    
-    /// Thời gian phân tích
-    pub timestamp: DateTime<Utc>,
-}
-
 /// Service bảo vệ chống MEV
 pub struct AntiMevProtection {
     /// Cấu hình
@@ -200,269 +146,49 @@ impl AntiMevProtection {
     pub async fn update_mempool_transactions(&self, chain_id: u32, txs: Vec<MempoolTransaction>) -> Result<()> {
         let mut history = self.mempool_history.write().await;
         
-        // Lấy hoặc tạo mới lịch sử cho chain này
-        let chain_history = history.entry(chain_id).or_insert_with(Vec::new);
-        
-        // Thêm giao dịch mới
-        chain_history.extend(txs);
-        
-        // Giới hạn kích thước lịch sử (giữ 1000 giao dịch gần nhất)
-        if chain_history.len() > 1000 {
-            let overflow = chain_history.len() - 1000;
-            chain_history.drain(0..overflow);
+        if let Some(chain_txs) = history.get_mut(&chain_id) {
+            // Merge transactions, keeping the newer ones
+            for tx in txs {
+                if !chain_txs.iter().any(|existing| existing.tx_hash == tx.tx_hash) {
+                    chain_txs.push(tx);
+                }
+            }
+            
+            // Limit history size
+            if chain_txs.len() > 1000 {
+                chain_txs.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+                chain_txs.truncate(1000);
+            }
+        } else {
+            // No existing data for this chain
+            history.insert(chain_id, txs);
         }
-        
-        // Sắp xếp theo timestamp
-        chain_history.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         
         Ok(())
     }
     
-    /// Phân tích mempool để phát hiện MEV activity
+    /// Phân tích mempool để phát hiện MEV attacks
     pub async fn analyze_mempool_for_mev(&self, chain_id: u32, token_address: &str) -> Result<MevAnalysisResult> {
-        let history = self.mempool_history.read().await;
-        
-        // Lấy lịch sử mempool cho chain này
-        let chain_history = match history.get(&chain_id) {
-            Some(h) => h,
-            None => {
-                return Ok(MevAnalysisResult {
-                    token_address: token_address.to_string(),
-                    chain_id,
-                    mev_activity_detected: false,
-                    attack_types: vec![],
-                    mev_bot_addresses: vec![],
-                    related_transactions: vec![],
-                    estimated_profit: None,
-                    risk_score: 0,
-                    recommendation: "Not enough mempool data to analyze".to_string(),
-                    timestamp: Utc::now(),
-                });
+        let mempool_txs = {
+            let history = self.mempool_history.read().await;
+            let chain_txs = history.get(&chain_id)
+                .ok_or_else(|| anyhow!("No mempool data available for chain {}", chain_id))?;
+                
+            // Convert to HashMap for easier lookup
+            let mut txs_map = HashMap::new();
+            for tx in chain_txs {
+                txs_map.insert(tx.tx_hash.clone(), tx.clone());
             }
+            txs_map
         };
         
-        // Lọc giao dịch liên quan đến token này
-        let token_txs: Vec<MempoolTransaction> = chain_history
-            .iter()
-            .filter(|tx| {
-                tx.token_address.as_ref().map_or(false, |addr| {
-                    addr.eq_ignore_ascii_case(token_address)
-                })
-            })
-            .cloned()
-            .collect();
+        let known_bots = self.known_mev_bots.read().await;
         
-        if token_txs.is_empty() {
-            return Ok(MevAnalysisResult {
-                token_address: token_address.to_string(),
-                chain_id,
-                mev_activity_detected: false,
-                attack_types: vec![],
-                mev_bot_addresses: vec![],
-                related_transactions: vec![],
-                estimated_profit: None,
-                risk_score: 0,
-                recommendation: "No transactions found for this token".to_string(),
-                timestamp: Utc::now(),
-            });
-        }
-        
-        // Tìm các giao dịch swap/transfer trong khoảng thời gian gần đây (60 giây)
-        let now = Utc::now();
-        let recent_txs: Vec<&MempoolTransaction> = token_txs
-            .iter()
-            .filter(|tx| {
-                // Chỉ quan tâm đến giao dịch gần đây
-                let tx_time = DateTime::from_timestamp(tx.timestamp as i64, 0)
-                    .unwrap_or_else(|| now - Duration::seconds(3600));
-                
-                now.signed_duration_since(tx_time).num_seconds() <= 60
-            })
-            .collect();
-        
-        if recent_txs.is_empty() {
-            return Ok(MevAnalysisResult {
-                token_address: token_address.to_string(),
-                chain_id,
-                mev_activity_detected: false,
-                attack_types: vec![],
-                mev_bot_addresses: vec![],
-                related_transactions: vec![],
-                estimated_profit: None,
-                risk_score: 0,
-                recommendation: "No recent transactions found for this token".to_string(),
-                timestamp: Utc::now(),
-            });
-        }
-        
-        // Phát hiện front-running
-        let mut attack_types = Vec::new();
-        let mut mev_bot_addresses = Vec::new();
-        let mut risk_score = 0;
-        let mut recommendation = String::new();
-        
-        // Phân tích front-running (nhiều giao dịch với gas price cao bất thường)
-        let high_gas_txs: Vec<&MempoolTransaction> = recent_txs
-            .iter()
-            .filter(|tx| {
-                // Gas price cao gấp 2 lần trung bình
-                let avg_gas_price = recent_txs
-                    .iter()
-                    .map(|t| t.gas_price.unwrap_or(0.0))
-                    .sum::<f64>() / recent_txs.len() as f64;
-                
-                tx.gas_price.unwrap_or(0.0) > avg_gas_price * 2.0
-            })
-            .copied()
-            .collect();
-        
-        if !high_gas_txs.is_empty() {
-            // Kiểm tra xem các giao dịch có phải của bot đã biết không
-            for tx in &high_gas_txs {
-                if let Some(from) = &tx.from {
-                    if self.is_known_mev_bot(from).await {
-                        attack_types.push(MevAttackType::FrontRunning);
-                        mev_bot_addresses.push(from.clone());
-                        risk_score += 30;
-                    }
-                }
-            }
-        }
-        
-        // Phát hiện sandwich attack: tìm các cặp giao dịch từ cùng một địa chỉ
-        // mà đầu vào giống nhau nhưng đầu ra khác nhau
-        let mut from_addresses = HashMap::new();
-        for tx in &recent_txs {
-            if let Some(from) = &tx.from {
-                from_addresses.entry(from.clone())
-                    .or_insert_with(Vec::new)
-                    .push(tx);
-            }
-        }
-        
-        for (addr, txs) in from_addresses {
-            if txs.len() >= 2 {
-                // Sắp xếp theo timestamp
-                let mut txs_sorted = txs.clone();
-                txs_sorted.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                
-                // Nếu thời gian giữa tx đầu và cuối ngắn (< 10s) và có tx khác ở giữa
-                // có thể là sandwich attack
-                if txs_sorted.len() >= 2 {
-                    let first_tx = txs_sorted.first().unwrap();
-                    let last_tx = txs_sorted.last().unwrap();
-                    
-                    let first_time = DateTime::from_timestamp(first_tx.timestamp as i64, 0)
-                        .unwrap_or_else(|| now - Duration::seconds(3600));
-                    
-                    let last_time = DateTime::from_timestamp(last_tx.timestamp as i64, 0)
-                        .unwrap_or_else(|| now - Duration::seconds(3600));
-                    
-                    // Thời gian giữa tx đầu và cuối ngắn (< 10s)
-                    if last_time.signed_duration_since(first_time).num_seconds() < 10 {
-                        // Và có tx khác ở giữa (từ địa chỉ khác)
-                        let middle_txs: Vec<_> = recent_txs.iter()
-                            .filter(|tx| {
-                                tx.from.as_ref().map_or(false, |f| f != &addr)
-                                    && tx.timestamp > first_tx.timestamp
-                                    && tx.timestamp < last_tx.timestamp
-                            })
-                            .collect();
-                        
-                        if !middle_txs.is_empty() {
-                            attack_types.push(MevAttackType::SandwichAttack);
-                            mev_bot_addresses.push(addr.clone());
-                            risk_score += 50;
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Phân tích arbitrage (nhiều giao dịch liên tiếp từ cùng một địa chỉ)
-        // với các token khác nhau trong một khoảng thời gian ngắn
-        let mut arbitrage_candidates = Vec::new();
-        for (addr, txs) in &from_addresses {
-            if txs.len() >= 3 {
-                // Sắp xếp theo timestamp
-                let mut txs_sorted = txs.clone();
-                txs_sorted.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                
-                let first_tx = txs_sorted.first().unwrap();
-                let last_tx = txs_sorted.last().unwrap();
-                
-                let first_time = DateTime::from_timestamp(first_tx.timestamp as i64, 0)
-                    .unwrap_or_else(|| now - Duration::seconds(3600));
-                
-                let last_time = DateTime::from_timestamp(last_tx.timestamp as i64, 0)
-                    .unwrap_or_else(|| now - Duration::seconds(3600));
-                
-                // Thời gian giữa tx đầu và cuối ngắn (< 5s) - có thể là arbitrage
-                if last_time.signed_duration_since(first_time).num_seconds() < 5 {
-                    // Nếu các tx liên quan đến token khác nhau (ít nhất 2 token)
-                    let token_addresses: HashSet<_> = txs_sorted
-                        .iter()
-                        .filter_map(|tx| tx.token_address.as_ref().cloned())
-                        .collect();
-                    
-                    if token_addresses.len() >= 2 {
-                        arbitrage_candidates.push((addr.clone(), txs_sorted.clone()));
-                    }
-                }
-            }
-        }
-        
-        if !arbitrage_candidates.is_empty() {
-            for (addr, _) in arbitrage_candidates {
-                attack_types.push(MevAttackType::Arbitrage);
-                mev_bot_addresses.push(addr);
-                risk_score += 20; // Arbitrage risk thấp hơn sandwich attack
-            }
-        }
-        
-        // Loại bỏ trùng lặp
-        mev_bot_addresses.sort();
-        mev_bot_addresses.dedup();
-        
-        attack_types.sort_by_key(|a| format!("{:?}", a));
-        attack_types.dedup();
-        
-        // Xây dựng recommendation dựa vào các attack đã phát hiện
-        if !attack_types.is_empty() {
-            recommendation = "MEV activity detected. Recommendations: ".to_string();
-            
-            if attack_types.contains(&MevAttackType::FrontRunning) || attack_types.contains(&MevAttackType::SandwichAttack) {
-                recommendation.push_str("Use private transaction if available. ");
-                recommendation.push_str("Increase slippage tolerance but set tight deadline. ");
-            }
-            
-            if attack_types.contains(&MevAttackType::SandwichAttack) {
-                recommendation.push_str("Split large trades into smaller amounts. ");
-            }
-            
-            recommendation.push_str("Avoid trading during high congestion periods.");
-        } else {
-            recommendation = "No suspicious MEV activity detected.".to_string();
-        }
-        
-        // Risk score không vượt quá 100
-        risk_score = risk_score.min(100);
-        
-        Ok(MevAnalysisResult {
-            token_address: token_address.to_string(),
-            chain_id,
-            mev_activity_detected: !attack_types.is_empty(),
-            attack_types,
-            mev_bot_addresses,
-            related_transactions: token_txs,
-            estimated_profit: None, // Không đủ dữ liệu để ước tính profit
-            risk_score,
-            recommendation,
-            timestamp: Utc::now(),
-        })
+        // Use the shared analysis function
+        analyze_mempool_for_mev(&mempool_txs, token_address, chain_id, &known_bots).await
     }
     
-    /// Tạo tham số chống MEV cho giao dịch
+    /// Tạo tham số giao dịch chống MEV
     pub async fn create_anti_mev_parameters(
         &self, 
         chain_id: u32, 
@@ -470,130 +196,26 @@ impl AntiMevProtection {
         is_buy: bool,
         amount: f64,
     ) -> Result<AntiMevTxParams> {
-        // Đọc cấu hình
-        let config = self.config.read().await;
-        
-        // Nếu không bật bảo vệ MEV
-        if !config.enabled {
-            return Ok(AntiMevTxParams::default());
-        }
-        
         // Phân tích MEV activity
-        let mev_analysis = self.analyze_mempool_for_mev(chain_id, token_address).await?;
+        let mev_analysis = self.analyze_mempool_for_mev(chain_id, token_address).await
+            .context("Failed to analyze mempool for MEV activity")?;
         
-        // Mức độ bảo vệ dựa vào cấu hình
-        let protection_level = match config.protection_level.as_str() {
-            "none" => MevProtectionLevel::None,
-            "basic" => MevProtectionLevel::Basic,
-            "medium" => MevProtectionLevel::Medium,
-            "high" => MevProtectionLevel::High,
-            _ => MevProtectionLevel::Basic,
-        };
+        // Lấy gas price gợi ý
+        let base_gas_price = self.gas_optimizer.get_suggested_gas_price(chain_id).await?;
         
-        // Nếu có MEV activity, tăng mức độ bảo vệ
-        let actual_protection = if mev_analysis.mev_activity_detected {
-            match protection_level {
-                MevProtectionLevel::None => MevProtectionLevel::Basic,
-                MevProtectionLevel::Basic => MevProtectionLevel::Medium,
-                _ => protection_level,
-            }
-        } else {
-            protection_level
-        };
+        // Lấy cấu hình
+        let config = self.config.read().await;
+        let base_slippage = if is_buy { 1.0 } else { 0.5 }; // Default slippage
         
-        // Tính gas price multiplier dựa trên mức độ risk
-        let risk_factor = mev_analysis.risk_score as f64 / 100.0;
-        let gas_multiplier = 1.0 + risk_factor * (config.max_gas_multiplier - 1.0);
-        
-        // Tính tham số của giao dịch dựa trên mức độ bảo vệ
-        let (use_private_tx, delay_ms, random_slippage) = match actual_protection {
-            MevProtectionLevel::None => (false, 0, false),
-            MevProtectionLevel::Basic => (false, 0, false),
-            MevProtectionLevel::Medium => (false, config.random_delay_ms.unwrap_or(0), true),
-            MevProtectionLevel::High => (
-                config.use_private_tx && config.private_tx_supported_chains.contains(&chain_id),
-                config.random_delay_ms.unwrap_or(2000),
-                true,
-            ),
-        };
-        
-        // Nếu là giao dịch mua, cần slippage cao hơn
-        let base_slippage = if is_buy { 2.0 } else { 1.0 };
-        
-        // Tính slippage dựa trên risk và cấu hình
-        let slippage = if random_slippage {
-            // Ngẫu nhiên hóa slippage trong khoảng [base, max]
-            let rand_factor = rand::random::<f64>();
-            base_slippage + rand_factor * (config.max_slippage - base_slippage)
-        } else {
-            base_slippage + risk_factor * (config.max_slippage - base_slippage)
-        };
-        
-        // Tính gas price tối ưu
-        let base_gas = self.gas_optimizer.calculate_optimal_gas_price(
-            chain_id, 
-            7, // Priority cao hơn trung bình
-            if mev_analysis.mev_activity_detected { "mev_protection" } else { "normal" }
-        ).await?;
-        
-        // Áp dụng multiplier
-        let gas_price = base_gas * gas_multiplier;
-        
-        // Tính deadline (giây)
-        let deadline_seconds = match actual_protection {
-            MevProtectionLevel::None => 60,
-            MevProtectionLevel::Basic => 30,
-            MevProtectionLevel::Medium => 20,
-            MevProtectionLevel::High => 10,
-        };
-        
-        Ok(AntiMevTxParams {
-            gas_price,
-            slippage_tolerance: slippage,
-            deadline_seconds,
-            use_private_tx,
-            delay_ms,
-            max_nonce_reuse_attempt: config.max_nonce_reuse_attempt,
-            mev_risk_score: mev_analysis.risk_score,
-        })
-    }
-}
-
-/// Tham số giao dịch chống MEV
-#[derive(Debug, Clone)]
-pub struct AntiMevTxParams {
-    /// Gas price tối ưu (gwei)
-    pub gas_price: f64,
-    
-    /// Slippage tolerance (%)
-    pub slippage_tolerance: f64,
-    
-    /// Deadline (giây)
-    pub deadline_seconds: u64,
-    
-    /// Có sử dụng private tx không
-    pub use_private_tx: bool,
-    
-    /// Delay trước khi gửi giao dịch (ms)
-    pub delay_ms: u64,
-    
-    /// Số lần thử lại nếu giao dịch bị thay thế
-    pub max_nonce_reuse_attempt: u32,
-    
-    /// MEV risk score (0-100)
-    pub mev_risk_score: u8,
-}
-
-impl Default for AntiMevTxParams {
-    fn default() -> Self {
-        Self {
-            gas_price: 0.0,
-            slippage_tolerance: 1.0,
-            deadline_seconds: 60,
-            use_private_tx: false,
-            delay_ms: 0,
-            max_nonce_reuse_attempt: 0,
-            mev_risk_score: 0,
-        }
+        // Generate parameters using shared function
+        generate_anti_mev_tx_params(
+            &mev_analysis,
+            base_gas_price,
+            base_slippage,
+            is_buy,
+            config.use_private_tx,
+            &config.private_tx_supported_chains,
+            chain_id
+        )
     }
 } 

@@ -12,15 +12,27 @@ pub mod health;
 pub mod chain_adapters;
 pub mod tradelogic;
 pub mod analys;
+pub mod notifications;
 
 // Re-export của common::bridge_types để các module trong snipebot có thể sử dụng
 pub use common::bridge_types;
+
+// Re-export các types giao dịch từ common
+pub use common::trading_types;
 
 // Thêm re-export cho shared coordinator
 pub use tradelogic::traits::{
     TradeCoordinator, ExecutorType, OpportunityPriority, SharedOpportunity, SharedOpportunityType, 
 };
 pub use tradelogic::coordinator::create_trade_coordinator;
+
+// Re-export cấu trúc dữ liệu quan trọng từ config
+pub use crate::config::initialize_default_config;
+
+// Re-export các kiểu trader behavior để tránh trùng lặp
+pub use crate::tradelogic::common::types::{
+    TraderBehaviorType, TraderExpertiseLevel, GasBehavior, TraderBehaviorAnalysis
+};
 
 use std::sync::Arc;
 use std::time::Duration;

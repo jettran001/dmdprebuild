@@ -832,6 +832,2443 @@ impl SmartTradeExecutor {
             custom_params: None,
         };
         
+        // Thực hiện giao dịch
+        if let Err(e) = self.execute_trade(trade_params).await {
+            error!("Lỗi khi thực hiện giao dịch: {}", e);
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Error, 
+                &format!("Lỗi khi thực hiện giao dịch: {}", e), 
+                chain_id
+            ).await;
+        } else {
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Pending, 
+                "Giao dịch đã được khởi tạo", 
+                chain_id
+            ).await;
+        }
+        
+        Ok(())
+    }
+
+    /// Core implementation of SmartTradeExecutor
+    ///
+    /// This file contains the main executor struct that manages the entire
+    /// smart trading process, orchestrates token analysis, trade strategies,
+    /// and market monitoring.
+    ///
+    /// # Cải tiến đã thực hiện:
+    /// - Loại bỏ các phương thức trùng lặp với analys modules
+    /// - Sử dụng API từ analys/token_status và analys/risk_analyzer
+    /// - Áp dụng xử lý lỗi chuẩn với anyhow::Result thay vì unwrap/expect
+    /// - Đảm bảo thread safety trong các phương thức async với kỹ thuật "clone and drop" để tránh deadlock
+    /// - Tối ưu hóa việc xử lý các futures với tokio::join! cho các tác vụ song song
+    /// - Xử lý các trường hợp giá trị null an toàn với match/Option
+    /// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+
+    // External imports
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
+    use tokio::time::sleep;
+    use chrono::Utc;
+    use futures::future::join_all;
+    use tracing::{debug, error, info, warn};
+    use anyhow::{Result, Context, anyhow, bail};
+    use uuid;
+    use async_trait::async_trait;
+    use serde::{Serialize, Deserialize};
+    use rand::Rng;
+    use std::collections::HashSet;
+    use futures::future::Future;
+
+    // Internal imports
+    use crate::chain_adapters::evm_adapter::EvmAdapter;
+    use crate::analys::mempool::{MempoolAnalyzer, MempoolTransaction};
+    use crate::analys::risk_analyzer::{RiskAnalyzer, RiskFactor, TradeRecommendation, TradeRiskAnalysis};
+    use crate::analys::token_status::{
+        ContractInfo, LiquidityEvent, LiquidityEventType, TokenSafety, TokenStatus,
+        TokenIssue, IssueSeverity, abnormal_liquidity_events, detect_dynamic_tax, 
+        detect_hidden_fees, analyze_owner_privileges, is_proxy_contract, blacklist::{has_blacklist_or_whitelist, has_trading_cooldown, has_max_tx_or_wallet_limit},
+    };
+    use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+    use crate::tradelogic::traits::{
+        TradeExecutor, RiskManager, TradeCoordinator, ExecutorType, SharedOpportunity, 
+        SharedOpportunityType, OpportunityPriority
+    };
+
+    // Module imports
+    use super::types::{
+        SmartTradeConfig, 
+        TradeResult, 
+        TradeStatus, 
+        TradeStrategy, 
+        TradeTracker
+    };
+    use super::constants::*;
+    use super::token_analysis::*;
+    use super::trade_strategy::*;
+    use super::alert::*;
+    use super::optimization::*;
+    use super::security::*;
+    use super::analys_client::SmartTradeAnalysisClient;
+
+    /// Executor for smart trading strategies
+    #[derive(Clone)]
+    pub struct SmartTradeExecutor {
+        /// EVM adapter for each chain
+        pub(crate) evm_adapters: HashMap<u32, Arc<EvmAdapter>>,
+        
+        /// Analysis client that provides access to all analysis services
+        pub(crate) analys_client: Arc<SmartTradeAnalysisClient>,
+        
+        /// Risk analyzer (legacy - kept for backward compatibility)
+        pub(crate) risk_analyzer: Arc<RwLock<RiskAnalyzer>>,
+        
+        /// Mempool analyzer for each chain (legacy - kept for backward compatibility)
+        pub(crate) mempool_analyzers: HashMap<u32, Arc<MempoolAnalyzer>>,
+        
+        /// Configuration
+        pub(crate) config: RwLock<SmartTradeConfig>,
+        
+        /// Active trades being monitored
+        pub(crate) active_trades: RwLock<Vec<TradeTracker>>,
+        
+        /// History of completed trades
+        pub(crate) trade_history: RwLock<Vec<TradeResult>>,
+        
+        /// Running state
+        pub(crate) running: RwLock<bool>,
+        
+        /// Coordinator for shared state between executors
+        pub(crate) coordinator: Option<Arc<dyn TradeCoordinator>>,
+        
+        /// Unique ID for this executor instance
+        pub(crate) executor_id: String,
+        
+        /// Subscription ID for coordinator notifications
+        pub(crate) coordinator_subscription: RwLock<Option<String>>,
+    }
+
+// Implement the TradeExecutor trait for SmartTradeExecutor
+#[async_trait]
+impl TradeExecutor for SmartTradeExecutor {
+    /// Configuration type
+    type Config = SmartTradeConfig;
+    
+    /// Result type for trades
+    type TradeResult = TradeResult;
+    
+    /// Start the trading executor
+    async fn start(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        if *running {
+            return Ok(());
+        }
+        
+        *running = true;
+        
+        // Register with coordinator if available
+        if self.coordinator.is_some() {
+            self.register_with_coordinator().await?;
+        }
+        
+        // Phục hồi trạng thái trước khi khởi động
+        self.restore_state().await?;
+        
+        // Khởi động vòng lặp theo dõi
+        let executor = Arc::new(self.clone_with_config().await);
+        
+        tokio::spawn(async move {
+            executor.monitor_loop().await;
+        });
+        
+        Ok(())
+    }
+    
+    /// Stop the trading executor
+    async fn stop(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        *running = false;
+        
+        // Unregister from coordinator if available
+        if self.coordinator.is_some() {
+            self.unregister_from_coordinator().await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Update the executor's configuration
+    async fn update_config(&self, config: Self::Config) -> anyhow::Result<()> {
+        let mut current_config = self.config.write().await;
+        *current_config = config;
+        Ok(())
+    }
+    
+    /// Add a new blockchain to monitor
+    async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>) -> anyhow::Result<()> {
+        // Create a mempool analyzer if it doesn't exist
+        let mempool_analyzer = if let Some(analyzer) = self.mempool_analyzers.get(&chain_id) {
+            analyzer.clone()
+        } else {
+            Arc::new(MempoolAnalyzer::new(chain_id, adapter.clone()))
+        };
+        
+        self.evm_adapters.insert(chain_id, adapter);
+        self.mempool_analyzers.insert(chain_id, mempool_analyzer);
+        
+        Ok(())
+    }
+    
+    /// Execute a trade with the specified parameters
+    async fn execute_trade(&self, params: TradeParams) -> anyhow::Result<Self::TradeResult> {
+        // Find the appropriate adapter
+        let adapter = match self.evm_adapters.get(&params.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        };
+        
+        // Validate trade parameters
+        if params.amount <= 0.0 {
+            return Err(anyhow::anyhow!("Invalid trade amount: {}", params.amount));
+        }
+        
+        // Create a trade tracker
+        let trade_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp() as u64;
+        
+        let tracker = TradeTracker {
+            id: trade_id.clone(),
+            chain_id: params.chain_id,
+            token_address: params.token_address.clone(),
+            amount: params.amount,
+            entry_price: 0.0, // Will be updated after trade execution
+            current_price: 0.0,
+            status: TradeStatus::Pending,
+            strategy: if let Some(strategy) = &params.strategy {
+                match strategy.as_str() {
+                    "quick" => TradeStrategy::QuickFlip,
+                    "tsl" => TradeStrategy::TrailingStopLoss,
+                    "hodl" => TradeStrategy::LongTerm,
+                    _ => TradeStrategy::default(),
+                }
+            } else {
+                TradeStrategy::default()
+            },
+            created_at: now,
+            updated_at: now,
+            stop_loss: params.stop_loss,
+            take_profit: params.take_profit,
+            max_hold_time: params.max_hold_time.unwrap_or(DEFAULT_MAX_HOLD_TIME),
+            custom_params: params.custom_params.unwrap_or_default(),
+        };
+        
+        // TODO: Implement the actual trade execution logic
+        // This is a simplified version - in a real implementation, you would:
+        // 1. Execute the trade
+        // 2. Update the trade tracker with actual execution details
+        // 3. Add it to active trades
+        
+        let result = TradeResult {
+            id: trade_id,
+            chain_id: params.chain_id,
+            token_address: params.token_address,
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: params.amount,
+            entry_price: 0.0,                  // Would be populated from actual execution
+            exit_price: None,
+            current_price: 0.0,
+            profit_loss: 0.0,
+            status: TradeStatus::Pending,
+            strategy: tracker.strategy.clone(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        // Add to active trades
+        {
+            let mut active_trades = self.active_trades.write().await;
+            active_trades.push(tracker);
+        }
+        
+        Ok(result)
+    }
+    
+    /// Get the current status of an active trade
+    async fn get_trade_status(&self, trade_id: &str) -> anyhow::Result<Option<Self::TradeResult>> {
+        // Check active trades
+        {
+            let active_trades = self.active_trades.read().await;
+            if let Some(trade) = active_trades.iter().find(|t| t.id == trade_id) {
+                return Ok(Some(self.tracker_to_result(trade).await?));
+            }
+        }
+        
+        // Check trade history
+        let trade_history = self.trade_history.read().await;
+        let result = trade_history.iter()
+            .find(|r| r.id == trade_id)
+            .cloned();
+            
+        Ok(result)
+    }
+    
+    /// Get all active trades
+    async fn get_active_trades(&self) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let active_trades = self.active_trades.read().await;
+        let mut results = Vec::with_capacity(active_trades.len());
+        
+        for tracker in active_trades.iter() {
+            results.push(self.tracker_to_result(tracker).await?);
+        }
+        
+        Ok(results)
+    }
+    
+    /// Get trade history within a specific time range
+    async fn get_trade_history(&self, from_timestamp: u64, to_timestamp: u64) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let trade_history = self.trade_history.read().await;
+        
+        let filtered_history = trade_history.iter()
+            .filter(|trade| trade.created_at >= from_timestamp && trade.created_at <= to_timestamp)
+            .cloned()
+            .collect();
+            
+        Ok(filtered_history)
+    }
+    
+    /// Evaluate a token for potential trading
+    async fn evaluate_token(&self, chain_id: u32, token_address: &str) -> anyhow::Result<Option<TokenSafety>> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", chain_id)),
+        };
+        
+        // Sử dụng analys_client để phân tích token
+        let token_safety_result = self.analys_client.token_provider()
+            .analyze_token(chain_id, token_address).await
+            .context(format!("Không thể phân tích token {}", token_address))?;
+        
+        // Nếu không phân tích được token, trả về None
+        if !token_safety_result.is_valid() {
+            info!("Token {} không hợp lệ hoặc không thể phân tích", token_address);
+            return Ok(None);
+        }
+        
+        // Lấy thêm thông tin chi tiết từ contract
+        let contract_details = self.analys_client.token_provider()
+            .get_contract_details(chain_id, token_address).await
+            .context(format!("Không thể lấy chi tiết contract cho token {}", token_address))?;
+        
+        // Đánh giá rủi ro của token
+        let risk_analysis = self.analys_client.risk_provider()
+            .analyze_token_risk(chain_id, token_address).await
+            .context(format!("Không thể phân tích rủi ro cho token {}", token_address))?;
+        
+        // Log thông tin phân tích
+        info!(
+            "Phân tích token {} trên chain {}: risk_score={}, honeypot={:?}, buy_tax={:?}, sell_tax={:?}",
+            token_address,
+            chain_id,
+            risk_analysis.risk_score,
+            token_safety_result.is_honeypot,
+            token_safety_result.buy_tax,
+            token_safety_result.sell_tax
+        );
+        
+        Ok(Some(token_safety_result))
+    }
+
+    /// Đánh giá rủi ro của token bằng cách sử dụng analys_client
+    async fn analyze_token_risk(&self, chain_id: u32, token_address: &str) -> anyhow::Result<RiskScore> {
+        // Sử dụng phương thức analyze_risk từ analys_client
+        self.analys_client.analyze_risk(chain_id, token_address).await
+            .context(format!("Không thể đánh giá rủi ro cho token {}", token_address))
+    }
+}
+
+impl SmartTradeExecutor {
+    /// Create a new SmartTradeExecutor
+    pub fn new() -> Self {
+        let executor_id = format!("smart-trade-{}", uuid::Uuid::new_v4());
+        
+        let evm_adapters = HashMap::new();
+        let analys_client = Arc::new(SmartTradeAnalysisClient::new(evm_adapters.clone()));
+        
+        Self {
+            evm_adapters,
+            analys_client,
+            risk_analyzer: Arc::new(RwLock::new(RiskAnalyzer::new())),
+            mempool_analyzers: HashMap::new(),
+            config: RwLock::new(SmartTradeConfig::default()),
+            active_trades: RwLock::new(Vec::new()),
+            trade_history: RwLock::new(Vec::new()),
+            running: RwLock::new(false),
+            coordinator: None,
+            executor_id,
+            coordinator_subscription: RwLock::new(None),
+        }
+    }
+    
+    /// Set coordinator for shared state
+    pub fn with_coordinator(mut self, coordinator: Arc<dyn TradeCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
+    }
+    
+    /// Convert a trade tracker to a trade result
+    async fn tracker_to_result(&self, tracker: &TradeTracker) -> anyhow::Result<TradeResult> {
+        let result = TradeResult {
+            id: tracker.id.clone(),
+            chain_id: tracker.chain_id,
+            token_address: tracker.token_address.clone(),
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: tracker.amount,
+            entry_price: tracker.entry_price,
+            exit_price: None,
+            current_price: tracker.current_price,
+            profit_loss: if tracker.entry_price > 0.0 && tracker.current_price > 0.0 {
+                (tracker.current_price - tracker.entry_price) / tracker.entry_price * 100.0
+            } else {
+                0.0
+            },
+            status: tracker.status.clone(),
+            strategy: tracker.strategy.clone(),
+            created_at: tracker.created_at,
+            updated_at: tracker.updated_at,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        Ok(result)
+    }
+    
+    /// Vòng lặp theo dõi chính
+    async fn monitor_loop(&self) {
+        let mut counter = 0;
+        let mut persist_counter = 0;
+        
+        while let true_val = *self.running.read().await {
+            if !true_val {
+                break;
+            }
+            
+            // Kiểm tra và cập nhật tất cả các giao dịch đang active
+            if let Err(e) = self.check_active_trades().await {
+                error!("Error checking active trades: {}", e);
+            }
+            
+            // Tăng counter và dọn dẹp lịch sử giao dịch định kỳ
+            counter += 1;
+            if counter >= 100 {
+                self.cleanup_trade_history().await;
+                counter = 0;
+            }
+            
+            // Lưu trạng thái vào bộ nhớ định kỳ
+            persist_counter += 1;
+            if persist_counter >= 30 { // Lưu mỗi 30 chu kỳ (khoảng 2.5 phút với interval 5s)
+                if let Err(e) = self.update_and_persist_trades().await {
+                    error!("Failed to persist bot state: {}", e);
+                }
+                persist_counter = 0;
+            }
+            
+            // Tính toán thời gian sleep thích ứng
+            let sleep_time = self.adaptive_sleep_time().await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_time)).await;
+        }
+        
+        // Lưu trạng thái trước khi dừng
+        if let Err(e) = self.update_and_persist_trades().await {
+            error!("Failed to persist bot state before stopping: {}", e);
+        }
+    }
+    
+    /// Quét cơ hội giao dịch mới
+    async fn scan_trading_opportunities(&self) {
+        // Kiểm tra cấu hình
+        let config = self.config.read().await;
+        if !config.enabled || !config.auto_trade {
+            return;
+        }
+        
+        // Kiểm tra số lượng giao dịch hiện tại
+        let active_trades = self.active_trades.read().await;
+        if active_trades.len() >= config.max_concurrent_trades as usize {
+            return;
+        }
+        
+        // Chạy quét cho từng chain
+        let futures = self.mempool_analyzers.iter().map(|(chain_id, analyzer)| {
+            self.scan_chain_opportunities(*chain_id, analyzer)
+        });
+        join_all(futures).await;
+    }
+    
+    /// Quét cơ hội giao dịch trên một chain cụ thể
+    async fn scan_chain_opportunities(&self, chain_id: u32, analyzer: &Arc<MempoolAnalyzer>) -> anyhow::Result<()> {
+        let config = self.config.read().await;
+        
+        // Lấy các giao dịch lớn từ mempool
+        let large_txs = match analyzer.get_large_transactions(QUICK_TRADE_MIN_BNB).await {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("Không thể lấy các giao dịch lớn từ mempool: {}", e);
+                return Err(anyhow::anyhow!("Lỗi khi lấy giao dịch từ mempool: {}", e));
+            }
+        };
+        
+        // Phân tích từng giao dịch
+        for tx in large_txs {
+            // Kiểm tra nếu token không trong blacklist và đáp ứng điều kiện
+            if let Some(to_token) = &tx.to_token {
+                let token_address = &to_token.address;
+                
+                // Kiểm tra blacklist và whitelist
+                if config.token_blacklist.contains(token_address) {
+                    debug!("Bỏ qua token {} trong blacklist", token_address);
+                    continue;
+                }
+                
+                if !config.token_whitelist.is_empty() && !config.token_whitelist.contains(token_address) {
+                    debug!("Bỏ qua token {} không trong whitelist", token_address);
+                    continue;
+                }
+                
+                // Kiểm tra nếu giao dịch đủ lớn
+                if tx.value >= QUICK_TRADE_MIN_BNB {
+                    // Phân tích token
+                    if let Err(e) = self.analyze_and_trade_token(chain_id, token_address, tx).await {
+                        error!("Lỗi khi phân tích và giao dịch token {}: {}", token_address, e);
+                        // Tiếp tục với token tiếp theo, không dừng lại
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Phân tích token và thực hiện giao dịch nếu an toàn
+    async fn analyze_and_trade_token(&self, chain_id: u32, token_address: &str, tx: MempoolTransaction) -> anyhow::Result<()> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => {
+                return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain ID {}", chain_id));
+            }
+        };
+        
+        // THÊM: Xác thực kỹ lưỡng dữ liệu mempool trước khi tiếp tục phân tích
+        info!("Xác thực dữ liệu mempool cho token {} từ giao dịch {}", token_address, tx.tx_hash);
+        let mempool_validation = match self.validate_mempool_data(chain_id, token_address, &tx).await {
+            Ok(validation) => validation,
+            Err(e) => {
+                error!("Lỗi khi xác thực dữ liệu mempool: {}", e);
+                self.log_trade_decision(
+                    "new_opportunity", 
+                    token_address, 
+                    TradeStatus::Canceled, 
+                    &format!("Lỗi xác thực mempool: {}", e), 
+                    chain_id
+                ).await;
+                return Err(anyhow::anyhow!("Lỗi xác thực dữ liệu mempool: {}", e));
+            }
+        };
+        
+        // Nếu dữ liệu mempool không hợp lệ, dừng phân tích
+        if !mempool_validation.is_valid {
+            let reasons = mempool_validation.reasons.join(", ");
+            info!("Dữ liệu mempool không đáng tin cậy cho token {}: {}", token_address, reasons);
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Dữ liệu mempool không đáng tin cậy: {}", reasons), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        info!("Xác thực mempool thành công với điểm tin cậy: {}/100", mempool_validation.confidence_score);
+        
+        // Code hiện tại: Sử dụng analys_client để kiểm tra an toàn token
+        let security_check_future = self.analys_client.verify_token_safety(chain_id, token_address);
+        
+        // Code hiện tại: Sử dụng analys_client để đánh giá rủi ro
+        let risk_analysis_future = self.analys_client.analyze_risk(chain_id, token_address);
+        
+        // Thực hiện song song các phân tích
+        let (security_check_result, risk_analysis) = tokio::join!(security_check_future, risk_analysis_future);
+        
+        // Xử lý kết quả kiểm tra an toàn
+        let security_check = match security_check_result {
+            Ok(result) => result,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi kiểm tra an toàn token: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi kiểm tra an toàn token: {}", e));
+            }
+        };
+        
+        // Xử lý kết quả phân tích rủi ro
+        let risk_score = match risk_analysis {
+            Ok(score) => score,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi phân tích rủi ro: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi phân tích rủi ro: {}", e));
+            }
+        };
+        
+        // Kiểm tra xem token có an toàn không
+        if !security_check.is_safe {
+            let issues_str = security_check.issues.iter()
+                .map(|issue| format!("{:?}", issue))
+                .collect::<Vec<String>>()
+                .join(", ");
+                
+            self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                &format!("Token không an toàn: {}", issues_str), chain_id).await;
+            return Ok(());
+        }
+        
+        // Lấy cấu hình hiện tại
+        let config = self.config.read().await;
+        
+        // Kiểm tra điểm rủi ro
+        if risk_score.score > config.max_risk_score {
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Điểm rủi ro quá cao: {}/{}", risk_score.score, config.max_risk_score), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        // Xác định chiến lược giao dịch dựa trên mức độ rủi ro
+        let strategy = if risk_score.score < 30 {
+            TradeStrategy::Smart  // Rủi ro thấp, dùng chiến lược thông minh với TSL
+        } else {
+            TradeStrategy::Quick  // Rủi ro cao hơn, dùng chiến lược nhanh
+        };
+        
+        // Xác định số lượng giao dịch dựa trên cấu hình và mức độ rủi ro
+        let base_amount = if risk_score.score < 20 {
+            config.trade_amount_high_confidence
+        } else if risk_score.score < 40 {
+            config.trade_amount_medium_confidence
+        } else {
+            config.trade_amount_low_confidence
+        };
+        
+        // Tạo tham số giao dịch
+        let trade_params = crate::types::TradeParams {
+            chain_type: crate::types::ChainType::EVM(chain_id),
+            token_address: token_address.to_string(),
+            amount: base_amount,
+            slippage: 1.0, // 1% slippage mặc định cho giao dịch tự động
+            trade_type: crate::types::TradeType::Buy,
+            deadline_minutes: 2, // Thời hạn 2 phút
+            router_address: String::new(), // Dùng router mặc định
+            gas_limit: None,
+            gas_price: None,
+            strategy: Some(format!("{:?}", strategy).to_lowercase()),
+            stop_loss: if strategy == TradeStrategy::Smart { Some(5.0) } else { None }, // 5% stop loss for Smart strategy
+            take_profit: if strategy == TradeStrategy::Smart { Some(20.0) } else { Some(10.0) }, // 20% take profit for Smart, 10% for Quick
+            max_hold_time: None, // Sẽ được thiết lập dựa trên chiến lược
+            custom_params: None,
+        };
+        
+        // Thực hiện giao dịch và lấy kết quả
+        info!("Thực hiện mua {} cho token {} trên chain {}", base_amount, token_address, chain_id);
+        
+        let buy_result = adapter.execute_trade(&trade_params).await;
+        
+        match buy_result {
+            Ok(tx_result) => {
+                // Tạo ID giao dịch duy nhất
+                let trade_id = uuid::Uuid::new_v4().to_string();
+                let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                
+                // Tính thời gian giữ tối đa dựa trên chiến lược
+                let max_hold_time = match strategy {
+                    TradeStrategy::Quick => current_timestamp + QUICK_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Smart => current_timestamp + SMART_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Manual => current_timestamp + 24 * 60 * 60, // 24 giờ cho giao dịch thủ công
+                };
+                
+                // Tạo trailing stop loss nếu sử dụng chiến lược Smart
+                let trailing_stop_percent = match strategy {
+                    TradeStrategy::Smart => Some(SMART_TRADE_TSL_PERCENT),
+                    _ => None,
+                };
+                
+                // Xác định giá entry từ kết quả giao dịch
+                let entry_price = match tx_result.execution_price {
+                    Some(price) => price,
+                    None => {
+                        error!("Không thể xác định giá mua vào cho token {}", token_address);
+                        return Err(anyhow::anyhow!("Không thể xác định giá mua vào"));
+                    }
+                };
+                
+                // Lấy số lượng token đã mua
+                let token_amount = match tx_result.tokens_received {
+                    Some(amount) => amount,
+                    None => {
+                        error!("Không thể xác định số lượng token nhận được");
+                        return Err(anyhow::anyhow!("Không thể xác định số lượng token nhận được"));
+                    }
+                };
+                
+                // Tạo theo dõi giao dịch mới
+                let trade_tracker = TradeTracker {
+                    trade_id: trade_id.clone(),
+                    token_address: token_address.to_string(),
+                    chain_id,
+                    strategy: strategy.clone(),
+                    entry_price,
+                    token_amount,
+                    invested_amount: base_amount,
+                    highest_price: entry_price, // Ban đầu, giá cao nhất = giá mua
+                    entry_time: current_timestamp,
+                    max_hold_time,
+                    take_profit_percent: match strategy {
+                        TradeStrategy::Quick => QUICK_TRADE_TARGET_PROFIT,
+                        _ => 10.0, // Mặc định 10% cho các chiến lược khác
+                    },
+                    stop_loss_percent: STOP_LOSS_PERCENT,
+                    trailing_stop_percent,
+                    buy_tx_hash: tx_result.transaction_hash.clone(),
+                    sell_tx_hash: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                };
+                
+                // Thêm vào danh sách theo dõi
+                {
+                    let mut active_trades = self.active_trades.write().await;
+                    active_trades.push(trade_tracker.clone());
+                }
+                
+                // Log thành công
+                info!(
+                    "Giao dịch mua thành công: ID={}, Token={}, Chain={}, Strategy={:?}, Amount={}, Price={}",
+                    trade_id, token_address, chain_id, strategy, base_amount, entry_price
+                );
+                
+                // Thêm vào lịch sử
+                let trade_result = TradeResult {
+                    trade_id: trade_id.clone(),
+                    entry_price,
+                    exit_price: None,
+                    profit_percent: None,
+                    profit_usd: None,
+                    entry_time: current_timestamp,
+                    exit_time: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                    gas_cost_usd: tx_result.gas_cost_usd.unwrap_or(0.0),
+                };
+                
+                let mut trade_history = self.trade_history.write().await;
+                trade_history.push(trade_result);
+                
+                // Trả về ID giao dịch
+                Ok(())
+            },
+            Err(e) => {
+                // Log lỗi giao dịch
+                error!("Giao dịch mua thất bại cho token {}: {}", token_address, e);
+                Err(anyhow::anyhow!("Giao dịch mua thất bại: {}", e))
+            }
+        }
+    }
+}
+
+// Implement the TradeExecutor trait for SmartTradeExecutor
+#[async_trait]
+impl TradeExecutor for SmartTradeExecutor {
+    /// Configuration type
+    type Config = SmartTradeConfig;
+    
+    /// Result type for trades
+    type TradeResult = TradeResult;
+    
+    /// Start the trading executor
+    async fn start(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        if *running {
+            return Ok(());
+        }
+        
+        *running = true;
+        
+        // Register with coordinator if available
+        if self.coordinator.is_some() {
+            self.register_with_coordinator().await?;
+        }
+        
+        // Phục hồi trạng thái trước khi khởi động
+        self.restore_state().await?;
+        
+        // Khởi động vòng lặp theo dõi
+        let executor = Arc::new(self.clone_with_config().await);
+        
+        tokio::spawn(async move {
+            executor.monitor_loop().await;
+        });
+        
+        Ok(())
+    }
+    
+    /// Stop the trading executor
+    async fn stop(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        *running = false;
+        
+        // Unregister from coordinator if available
+        if self.coordinator.is_some() {
+            self.unregister_from_coordinator().await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Update the executor's configuration
+    async fn update_config(&self, config: Self::Config) -> anyhow::Result<()> {
+        let mut current_config = self.config.write().await;
+        *current_config = config;
+        Ok(())
+    }
+    
+    /// Add a new blockchain to monitor
+    async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>) -> anyhow::Result<()> {
+        // Create a mempool analyzer if it doesn't exist
+        let mempool_analyzer = if let Some(analyzer) = self.mempool_analyzers.get(&chain_id) {
+            analyzer.clone()
+        } else {
+            Arc::new(MempoolAnalyzer::new(chain_id, adapter.clone()))
+        };
+        
+        self.evm_adapters.insert(chain_id, adapter);
+        self.mempool_analyzers.insert(chain_id, mempool_analyzer);
+        
+        Ok(())
+    }
+    
+    /// Execute a trade with the specified parameters
+    async fn execute_trade(&self, params: TradeParams) -> anyhow::Result<Self::TradeResult> {
+        // Find the appropriate adapter
+        let adapter = match self.evm_adapters.get(&params.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        };
+        
+        // Validate trade parameters
+        if params.amount <= 0.0 {
+            return Err(anyhow::anyhow!("Invalid trade amount: {}", params.amount));
+        }
+        
+        // Create a trade tracker
+        let trade_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp() as u64;
+        
+        let tracker = TradeTracker {
+            id: trade_id.clone(),
+            chain_id: params.chain_id,
+            token_address: params.token_address.clone(),
+            amount: params.amount,
+            entry_price: 0.0, // Will be updated after trade execution
+            current_price: 0.0,
+            status: TradeStatus::Pending,
+            strategy: if let Some(strategy) = &params.strategy {
+                match strategy.as_str() {
+                    "quick" => TradeStrategy::QuickFlip,
+                    "tsl" => TradeStrategy::TrailingStopLoss,
+                    "hodl" => TradeStrategy::LongTerm,
+                    _ => TradeStrategy::default(),
+                }
+            } else {
+                TradeStrategy::default()
+            },
+            created_at: now,
+            updated_at: now,
+            stop_loss: params.stop_loss,
+            take_profit: params.take_profit,
+            max_hold_time: params.max_hold_time.unwrap_or(DEFAULT_MAX_HOLD_TIME),
+            custom_params: params.custom_params.unwrap_or_default(),
+        };
+        
+        // TODO: Implement the actual trade execution logic
+        // This is a simplified version - in a real implementation, you would:
+        // 1. Execute the trade
+        // 2. Update the trade tracker with actual execution details
+        // 3. Add it to active trades
+        
+        let result = TradeResult {
+            id: trade_id,
+            chain_id: params.chain_id,
+            token_address: params.token_address,
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: params.amount,
+            entry_price: 0.0,                  // Would be populated from actual execution
+            exit_price: None,
+            current_price: 0.0,
+            profit_loss: 0.0,
+            status: TradeStatus::Pending,
+            strategy: tracker.strategy.clone(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        // Add to active trades
+        {
+            let mut active_trades = self.active_trades.write().await;
+            active_trades.push(tracker);
+        }
+        
+        Ok(result)
+    }
+    
+    /// Get the current status of an active trade
+    async fn get_trade_status(&self, trade_id: &str) -> anyhow::Result<Option<Self::TradeResult>> {
+        // Check active trades
+        {
+            let active_trades = self.active_trades.read().await;
+            if let Some(trade) = active_trades.iter().find(|t| t.id == trade_id) {
+                return Ok(Some(self.tracker_to_result(trade).await?));
+            }
+        }
+        
+        // Check trade history
+        let trade_history = self.trade_history.read().await;
+        let result = trade_history.iter()
+            .find(|r| r.id == trade_id)
+            .cloned();
+            
+        Ok(result)
+    }
+    
+    /// Get all active trades
+    async fn get_active_trades(&self) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let active_trades = self.active_trades.read().await;
+        let mut results = Vec::with_capacity(active_trades.len());
+        
+        for tracker in active_trades.iter() {
+            results.push(self.tracker_to_result(tracker).await?);
+        }
+        
+        Ok(results)
+    }
+    
+    /// Get trade history within a specific time range
+    async fn get_trade_history(&self, from_timestamp: u64, to_timestamp: u64) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let trade_history = self.trade_history.read().await;
+        
+        let filtered_history = trade_history.iter()
+            .filter(|trade| trade.created_at >= from_timestamp && trade.created_at <= to_timestamp)
+            .cloned()
+            .collect();
+            
+        Ok(filtered_history)
+    }
+    
+    /// Evaluate a token for potential trading
+    async fn evaluate_token(&self, chain_id: u32, token_address: &str) -> anyhow::Result<Option<TokenSafety>> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", chain_id)),
+        };
+        
+        // Sử dụng analys_client để phân tích token
+        let token_safety_result = self.analys_client.token_provider()
+            .analyze_token(chain_id, token_address).await
+            .context(format!("Không thể phân tích token {}", token_address))?;
+        
+        // Nếu không phân tích được token, trả về None
+        if !token_safety_result.is_valid() {
+            info!("Token {} không hợp lệ hoặc không thể phân tích", token_address);
+            return Ok(None);
+        }
+        
+        // Lấy thêm thông tin chi tiết từ contract
+        let contract_details = self.analys_client.token_provider()
+            .get_contract_details(chain_id, token_address).await
+            .context(format!("Không thể lấy chi tiết contract cho token {}", token_address))?;
+        
+        // Đánh giá rủi ro của token
+        let risk_analysis = self.analys_client.risk_provider()
+            .analyze_token_risk(chain_id, token_address).await
+            .context(format!("Không thể phân tích rủi ro cho token {}", token_address))?;
+        
+        // Log thông tin phân tích
+        info!(
+            "Phân tích token {} trên chain {}: risk_score={}, honeypot={:?}, buy_tax={:?}, sell_tax={:?}",
+            token_address,
+            chain_id,
+            risk_analysis.risk_score,
+            token_safety_result.is_honeypot,
+            token_safety_result.buy_tax,
+            token_safety_result.sell_tax
+        );
+        
+        Ok(Some(token_safety_result))
+    }
+
+    /// Đánh giá rủi ro của token bằng cách sử dụng analys_client
+    async fn analyze_token_risk(&self, chain_id: u32, token_address: &str) -> anyhow::Result<RiskScore> {
+        // Sử dụng phương thức analyze_risk từ analys_client
+        self.analys_client.analyze_risk(chain_id, token_address).await
+            .context(format!("Không thể đánh giá rủi ro cho token {}", token_address))
+    }
+}
+
+impl SmartTradeExecutor {
+    /// Create a new SmartTradeExecutor
+    pub fn new() -> Self {
+        let executor_id = format!("smart-trade-{}", uuid::Uuid::new_v4());
+        
+        let evm_adapters = HashMap::new();
+        let analys_client = Arc::new(SmartTradeAnalysisClient::new(evm_adapters.clone()));
+        
+        Self {
+            evm_adapters,
+            analys_client,
+            risk_analyzer: Arc::new(RwLock::new(RiskAnalyzer::new())),
+            mempool_analyzers: HashMap::new(),
+            config: RwLock::new(SmartTradeConfig::default()),
+            active_trades: RwLock::new(Vec::new()),
+            trade_history: RwLock::new(Vec::new()),
+            running: RwLock::new(false),
+            coordinator: None,
+            executor_id,
+            coordinator_subscription: RwLock::new(None),
+        }
+    }
+    
+    /// Set coordinator for shared state
+    pub fn with_coordinator(mut self, coordinator: Arc<dyn TradeCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
+    }
+    
+    /// Convert a trade tracker to a trade result
+    async fn tracker_to_result(&self, tracker: &TradeTracker) -> anyhow::Result<TradeResult> {
+        let result = TradeResult {
+            id: tracker.id.clone(),
+            chain_id: tracker.chain_id,
+            token_address: tracker.token_address.clone(),
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: tracker.amount,
+            entry_price: tracker.entry_price,
+            exit_price: None,
+            current_price: tracker.current_price,
+            profit_loss: if tracker.entry_price > 0.0 && tracker.current_price > 0.0 {
+                (tracker.current_price - tracker.entry_price) / tracker.entry_price * 100.0
+            } else {
+                0.0
+            },
+            status: tracker.status.clone(),
+            strategy: tracker.strategy.clone(),
+            created_at: tracker.created_at,
+            updated_at: tracker.updated_at,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        Ok(result)
+    }
+    
+    /// Vòng lặp theo dõi chính
+    async fn monitor_loop(&self) {
+        let mut counter = 0;
+        let mut persist_counter = 0;
+        
+        while let true_val = *self.running.read().await {
+            if !true_val {
+                break;
+            }
+            
+            // Kiểm tra và cập nhật tất cả các giao dịch đang active
+            if let Err(e) = self.check_active_trades().await {
+                error!("Error checking active trades: {}", e);
+            }
+            
+            // Tăng counter và dọn dẹp lịch sử giao dịch định kỳ
+            counter += 1;
+            if counter >= 100 {
+                self.cleanup_trade_history().await;
+                counter = 0;
+            }
+            
+            // Lưu trạng thái vào bộ nhớ định kỳ
+            persist_counter += 1;
+            if persist_counter >= 30 { // Lưu mỗi 30 chu kỳ (khoảng 2.5 phút với interval 5s)
+                if let Err(e) = self.update_and_persist_trades().await {
+                    error!("Failed to persist bot state: {}", e);
+                }
+                persist_counter = 0;
+            }
+            
+            // Tính toán thời gian sleep thích ứng
+            let sleep_time = self.adaptive_sleep_time().await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_time)).await;
+        }
+        
+        // Lưu trạng thái trước khi dừng
+        if let Err(e) = self.update_and_persist_trades().await {
+            error!("Failed to persist bot state before stopping: {}", e);
+        }
+    }
+    
+    /// Quét cơ hội giao dịch mới
+    async fn scan_trading_opportunities(&self) {
+        // Kiểm tra cấu hình
+        let config = self.config.read().await;
+        if !config.enabled || !config.auto_trade {
+            return;
+        }
+        
+        // Kiểm tra số lượng giao dịch hiện tại
+        let active_trades = self.active_trades.read().await;
+        if active_trades.len() >= config.max_concurrent_trades as usize {
+            return;
+        }
+        
+        // Chạy quét cho từng chain
+        let futures = self.mempool_analyzers.iter().map(|(chain_id, analyzer)| {
+            self.scan_chain_opportunities(*chain_id, analyzer)
+        });
+        join_all(futures).await;
+    }
+    
+    /// Quét cơ hội giao dịch trên một chain cụ thể
+    async fn scan_chain_opportunities(&self, chain_id: u32, analyzer: &Arc<MempoolAnalyzer>) -> anyhow::Result<()> {
+        let config = self.config.read().await;
+        
+        // Lấy các giao dịch lớn từ mempool
+        let large_txs = match analyzer.get_large_transactions(QUICK_TRADE_MIN_BNB).await {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("Không thể lấy các giao dịch lớn từ mempool: {}", e);
+                return Err(anyhow::anyhow!("Lỗi khi lấy giao dịch từ mempool: {}", e));
+            }
+        };
+        
+        // Phân tích từng giao dịch
+        for tx in large_txs {
+            // Kiểm tra nếu token không trong blacklist và đáp ứng điều kiện
+            if let Some(to_token) = &tx.to_token {
+                let token_address = &to_token.address;
+                
+                // Kiểm tra blacklist và whitelist
+                if config.token_blacklist.contains(token_address) {
+                    debug!("Bỏ qua token {} trong blacklist", token_address);
+                    continue;
+                }
+                
+                if !config.token_whitelist.is_empty() && !config.token_whitelist.contains(token_address) {
+                    debug!("Bỏ qua token {} không trong whitelist", token_address);
+                    continue;
+                }
+                
+                // Kiểm tra nếu giao dịch đủ lớn
+                if tx.value >= QUICK_TRADE_MIN_BNB {
+                    // Phân tích token
+                    if let Err(e) = self.analyze_and_trade_token(chain_id, token_address, tx).await {
+                        error!("Lỗi khi phân tích và giao dịch token {}: {}", token_address, e);
+                        // Tiếp tục với token tiếp theo, không dừng lại
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Phân tích token và thực hiện giao dịch nếu an toàn
+    async fn analyze_and_trade_token(&self, chain_id: u32, token_address: &str, tx: MempoolTransaction) -> anyhow::Result<()> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => {
+                return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain ID {}", chain_id));
+            }
+        };
+        
+        // THÊM: Xác thực kỹ lưỡng dữ liệu mempool trước khi tiếp tục phân tích
+        info!("Xác thực dữ liệu mempool cho token {} từ giao dịch {}", token_address, tx.tx_hash);
+        let mempool_validation = match self.validate_mempool_data(chain_id, token_address, &tx).await {
+            Ok(validation) => validation,
+            Err(e) => {
+                error!("Lỗi khi xác thực dữ liệu mempool: {}", e);
+                self.log_trade_decision(
+                    "new_opportunity", 
+                    token_address, 
+                    TradeStatus::Canceled, 
+                    &format!("Lỗi xác thực mempool: {}", e), 
+                    chain_id
+                ).await;
+                return Err(anyhow::anyhow!("Lỗi xác thực dữ liệu mempool: {}", e));
+            }
+        };
+        
+        // Nếu dữ liệu mempool không hợp lệ, dừng phân tích
+        if !mempool_validation.is_valid {
+            let reasons = mempool_validation.reasons.join(", ");
+            info!("Dữ liệu mempool không đáng tin cậy cho token {}: {}", token_address, reasons);
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Dữ liệu mempool không đáng tin cậy: {}", reasons), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        info!("Xác thực mempool thành công với điểm tin cậy: {}/100", mempool_validation.confidence_score);
+        
+        // Code hiện tại: Sử dụng analys_client để kiểm tra an toàn token
+        let security_check_future = self.analys_client.verify_token_safety(chain_id, token_address);
+        
+        // Code hiện tại: Sử dụng analys_client để đánh giá rủi ro
+        let risk_analysis_future = self.analys_client.analyze_risk(chain_id, token_address);
+        
+        // Thực hiện song song các phân tích
+        let (security_check_result, risk_analysis) = tokio::join!(security_check_future, risk_analysis_future);
+        
+        // Xử lý kết quả kiểm tra an toàn
+        let security_check = match security_check_result {
+            Ok(result) => result,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi kiểm tra an toàn token: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi kiểm tra an toàn token: {}", e));
+            }
+        };
+        
+        // Xử lý kết quả phân tích rủi ro
+        let risk_score = match risk_analysis {
+            Ok(score) => score,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi phân tích rủi ro: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi phân tích rủi ro: {}", e));
+            }
+        };
+        
+        // Kiểm tra xem token có an toàn không
+        if !security_check.is_safe {
+            let issues_str = security_check.issues.iter()
+                .map(|issue| format!("{:?}", issue))
+                .collect::<Vec<String>>()
+                .join(", ");
+                
+            self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                &format!("Token không an toàn: {}", issues_str), chain_id).await;
+            return Ok(());
+        }
+        
+        // Lấy cấu hình hiện tại
+        let config = self.config.read().await;
+        
+        // Kiểm tra điểm rủi ro
+        if risk_score.score > config.max_risk_score {
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Điểm rủi ro quá cao: {}/{}", risk_score.score, config.max_risk_score), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        // Xác định chiến lược giao dịch dựa trên mức độ rủi ro
+        let strategy = if risk_score.score < 30 {
+            TradeStrategy::Smart  // Rủi ro thấp, dùng chiến lược thông minh với TSL
+        } else {
+            TradeStrategy::Quick  // Rủi ro cao hơn, dùng chiến lược nhanh
+        };
+        
+        // Xác định số lượng giao dịch dựa trên cấu hình và mức độ rủi ro
+        let base_amount = if risk_score.score < 20 {
+            config.trade_amount_high_confidence
+        } else if risk_score.score < 40 {
+            config.trade_amount_medium_confidence
+        } else {
+            config.trade_amount_low_confidence
+        };
+        
+        // Tạo tham số giao dịch
+        let trade_params = crate::types::TradeParams {
+            chain_type: crate::types::ChainType::EVM(chain_id),
+            token_address: token_address.to_string(),
+            amount: base_amount,
+            slippage: 1.0, // 1% slippage mặc định cho giao dịch tự động
+            trade_type: crate::types::TradeType::Buy,
+            deadline_minutes: 2, // Thời hạn 2 phút
+            router_address: String::new(), // Dùng router mặc định
+            gas_limit: None,
+            gas_price: None,
+            strategy: Some(format!("{:?}", strategy).to_lowercase()),
+            stop_loss: if strategy == TradeStrategy::Smart { Some(5.0) } else { None }, // 5% stop loss for Smart strategy
+            take_profit: if strategy == TradeStrategy::Smart { Some(20.0) } else { Some(10.0) }, // 20% take profit for Smart, 10% for Quick
+            max_hold_time: None, // Sẽ được thiết lập dựa trên chiến lược
+            custom_params: None,
+        };
+        
+        // Thực hiện giao dịch và lấy kết quả
+        info!("Thực hiện mua {} cho token {} trên chain {}", base_amount, token_address, chain_id);
+        
+        let buy_result = adapter.execute_trade(&trade_params).await;
+        
+        match buy_result {
+            Ok(tx_result) => {
+                // Tạo ID giao dịch duy nhất
+                let trade_id = uuid::Uuid::new_v4().to_string();
+                let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                
+                // Tính thời gian giữ tối đa dựa trên chiến lược
+                let max_hold_time = match strategy {
+                    TradeStrategy::Quick => current_timestamp + QUICK_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Smart => current_timestamp + SMART_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Manual => current_timestamp + 24 * 60 * 60, // 24 giờ cho giao dịch thủ công
+                };
+                
+                // Tạo trailing stop loss nếu sử dụng chiến lược Smart
+                let trailing_stop_percent = match strategy {
+                    TradeStrategy::Smart => Some(SMART_TRADE_TSL_PERCENT),
+                    _ => None,
+                };
+                
+                // Xác định giá entry từ kết quả giao dịch
+                let entry_price = match tx_result.execution_price {
+                    Some(price) => price,
+                    None => {
+                        error!("Không thể xác định giá mua vào cho token {}", token_address);
+                        return Err(anyhow::anyhow!("Không thể xác định giá mua vào"));
+                    }
+                };
+                
+                // Lấy số lượng token đã mua
+                let token_amount = match tx_result.tokens_received {
+                    Some(amount) => amount,
+                    None => {
+                        error!("Không thể xác định số lượng token nhận được");
+                        return Err(anyhow::anyhow!("Không thể xác định số lượng token nhận được"));
+                    }
+                };
+                
+                // Tạo theo dõi giao dịch mới
+                let trade_tracker = TradeTracker {
+                    trade_id: trade_id.clone(),
+                    token_address: token_address.to_string(),
+                    chain_id,
+                    strategy: strategy.clone(),
+                    entry_price,
+                    token_amount,
+                    invested_amount: base_amount,
+                    highest_price: entry_price, // Ban đầu, giá cao nhất = giá mua
+                    entry_time: current_timestamp,
+                    max_hold_time,
+                    take_profit_percent: match strategy {
+                        TradeStrategy::Quick => QUICK_TRADE_TARGET_PROFIT,
+                        _ => 10.0, // Mặc định 10% cho các chiến lược khác
+                    },
+                    stop_loss_percent: STOP_LOSS_PERCENT,
+                    trailing_stop_percent,
+                    buy_tx_hash: tx_result.transaction_hash.clone(),
+                    sell_tx_hash: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                };
+                
+                // Thêm vào danh sách theo dõi
+                {
+                    let mut active_trades = self.active_trades.write().await;
+                    active_trades.push(trade_tracker.clone());
+                }
+                
+                // Log thành công
+                info!(
+                    "Giao dịch mua thành công: ID={}, Token={}, Chain={}, Strategy={:?}, Amount={}, Price={}",
+                    trade_id, token_address, chain_id, strategy, base_amount, entry_price
+                );
+                
+                // Thêm vào lịch sử
+                let trade_result = TradeResult {
+                    trade_id: trade_id.clone(),
+                    entry_price,
+                    exit_price: None,
+                    profit_percent: None,
+                    profit_usd: None,
+                    entry_time: current_timestamp,
+                    exit_time: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                    gas_cost_usd: tx_result.gas_cost_usd.unwrap_or(0.0),
+                };
+                
+                let mut trade_history = self.trade_history.write().await;
+                trade_history.push(trade_result);
+                
+                // Trả về ID giao dịch
+                Ok(())
+            },
+            Err(e) => {
+                // Log lỗi giao dịch
+                error!("Giao dịch mua thất bại cho token {}: {}", token_address, e);
+                Err(anyhow::anyhow!("Giao dịch mua thất bại: {}", e))
+            }
+        }
+    }
+    
+    /// Thực hiện mua token dựa trên các tham số
+    async fn execute_trade(&self, chain_id: u32, token_address: &str, strategy: TradeStrategy, trigger_tx: &MempoolTransaction) -> anyhow::Result<()> {
+        // Lấy adapter cho chain
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => {
+                return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain ID {}", chain_id));
+            }
+        };
+        
+        // Lấy cấu hình
+        let config = self.config.read().await;
+        
+        // Tính số lượng giao dịch
+        let base_amount = match config.auto_trade {
+            true => {
+                // Tự động tính dựa trên cấu hình, giới hạn trong khoảng min-max
+                let calculated_amount = std::cmp::min(
+                    trigger_tx.value * config.capital_per_trade_ratio,
+                    config.max_trade_amount
+                );
+                std::cmp::max(calculated_amount, config.min_trade_amount)
+            },
+            false => {
+                // Nếu không bật auto trade, chỉ log và không thực hiện
+                info!(
+                    "Auto-trade disabled. Would trade {} for token {} with strategy {:?}",
+                    config.min_trade_amount, token_address, strategy
+                );
+                return Ok(());
+            }
+        };
+        
+        // Tạo tham số giao dịch
+        let trade_params = crate::types::TradeParams {
+            chain_type: crate::types::ChainType::EVM(chain_id),
+            token_address: token_address.to_string(),
+            amount: base_amount,
+            slippage: 1.0, // 1% slippage mặc định cho giao dịch tự động
+            trade_type: crate::types::TradeType::Buy,
+            deadline_minutes: 2, // Thời hạn 2 phút
+            router_address: String::new(), // Dùng router mặc định
+        };
+        
+        // Thực hiện giao dịch và lấy kết quả
+        info!("Thực hiện mua {} cho token {} trên chain {}", base_amount, token_address, chain_id);
+        
+        let buy_result = adapter.execute_trade(&trade_params).await;
+        
+        match buy_result {
+            Ok(tx_result) => {
+                // Tạo ID giao dịch duy nhất
+                let trade_id = uuid::Uuid::new_v4().to_string();
+                let current_timestamp = chrono::Utc::now().timestamp() as u64;
+                
+                // Tính thời gian giữ tối đa dựa trên chiến lược
+                let max_hold_time = match strategy {
+                    TradeStrategy::Quick => current_timestamp + QUICK_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Smart => current_timestamp + SMART_TRADE_MAX_HOLD_TIME,
+                    TradeStrategy::Manual => current_timestamp + 24 * 60 * 60, // 24 giờ cho giao dịch thủ công
+                };
+                
+                // Tạo trailing stop loss nếu sử dụng chiến lược Smart
+                let trailing_stop_percent = match strategy {
+                    TradeStrategy::Smart => Some(SMART_TRADE_TSL_PERCENT),
+                    _ => None,
+                };
+                
+                // Xác định giá entry từ kết quả giao dịch
+                let entry_price = match tx_result.execution_price {
+                    Some(price) => price,
+                    None => {
+                        error!("Không thể xác định giá mua vào cho token {}", token_address);
+                        return Err(anyhow::anyhow!("Không thể xác định giá mua vào"));
+                    }
+                };
+                
+                // Lấy số lượng token đã mua
+                let token_amount = match tx_result.tokens_received {
+                    Some(amount) => amount,
+                    None => {
+                        error!("Không thể xác định số lượng token nhận được");
+                        return Err(anyhow::anyhow!("Không thể xác định số lượng token nhận được"));
+                    }
+                };
+                
+                // Tạo theo dõi giao dịch mới
+                let trade_tracker = TradeTracker {
+                    trade_id: trade_id.clone(),
+                    token_address: token_address.to_string(),
+                    chain_id,
+                    strategy: strategy.clone(),
+                    entry_price,
+                    token_amount,
+                    invested_amount: base_amount,
+                    highest_price: entry_price, // Ban đầu, giá cao nhất = giá mua
+                    entry_time: current_timestamp,
+                    max_hold_time,
+                    take_profit_percent: match strategy {
+                        TradeStrategy::Quick => QUICK_TRADE_TARGET_PROFIT,
+                        _ => 10.0, // Mặc định 10% cho các chiến lược khác
+                    },
+                    stop_loss_percent: STOP_LOSS_PERCENT,
+                    trailing_stop_percent,
+                    buy_tx_hash: tx_result.transaction_hash.clone(),
+                    sell_tx_hash: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                };
+                
+                // Thêm vào danh sách theo dõi
+                {
+                    let mut active_trades = self.active_trades.write().await;
+                    active_trades.push(trade_tracker.clone());
+                }
+                
+                // Log thành công
+                info!(
+                    "Giao dịch mua thành công: ID={}, Token={}, Chain={}, Strategy={:?}, Amount={}, Price={}",
+                    trade_id, token_address, chain_id, strategy, base_amount, entry_price
+                );
+                
+                // Thêm vào lịch sử
+                let trade_result = TradeResult {
+                    trade_id: trade_id.clone(),
+                    entry_price,
+                    exit_price: None,
+                    profit_percent: None,
+                    profit_usd: None,
+                    entry_time: current_timestamp,
+                    exit_time: None,
+                    status: TradeStatus::Open,
+                    exit_reason: None,
+                    gas_cost_usd: tx_result.gas_cost_usd,
+                };
+                
+                let mut trade_history = self.trade_history.write().await;
+                trade_history.push(trade_result);
+                
+                // Trả về ID giao dịch
+                Ok(())
+            },
+            Err(e) => {
+                // Log lỗi giao dịch
+                error!("Giao dịch mua thất bại cho token {}: {}", token_address, e);
+                Err(anyhow::anyhow!("Giao dịch mua thất bại: {}", e))
+            }
+        }
+    }
+    
+    /// Theo dõi các giao dịch đang hoạt động
+    async fn track_active_trades(&self) -> anyhow::Result<()> {
+        // Kiểm tra xem có bất kỳ giao dịch nào cần theo dõi không
+        let active_trades = self.active_trades.read().await;
+        
+        if active_trades.is_empty() {
+            return Ok(());
+        }
+        
+        // Clone danh sách để tránh giữ lock quá lâu
+        let active_trades_clone = active_trades.clone();
+        drop(active_trades); // Giải phóng lock để tránh deadlock
+        
+        // Xử lý từng giao dịch song song
+        let update_futures = active_trades_clone.iter().map(|trade| {
+            self.check_and_update_trade(trade.clone())
+        });
+        
+        let results = futures::future::join_all(update_futures).await;
+        
+        // Kiểm tra và ghi log lỗi nếu có
+        for result in results {
+            if let Err(e) = result {
+                error!("Lỗi khi theo dõi giao dịch: {}", e);
+                // Tiếp tục xử lý các giao dịch khác, không dừng lại
+            }
+        }
+        
+        Ok(())
+    }
+    
+/// Core implementation of SmartTradeExecutor
+///
+/// This file contains the main executor struct that manages the entire
+/// smart trading process, orchestrates token analysis, trade strategies,
+/// and market monitoring.
+///
+/// # Cải tiến đã thực hiện:
+/// - Loại bỏ các phương thức trùng lặp với analys modules
+/// - Sử dụng API từ analys/token_status và analys/risk_analyzer
+/// - Áp dụng xử lý lỗi chuẩn với anyhow::Result thay vì unwrap/expect
+/// - Đảm bảo thread safety trong các phương thức async với kỹ thuật "clone and drop" để tránh deadlock
+/// - Tối ưu hóa việc xử lý các futures với tokio::join! cho các tác vụ song song
+/// - Xử lý các trường hợp giá trị null an toàn với match/Option
+/// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+
+// External imports
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::sleep;
+use chrono::Utc;
+use futures::future::join_all;
+use tracing::{debug, error, info, warn};
+use anyhow::{Result, Context, anyhow, bail};
+use uuid;
+use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
+use rand::Rng;
+use std::collections::HashSet;
+use futures::future::Future;
+
+// Internal imports
+use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::analys::mempool::{MempoolAnalyzer, MempoolTransaction};
+use crate::analys::risk_analyzer::{RiskAnalyzer, RiskFactor, TradeRecommendation, TradeRiskAnalysis};
+use crate::analys::token_status::{
+    ContractInfo, LiquidityEvent, LiquidityEventType, TokenSafety, TokenStatus,
+    TokenIssue, IssueSeverity, abnormal_liquidity_events, detect_dynamic_tax, 
+    detect_hidden_fees, analyze_owner_privileges, is_proxy_contract, blacklist::{has_blacklist_or_whitelist, has_trading_cooldown, has_max_tx_or_wallet_limit},
+};
+use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+use crate::tradelogic::traits::{
+    TradeExecutor, RiskManager, TradeCoordinator, ExecutorType, SharedOpportunity, 
+    SharedOpportunityType, OpportunityPriority
+};
+
+// Module imports
+use super::types::{
+    SmartTradeConfig, 
+    TradeResult, 
+    TradeStatus, 
+    TradeStrategy, 
+    TradeTracker
+};
+use super::constants::*;
+use super::token_analysis::*;
+use super::trade_strategy::*;
+use super::alert::*;
+use super::optimization::*;
+use super::security::*;
+use super::analys_client::SmartTradeAnalysisClient;
+
+/// Executor for smart trading strategies
+#[derive(Clone)]
+pub struct SmartTradeExecutor {
+    /// EVM adapter for each chain
+    pub(crate) evm_adapters: HashMap<u32, Arc<EvmAdapter>>,
+    
+    /// Analysis client that provides access to all analysis services
+    pub(crate) analys_client: Arc<SmartTradeAnalysisClient>,
+    
+    /// Risk analyzer (legacy - kept for backward compatibility)
+    pub(crate) risk_analyzer: Arc<RwLock<RiskAnalyzer>>,
+    
+    /// Mempool analyzer for each chain (legacy - kept for backward compatibility)
+    pub(crate) mempool_analyzers: HashMap<u32, Arc<MempoolAnalyzer>>,
+    
+    /// Configuration
+    pub(crate) config: RwLock<SmartTradeConfig>,
+    
+    /// Active trades being monitored
+    pub(crate) active_trades: RwLock<Vec<TradeTracker>>,
+    
+    /// History of completed trades
+    pub(crate) trade_history: RwLock<Vec<TradeResult>>,
+    
+    /// Running state
+    pub(crate) running: RwLock<bool>,
+    
+    /// Coordinator for shared state between executors
+    pub(crate) coordinator: Option<Arc<dyn TradeCoordinator>>,
+    
+    /// Unique ID for this executor instance
+    pub(crate) executor_id: String,
+    
+    /// Subscription ID for coordinator notifications
+    pub(crate) coordinator_subscription: RwLock<Option<String>>,
+}
+
+// Implement the TradeExecutor trait for SmartTradeExecutor
+#[async_trait]
+impl TradeExecutor for SmartTradeExecutor {
+    /// Configuration type
+    type Config = SmartTradeConfig;
+    
+    /// Result type for trades
+    type TradeResult = TradeResult;
+    
+    /// Start the trading executor
+    async fn start(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        if *running {
+            return Ok(());
+        }
+        
+        *running = true;
+        
+        // Register with coordinator if available
+        if self.coordinator.is_some() {
+            self.register_with_coordinator().await?;
+        }
+        
+        // Phục hồi trạng thái trước khi khởi động
+        self.restore_state().await?;
+        
+        // Khởi động vòng lặp theo dõi
+        let executor = Arc::new(self.clone_with_config().await);
+        
+        tokio::spawn(async move {
+            executor.monitor_loop().await;
+        });
+        
+        Ok(())
+    }
+    
+    /// Stop the trading executor
+    async fn stop(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        *running = false;
+        
+        // Unregister from coordinator if available
+        if self.coordinator.is_some() {
+            self.unregister_from_coordinator().await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Update the executor's configuration
+    async fn update_config(&self, config: Self::Config) -> anyhow::Result<()> {
+        let mut current_config = self.config.write().await;
+        *current_config = config;
+        Ok(())
+    }
+    
+    /// Add a new blockchain to monitor
+    async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>) -> anyhow::Result<()> {
+        // Create a mempool analyzer if it doesn't exist
+        let mempool_analyzer = if let Some(analyzer) = self.mempool_analyzers.get(&chain_id) {
+            analyzer.clone()
+        } else {
+            Arc::new(MempoolAnalyzer::new(chain_id, adapter.clone()))
+        };
+        
+        self.evm_adapters.insert(chain_id, adapter);
+        self.mempool_analyzers.insert(chain_id, mempool_analyzer);
+        
+        Ok(())
+    }
+    
+    /// Execute a trade with the specified parameters
+    async fn execute_trade(&self, params: TradeParams) -> anyhow::Result<Self::TradeResult> {
+        // Find the appropriate adapter
+        let adapter = match self.evm_adapters.get(&params.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        };
+        
+        // Validate trade parameters
+        if params.amount <= 0.0 {
+            return Err(anyhow::anyhow!("Invalid trade amount: {}", params.amount));
+        }
+        
+        // Create a trade tracker
+        let trade_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp() as u64;
+        
+        let tracker = self.create_trade_tracker(&params, &trade_id, now);
+        
+        // TODO: Implement the actual trade execution logic
+/// Core implementation of SmartTradeExecutor
+///
+/// This file contains the main executor struct that manages the entire
+/// smart trading process, orchestrates token analysis, trade strategies,
+/// and market monitoring.
+///
+/// # Cải tiến đã thực hiện:
+/// - Loại bỏ các phương thức trùng lặp với analys modules
+/// - Sử dụng API từ analys/token_status và analys/risk_analyzer
+/// - Áp dụng xử lý lỗi chuẩn với anyhow::Result thay vì unwrap/expect
+/// - Đảm bảo thread safety trong các phương thức async với kỹ thuật "clone and drop" để tránh deadlock
+/// - Tối ưu hóa việc xử lý các futures với tokio::join! cho các tác vụ song song
+/// - Xử lý các trường hợp giá trị null an toàn với match/Option
+/// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+
+// External imports
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
+use tokio::time::sleep;
+use chrono::Utc;
+use futures::future::join_all;
+use tracing::{debug, error, info, warn};
+use anyhow::{Result, Context, anyhow, bail};
+use uuid;
+use async_trait::async_trait;
+use serde::{Serialize, Deserialize};
+use rand::Rng;
+use std::collections::HashSet;
+use futures::future::Future;
+
+// Internal imports
+use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::analys::mempool::{MempoolAnalyzer, MempoolTransaction};
+use crate::analys::risk_analyzer::{RiskAnalyzer, RiskFactor, TradeRecommendation, TradeRiskAnalysis};
+use crate::analys::token_status::{
+    ContractInfo, LiquidityEvent, LiquidityEventType, TokenSafety, TokenStatus,
+    TokenIssue, IssueSeverity, abnormal_liquidity_events, detect_dynamic_tax, 
+    detect_hidden_fees, analyze_owner_privileges, is_proxy_contract, blacklist::{has_blacklist_or_whitelist, has_trading_cooldown, has_max_tx_or_wallet_limit},
+};
+use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+use crate::tradelogic::traits::{
+    TradeExecutor, RiskManager, TradeCoordinator, ExecutorType, SharedOpportunity, 
+    SharedOpportunityType, OpportunityPriority
+};
+
+// Module imports
+use super::types::{
+    SmartTradeConfig, 
+    TradeResult, 
+    TradeStatus, 
+    TradeStrategy, 
+    TradeTracker
+};
+use super::constants::*;
+use super::token_analysis::*;
+use super::trade_strategy::*;
+use super::alert::*;
+use super::optimization::*;
+use super::security::*;
+use super::analys_client::SmartTradeAnalysisClient;
+
+/// Executor for smart trading strategies
+#[derive(Clone)]
+pub struct SmartTradeExecutor {
+    /// EVM adapter for each chain
+    pub(crate) evm_adapters: HashMap<u32, Arc<EvmAdapter>>,
+    
+    /// Analysis client that provides access to all analysis services
+    pub(crate) analys_client: Arc<SmartTradeAnalysisClient>,
+    
+    /// Risk analyzer (legacy - kept for backward compatibility)
+    pub(crate) risk_analyzer: Arc<RwLock<RiskAnalyzer>>,
+    
+    /// Mempool analyzer for each chain (legacy - kept for backward compatibility)
+    pub(crate) mempool_analyzers: HashMap<u32, Arc<MempoolAnalyzer>>,
+    
+    /// Configuration
+    pub(crate) config: RwLock<SmartTradeConfig>,
+    
+    /// Active trades being monitored
+    pub(crate) active_trades: RwLock<Vec<TradeTracker>>,
+    
+    /// History of completed trades
+    pub(crate) trade_history: RwLock<Vec<TradeResult>>,
+    
+    /// Running state
+    pub(crate) running: RwLock<bool>,
+    
+    /// Coordinator for shared state between executors
+    pub(crate) coordinator: Option<Arc<dyn TradeCoordinator>>,
+    
+    /// Unique ID for this executor instance
+    pub(crate) executor_id: String,
+    
+    /// Subscription ID for coordinator notifications
+    pub(crate) coordinator_subscription: RwLock<Option<String>>,
+}
+
+// Implement the TradeExecutor trait for SmartTradeExecutor
+#[async_trait]
+impl TradeExecutor for SmartTradeExecutor {
+    /// Configuration type
+    type Config = SmartTradeConfig;
+    
+    /// Result type for trades
+    type TradeResult = TradeResult;
+    
+    /// Start the trading executor
+    async fn start(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        if *running {
+            return Ok(());
+        }
+        
+        *running = true;
+        
+        // Register with coordinator if available
+        if self.coordinator.is_some() {
+            self.register_with_coordinator().await?;
+        }
+        
+        // Phục hồi trạng thái trước khi khởi động
+        self.restore_state().await?;
+        
+        // Khởi động vòng lặp theo dõi
+        let executor = Arc::new(self.clone_with_config().await);
+        
+        tokio::spawn(async move {
+            executor.monitor_loop().await;
+        });
+        
+        Ok(())
+    }
+    
+    /// Stop the trading executor
+    async fn stop(&self) -> anyhow::Result<()> {
+        let mut running = self.running.write().await;
+        *running = false;
+        
+        // Unregister from coordinator if available
+        if self.coordinator.is_some() {
+            self.unregister_from_coordinator().await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Update the executor's configuration
+    async fn update_config(&self, config: Self::Config) -> anyhow::Result<()> {
+        let mut current_config = self.config.write().await;
+        *current_config = config;
+        Ok(())
+    }
+    
+    /// Add a new blockchain to monitor
+    async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>) -> anyhow::Result<()> {
+        // Create a mempool analyzer if it doesn't exist
+        let mempool_analyzer = if let Some(analyzer) = self.mempool_analyzers.get(&chain_id) {
+            analyzer.clone()
+        } else {
+            Arc::new(MempoolAnalyzer::new(chain_id, adapter.clone()))
+        };
+        
+        self.evm_adapters.insert(chain_id, adapter);
+        self.mempool_analyzers.insert(chain_id, mempool_analyzer);
+        
+        Ok(())
+    }
+    
+    /// Execute a trade with the specified parameters
+    async fn execute_trade(&self, params: TradeParams) -> anyhow::Result<Self::TradeResult> {
+        // Find the appropriate adapter
+        let adapter = match self.evm_adapters.get(&params.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        };
+        
+        // Validate trade parameters
+        if params.amount <= 0.0 {
+            return Err(anyhow::anyhow!("Invalid trade amount: {}", params.amount));
+        }
+        
+        // Create a trade tracker
+        let trade_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().timestamp() as u64;
+        
+        let tracker = TradeTracker {
+            id: trade_id.clone(),
+            chain_id: params.chain_id,
+            token_address: params.token_address.clone(),
+            amount: params.amount,
+            entry_price: 0.0, // Will be updated after trade execution
+            current_price: 0.0,
+            status: TradeStatus::Pending,
+            strategy: if let Some(strategy) = &params.strategy {
+                match strategy.as_str() {
+                    "quick" => TradeStrategy::QuickFlip,
+                    "tsl" => TradeStrategy::TrailingStopLoss,
+                    "hodl" => TradeStrategy::LongTerm,
+                    _ => TradeStrategy::default(),
+                }
+            } else {
+                TradeStrategy::default()
+            },
+            created_at: now,
+            updated_at: now,
+            stop_loss: params.stop_loss,
+            take_profit: params.take_profit,
+            max_hold_time: params.max_hold_time.unwrap_or(DEFAULT_MAX_HOLD_TIME),
+            custom_params: params.custom_params.unwrap_or_default(),
+        };
+        
+        // TODO: Implement the actual trade execution logic
+        // This is a simplified version - in a real implementation, you would:
+        // 1. Execute the trade
+        // 2. Update the trade tracker with actual execution details
+        // 3. Add it to active trades
+        
+        let result = TradeResult {
+            id: trade_id,
+            chain_id: params.chain_id,
+            token_address: params.token_address,
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: params.amount,
+            entry_price: 0.0,                  // Would be populated from actual execution
+            exit_price: None,
+            current_price: 0.0,
+            profit_loss: 0.0,
+            status: TradeStatus::Pending,
+            strategy: tracker.strategy.clone(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        // Add to active trades
+        {
+            let mut active_trades = self.active_trades.write().await;
+            active_trades.push(tracker);
+        }
+        
+        Ok(result)
+    }
+    
+    /// Get the current status of an active trade
+    async fn get_trade_status(&self, trade_id: &str) -> anyhow::Result<Option<Self::TradeResult>> {
+        // Check active trades
+        {
+            let active_trades = self.active_trades.read().await;
+            if let Some(trade) = active_trades.iter().find(|t| t.id == trade_id) {
+                return Ok(Some(self.tracker_to_result(trade).await?));
+            }
+        }
+        
+        // Check trade history
+        let trade_history = self.trade_history.read().await;
+        let result = trade_history.iter()
+            .find(|r| r.id == trade_id)
+            .cloned();
+            
+        Ok(result)
+    }
+    
+    /// Get all active trades
+    async fn get_active_trades(&self) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let active_trades = self.active_trades.read().await;
+        let mut results = Vec::with_capacity(active_trades.len());
+        
+        for tracker in active_trades.iter() {
+            results.push(self.tracker_to_result(tracker).await?);
+        }
+        
+        Ok(results)
+    }
+    
+    /// Get trade history within a specific time range
+    async fn get_trade_history(&self, from_timestamp: u64, to_timestamp: u64) -> anyhow::Result<Vec<Self::TradeResult>> {
+        let trade_history = self.trade_history.read().await;
+        
+        let filtered_history = trade_history.iter()
+            .filter(|trade| trade.created_at >= from_timestamp && trade.created_at <= to_timestamp)
+            .cloned()
+            .collect();
+            
+        Ok(filtered_history)
+    }
+    
+    /// Evaluate a token for potential trading
+    async fn evaluate_token(&self, chain_id: u32, token_address: &str) -> anyhow::Result<Option<TokenSafety>> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("No adapter found for chain ID {}", chain_id)),
+        };
+        
+        // Sử dụng analys_client để phân tích token
+        let token_safety_result = self.analys_client.token_provider()
+            .analyze_token(chain_id, token_address).await
+            .context(format!("Không thể phân tích token {}", token_address))?;
+        
+        // Nếu không phân tích được token, trả về None
+        if !token_safety_result.is_valid() {
+            info!("Token {} không hợp lệ hoặc không thể phân tích", token_address);
+            return Ok(None);
+        }
+        
+        // Lấy thêm thông tin chi tiết từ contract
+        let contract_details = self.analys_client.token_provider()
+            .get_contract_details(chain_id, token_address).await
+            .context(format!("Không thể lấy chi tiết contract cho token {}", token_address))?;
+        
+        // Đánh giá rủi ro của token
+        let risk_analysis = self.analys_client.risk_provider()
+            .analyze_token_risk(chain_id, token_address).await
+            .context(format!("Không thể phân tích rủi ro cho token {}", token_address))?;
+        
+        // Log thông tin phân tích
+        info!(
+            "Phân tích token {} trên chain {}: risk_score={}, honeypot={:?}, buy_tax={:?}, sell_tax={:?}",
+            token_address,
+            chain_id,
+            risk_analysis.risk_score,
+            token_safety_result.is_honeypot,
+            token_safety_result.buy_tax,
+            token_safety_result.sell_tax
+        );
+        
+        Ok(Some(token_safety_result))
+    }
+
+    /// Đánh giá rủi ro của token bằng cách sử dụng analys_client
+    async fn analyze_token_risk(&self, chain_id: u32, token_address: &str) -> anyhow::Result<RiskScore> {
+        // Sử dụng phương thức analyze_risk từ analys_client
+        self.analys_client.analyze_risk(chain_id, token_address).await
+            .context(format!("Không thể đánh giá rủi ro cho token {}", token_address))
+    }
+}
+
+impl SmartTradeExecutor {
+    /// Create a new SmartTradeExecutor
+    pub fn new() -> Self {
+        let executor_id = format!("smart-trade-{}", uuid::Uuid::new_v4());
+        
+        let evm_adapters = HashMap::new();
+        let analys_client = Arc::new(SmartTradeAnalysisClient::new(evm_adapters.clone()));
+        
+        Self {
+            evm_adapters,
+            analys_client,
+            risk_analyzer: Arc::new(RwLock::new(RiskAnalyzer::new())),
+            mempool_analyzers: HashMap::new(),
+            config: RwLock::new(SmartTradeConfig::default()),
+            active_trades: RwLock::new(Vec::new()),
+            trade_history: RwLock::new(Vec::new()),
+            running: RwLock::new(false),
+            coordinator: None,
+            executor_id,
+            coordinator_subscription: RwLock::new(None),
+        }
+    }
+    
+    /// Set coordinator for shared state
+    pub fn with_coordinator(mut self, coordinator: Arc<dyn TradeCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
+    }
+    
+    /// Convert a trade tracker to a trade result
+    async fn tracker_to_result(&self, tracker: &TradeTracker) -> anyhow::Result<TradeResult> {
+        let result = TradeResult {
+            id: tracker.id.clone(),
+            chain_id: tracker.chain_id,
+            token_address: tracker.token_address.clone(),
+            token_name: "Unknown".to_string(), // Would be populated from token data
+            token_symbol: "UNK".to_string(),   // Would be populated from token data
+            amount: tracker.amount,
+            entry_price: tracker.entry_price,
+            exit_price: None,
+            current_price: tracker.current_price,
+            profit_loss: if tracker.entry_price > 0.0 && tracker.current_price > 0.0 {
+                (tracker.current_price - tracker.entry_price) / tracker.entry_price * 100.0
+            } else {
+                0.0
+            },
+            status: tracker.status.clone(),
+            strategy: tracker.strategy.clone(),
+            created_at: tracker.created_at,
+            updated_at: tracker.updated_at,
+            completed_at: None,
+            exit_reason: None,
+            gas_used: 0.0,
+            safety_score: 0,
+            risk_factors: Vec::new(),
+        };
+        
+        Ok(result)
+    }
+    
+    /// Vòng lặp theo dõi chính
+    async fn monitor_loop(&self) {
+        let mut counter = 0;
+        let mut persist_counter = 0;
+        
+        while let true_val = *self.running.read().await {
+            if !true_val {
+                break;
+            }
+            
+            // Kiểm tra và cập nhật tất cả các giao dịch đang active
+            if let Err(e) = self.check_active_trades().await {
+                error!("Error checking active trades: {}", e);
+            }
+            
+            // Tăng counter và dọn dẹp lịch sử giao dịch định kỳ
+            counter += 1;
+            if counter >= 100 {
+                self.cleanup_trade_history().await;
+                counter = 0;
+            }
+            
+            // Lưu trạng thái vào bộ nhớ định kỳ
+            persist_counter += 1;
+            if persist_counter >= 30 { // Lưu mỗi 30 chu kỳ (khoảng 2.5 phút với interval 5s)
+                if let Err(e) = self.update_and_persist_trades().await {
+                    error!("Failed to persist bot state: {}", e);
+                }
+                persist_counter = 0;
+            }
+            
+            // Tính toán thời gian sleep thích ứng
+            let sleep_time = self.adaptive_sleep_time().await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_time)).await;
+        }
+        
+        // Lưu trạng thái trước khi dừng
+        if let Err(e) = self.update_and_persist_trades().await {
+            error!("Failed to persist bot state before stopping: {}", e);
+        }
+    }
+    
+    /// Quét cơ hội giao dịch mới
+    async fn scan_trading_opportunities(&self) {
+        // Kiểm tra cấu hình
+        let config = self.config.read().await;
+        if !config.enabled || !config.auto_trade {
+            return;
+        }
+        
+        // Kiểm tra số lượng giao dịch hiện tại
+        let active_trades = self.active_trades.read().await;
+        if active_trades.len() >= config.max_concurrent_trades as usize {
+            return;
+        }
+        
+        // Chạy quét cho từng chain
+        let futures = self.mempool_analyzers.iter().map(|(chain_id, analyzer)| {
+            self.scan_chain_opportunities(*chain_id, analyzer)
+        });
+        join_all(futures).await;
+    }
+    
+    /// Quét cơ hội giao dịch trên một chain cụ thể
+    async fn scan_chain_opportunities(&self, chain_id: u32, analyzer: &Arc<MempoolAnalyzer>) -> anyhow::Result<()> {
+        let config = self.config.read().await;
+        
+        // Lấy các giao dịch lớn từ mempool
+        let large_txs = match analyzer.get_large_transactions(QUICK_TRADE_MIN_BNB).await {
+            Ok(txs) => txs,
+            Err(e) => {
+                error!("Không thể lấy các giao dịch lớn từ mempool: {}", e);
+                return Err(anyhow::anyhow!("Lỗi khi lấy giao dịch từ mempool: {}", e));
+            }
+        };
+        
+        // Phân tích từng giao dịch
+        for tx in large_txs {
+            // Kiểm tra nếu token không trong blacklist và đáp ứng điều kiện
+            if let Some(to_token) = &tx.to_token {
+                let token_address = &to_token.address;
+                
+                // Kiểm tra blacklist và whitelist
+                if config.token_blacklist.contains(token_address) {
+                    debug!("Bỏ qua token {} trong blacklist", token_address);
+                    continue;
+                }
+                
+                if !config.token_whitelist.is_empty() && !config.token_whitelist.contains(token_address) {
+                    debug!("Bỏ qua token {} không trong whitelist", token_address);
+                    continue;
+                }
+                
+                // Kiểm tra nếu giao dịch đủ lớn
+                if tx.value >= QUICK_TRADE_MIN_BNB {
+                    // Phân tích token
+                    if let Err(e) = self.analyze_and_trade_token(chain_id, token_address, tx).await {
+                        error!("Lỗi khi phân tích và giao dịch token {}: {}", token_address, e);
+                        // Tiếp tục với token tiếp theo, không dừng lại
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Phân tích token và thực hiện giao dịch nếu an toàn
+    async fn analyze_and_trade_token(&self, chain_id: u32, token_address: &str, tx: MempoolTransaction) -> anyhow::Result<()> {
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => {
+                return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain ID {}", chain_id));
+            }
+        };
+        
+        // THÊM: Xác thực kỹ lưỡng dữ liệu mempool trước khi tiếp tục phân tích
+        info!("Xác thực dữ liệu mempool cho token {} từ giao dịch {}", token_address, tx.tx_hash);
+        let mempool_validation = match self.validate_mempool_data(chain_id, token_address, &tx).await {
+            Ok(validation) => validation,
+            Err(e) => {
+                error!("Lỗi khi xác thực dữ liệu mempool: {}", e);
+                self.log_trade_decision(
+                    "new_opportunity", 
+                    token_address, 
+                    TradeStatus::Canceled, 
+                    &format!("Lỗi xác thực mempool: {}", e), 
+                    chain_id
+                ).await;
+                return Err(anyhow::anyhow!("Lỗi xác thực dữ liệu mempool: {}", e));
+            }
+        };
+        
+        // Nếu dữ liệu mempool không hợp lệ, dừng phân tích
+        if !mempool_validation.is_valid {
+            let reasons = mempool_validation.reasons.join(", ");
+            info!("Dữ liệu mempool không đáng tin cậy cho token {}: {}", token_address, reasons);
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Dữ liệu mempool không đáng tin cậy: {}", reasons), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        info!("Xác thực mempool thành công với điểm tin cậy: {}/100", mempool_validation.confidence_score);
+        
+        // Code hiện tại: Sử dụng analys_client để kiểm tra an toàn token
+        let security_check_future = self.analys_client.verify_token_safety(chain_id, token_address);
+        
+        // Code hiện tại: Sử dụng analys_client để đánh giá rủi ro
+        let risk_analysis_future = self.analys_client.analyze_risk(chain_id, token_address);
+        
+        // Thực hiện song song các phân tích
+        let (security_check_result, risk_analysis) = tokio::join!(security_check_future, risk_analysis_future);
+        
+        // Xử lý kết quả kiểm tra an toàn
+        let security_check = match security_check_result {
+            Ok(result) => result,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi kiểm tra an toàn token: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi kiểm tra an toàn token: {}", e));
+            }
+        };
+        
+        // Xử lý kết quả phân tích rủi ro
+        let risk_score = match risk_analysis {
+            Ok(score) => score,
+            Err(e) => {
+                self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                    &format!("Lỗi khi phân tích rủi ro: {}", e), chain_id).await;
+                return Err(anyhow::anyhow!("Lỗi khi phân tích rủi ro: {}", e));
+            }
+        };
+        
+        // Kiểm tra xem token có an toàn không
+        if !security_check.is_safe {
+            let issues_str = security_check.issues.iter()
+                .map(|issue| format!("{:?}", issue))
+                .collect::<Vec<String>>()
+                .join(", ");
+                
+            self.log_trade_decision("new_opportunity", token_address, TradeStatus::Canceled, 
+                &format!("Token không an toàn: {}", issues_str), chain_id).await;
+            return Ok(());
+        }
+        
+        // Lấy cấu hình hiện tại
+        let config = self.config.read().await;
+        
+        // Kiểm tra điểm rủi ro
+        if risk_score.score > config.max_risk_score {
+            self.log_trade_decision(
+                "new_opportunity", 
+                token_address, 
+                TradeStatus::Canceled, 
+                &format!("Điểm rủi ro quá cao: {}/{}", risk_score.score, config.max_risk_score), 
+                chain_id
+            ).await;
+            return Ok(());
+        }
+        
+        // Xác định chiến lược giao dịch dựa trên mức độ rủi ro
+        let strategy = if risk_score.score < 30 {
+            TradeStrategy::Smart  // Rủi ro thấp, dùng chiến lược thông minh với TSL
+        } else {
+            TradeStrategy::Quick  // Rủi ro cao hơn, dùng chiến lược nhanh
+        };
+        
+        // Xác định số lượng giao dịch dựa trên cấu hình và mức độ rủi ro
+        let base_amount = if risk_score.score < 20 {
+            config.trade_amount_high_confidence
+        } else if risk_score.score < 40 {
+            config.trade_amount_medium_confidence
+        } else {
+            config.trade_amount_low_confidence
+        };
+        
+        // Tạo tham số giao dịch
+        let trade_params = crate::types::TradeParams {
+            chain_type: crate::types::ChainType::EVM(chain_id),
+            token_address: token_address.to_string(),
+            amount: base_amount,
+            slippage: 1.0, // 1% slippage mặc định cho giao dịch tự động
+            trade_type: crate::types::TradeType::Buy,
+            deadline_minutes: 2, // Thời hạn 2 phút
+            router_address: String::new(), // Dùng router mặc định
+            gas_limit: None,
+            gas_price: None,
+            strategy: Some(format!("{:?}", strategy).to_lowercase()),
+            stop_loss: if strategy == TradeStrategy::Smart { Some(5.0) } else { None }, // 5% stop loss for Smart strategy
+            take_profit: if strategy == TradeStrategy::Smart { Some(20.0) } else { Some(10.0) }, // 20% take profit for Smart, 10% for Quick
+            max_hold_time: None, // Sẽ được thiết lập dựa trên chiến lược
+            custom_params: None,
+        };
+        
 /// Core implementation of SmartTradeExecutor
 ///
 /// This file contains the main executor struct that manages the entire
@@ -9368,7 +11805,7 @@ impl SmartTradeExecutor {
                 new_tp = Some(adjusted_tp);
             }
             
-            info!("Adjusted take profit from ${:.6} to ${:.6}", tp, new_tp.unwrap());
+            info!("Adjusted take profit from ${:.6} to ${:.6}", tp, new_tp.unwrap_or(0.0));
         }
         
         // Điều chỉnh SL
@@ -9381,7 +11818,7 @@ impl SmartTradeExecutor {
                 // Chỉ nâng SL nếu giá mới cao hơn SL hiện tại
                 if min_protected_price > sl {
                     new_sl = Some(min_protected_price);
-                    info!("Raised stop loss to ${:.6} to protect profit", new_sl.unwrap());
+                    info!("Raised stop loss to ${:.6} to protect profit", new_sl.unwrap_or(0.0));
                 }
             } else {
                 // Điều chỉnh SL dựa trên ATR và các hệ số
@@ -9391,7 +11828,7 @@ impl SmartTradeExecutor {
                 // Nếu SL hiện tại thấp hơn giới hạn tối thiểu, điều chỉnh lên
                 if sl < min_allowed_sl {
                     new_sl = Some(min_allowed_sl);
-                    info!("Adjusted stop loss from ${:.6} to ${:.6} based on ATR", sl, new_sl.unwrap());
+                    info!("Adjusted stop loss from ${:.6} to ${:.6} based on ATR", sl, new_sl.unwrap_or(0.0));
                 }
             }
         }
@@ -12920,7 +15357,7 @@ impl SmartTradeExecutor {
                 new_tp = Some(adjusted_tp);
             }
             
-            info!("Adjusted take profit from ${:.6} to ${:.6}", tp, new_tp.unwrap());
+            info!("Adjusted take profit from ${:.6} to ${:.6}", tp, new_tp.unwrap_or(0.0));
         }
         
         // Điều chỉnh SL
@@ -12933,7 +15370,7 @@ impl SmartTradeExecutor {
                 // Chỉ nâng SL nếu giá mới cao hơn SL hiện tại
                 if min_protected_price > sl {
                     new_sl = Some(min_protected_price);
-                    info!("Raised stop loss to ${:.6} to protect profit", new_sl.unwrap());
+                    info!("Raised stop loss to ${:.6} to protect profit", new_sl.unwrap_or(0.0));
                 }
             } else {
                 // Điều chỉnh SL dựa trên ATR và các hệ số
@@ -12943,7 +15380,7 @@ impl SmartTradeExecutor {
                 // Nếu SL hiện tại thấp hơn giới hạn tối thiểu, điều chỉnh lên
                 if sl < min_allowed_sl {
                     new_sl = Some(min_allowed_sl);
-                    info!("Adjusted stop loss from ${:.6} to ${:.6} based on ATR", sl, new_sl.unwrap());
+                    info!("Adjusted stop loss from ${:.6} to ${:.6} based on ATR", sl, new_sl.unwrap_or(0.0));
                 }
             }
         }

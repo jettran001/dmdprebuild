@@ -691,12 +691,18 @@ mod tests {
         assert!(config.chains.contains_key(&1)); // Ethereum
         assert!(config.chains.contains_key(&56)); // BSC
         
-        let eth_config = config.chains.get(&1).unwrap();
-        assert_eq!(eth_config.name, "Ethereum");
-        assert_eq!(eth_config.native_token, "ETH");
+        if let Some(eth_config) = config.chains.get(&1) {
+            assert_eq!(eth_config.name, "Ethereum");
+            assert_eq!(eth_config.native_token, "ETH");
+        } else {
+            panic!("Ethereum config should be present");
+        }
         
-        let bsc_config = config.chains.get(&56).unwrap();
-        assert_eq!(bsc_config.name, "BSC");
-        assert_eq!(bsc_config.native_token, "BNB");
+        if let Some(bsc_config) = config.chains.get(&56) {
+            assert_eq!(bsc_config.name, "BSC");
+            assert_eq!(bsc_config.native_token, "BNB");
+        } else {
+            panic!("BSC config should be present");
+        }
     }
 }

@@ -28,6 +28,8 @@ pub mod security;
 pub mod optimization;
 pub mod anti_mev;
 pub mod analys_client;
+pub mod utils;
+pub mod trade_execution;
 
 // Re-exports
 pub use self::executor::SmartTradeExecutor;

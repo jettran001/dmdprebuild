@@ -9,11 +9,15 @@ use clap::{Parser, Subcommand};
 use tokio::signal;
 use tracing::{info, error};
 
+// Sử dụng các API được re-export từ lib.rs thay vì truy cập trực tiếp các module con
 use snipebot::{
-    config::ConfigManager,
     AppState,
     init_logging,
     greeting,
+    config::ConfigManager,
+    config::initialize_default_config,
+    chain_adapters::evm_adapter::EvmAdapter,
+    get_global_coordinator
 };
 
 /// Command line arguments
@@ -67,6 +71,9 @@ async fn main() -> Result<()> {
     // Create config manager
     let config_manager = Arc::new(ConfigManager::new(&cli.config));
     
+    // Khởi tạo global coordinator sớm để đảm bảo tính nhất quán
+    let _coordinator = get_global_coordinator().await;
+    
     // Process commands
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Init => {
@@ -94,8 +101,8 @@ async fn main() -> Result<()> {
 async fn init_config(config_manager: Arc<ConfigManager>) -> Result<()> {
     info!("Initializing default configuration at {}", config_manager.config_path);
     
-    // Generate default config
-    let default_config = snipebot::config::initialize_default_config();
+    // Generate default config - sử dụng hàm đã re-export
+    let default_config = initialize_default_config();
     
     // Save to file
     config_manager.update_config(default_config).await?;
@@ -164,7 +171,7 @@ async fn test_chain_connection(config_manager: Arc<ConfigManager>, chain_id: u32
     info!("Testing connection to chain {} ({})", chain_config.name, chain_id);
     
     // Create EVM adapter
-    let adapter = snipebot::chain_adapters::evm_adapter::EvmAdapter::new(chain_id, chain_config);
+    let adapter = EvmAdapter::new(chain_id, chain_config);
     
     // Initialize adapter
     adapter.init().await?;

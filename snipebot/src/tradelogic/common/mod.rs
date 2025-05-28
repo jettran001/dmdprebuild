@@ -8,6 +8,7 @@ pub mod utils;
 pub mod analysis;
 pub mod gas;
 pub mod trade_execution;
+pub mod mev_detection;
 
 // Re-exports for convenience
 pub use types::*;

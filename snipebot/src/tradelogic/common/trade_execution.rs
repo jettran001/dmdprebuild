@@ -1,135 +1,201 @@
-/// Common trade execution utilities
-/// 
-/// This module provides functions that are used by both SmartTradeExecutor and ManualTradeExecutor
-/// to reduce code duplication and maintain consistent behavior.
+/// Common trade execution functionality
+///
+/// This module provides shared functionality for executing trades
+/// that can be used by both smart_trade and manual_trade modules.
+/// These functions help reduce code duplication and ensure consistent trade execution.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use anyhow::{Result, Context, anyhow};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use chrono::Utc;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TradeParams, TradeType, ChainType, TokenPair};
-use crate::analys::token_status::TokenSafety;
+use crate::types::{TradeParams, TradeType, TokenPair};
+use super::types::{TradeStatus, ExecutionMethod, SecurityCheckResult, TokenIssue};
+use super::utils::{
+    wait_for_transaction, 
+    validate_trade_params,
+    execute_blockchain_transaction,
+    simulate_trade_execution,
+    perform_token_security_check
+};
 
-use super::types::{TokenIssue, SecurityCheckResult, TradeStatus};
-use super::utils::{validate_trade_params, generate_trade_id, simulate_trade_execution, wait_for_transaction};
-
-/// Basic trade execution flow
-/// 
-/// Handles the common steps for executing a trade:
-/// 1. Validate parameters
-/// 2. Create trade ID
-/// 3. Perform security checks
-/// 4. Simulate transaction
-/// 5. Execute transaction
-/// 6. Monitor transaction
-/// 
+/// Standard trade execution flow
+///
+/// Provides a standardized flow for executing trades, including validation,
+/// security checks, simulation, execution, and confirmation.
+///
 /// # Arguments
 /// * `params` - Trade parameters
-/// * `adapter` - EVM adapter for chain
-/// * `wallet_address` - Wallet address to execute from
-/// 
+/// * `adapter` - EVM adapter for the chain
+/// * `wallet_address` - Address of the wallet executing the trade
+/// * `security_threshold` - Risk score threshold (0-100, lower is safer)
+/// * `transaction_timeout` - Timeout for transaction confirmation (seconds)
+///
 /// # Returns
-/// * `Result<(String, String, f64, f64, Option<SecurityCheckResult>)>` - 
-///   (trade_id, tx_hash, gas_used, price, security_check)
+/// * `Result<(String, f64)>` - (tx_hash, amount_received) if successful
 pub async fn execute_trade_flow(
     params: &TradeParams,
     adapter: &Arc<EvmAdapter>,
-    wallet_address: &str
-) -> Result<(String, String, f64, f64, Option<SecurityCheckResult>)> {
-    // 1. Validate parameters
-    validate_trade_params(params, adapter).await?;
+    wallet_address: &str,
+    security_threshold: u8,
+    transaction_timeout: u64
+) -> Result<(String, f64)> {
+    // Step 1: Validate trade parameters
+    validate_trade_params(params, adapter).await
+        .context("Failed to validate trade parameters")?;
     
-    // 2. Create trade ID and timestamp
-    let trade_id = generate_trade_id();
-    let now = Utc::now().timestamp() as u64;
+    // Step 2: Perform security check for token
+    if params.trade_type == TradeType::Buy {
+        let security_result = perform_token_security_check(&params.token_address, adapter).await
+            .context("Failed to perform security check")?;
+        
+        if !security_result.safe_to_trade || security_result.risk_score > security_threshold as u8 {
+            return Err(anyhow!(
+                "Token failed security check, risk score: {}, issues: {:?}",
+                security_result.risk_score,
+                security_result.issues
+            ));
+        }
+        
+        // Special checks for critical security issues
+        let has_critical_issue = security_result.issues.iter().any(|issue| matches!(
+            issue,
+            TokenIssue::Honeypot | TokenIssue::HighSellTax | TokenIssue::ContractSelfDestruct
+        ));
+        
+        if has_critical_issue {
+            return Err(anyhow!("Token has critical security issues: {:?}", security_result.issues));
+        }
+    }
     
-    // 3. Perform security checks on token
-    let security_check = match adapter.analyze_token_safety(&params.token_address).await {
-        Ok(safety) => {
-            // Convert to SecurityCheckResult
-            let issues = safety.rug_indicators.iter()
-                .map(|issue| match issue.as_str() {
-                    "honeypot" => TokenIssue::Honeypot,
-                    "high_buy_tax" => TokenIssue::HighBuyTax,
-                    "high_sell_tax" => TokenIssue::HighSellTax,
-                    "blacklist" => TokenIssue::HasBlacklist,
-                    "owner_privileges" => TokenIssue::ExcessiveOwnerPrivileges,
-                    "proxy" => TokenIssue::ProxyImplementation,
-                    _ => TokenIssue::Other(issue.clone())
-                })
-                .collect();
-            
-            Some(SecurityCheckResult {
-                token_address: params.token_address.clone(),
-                issues,
-                risk_score: safety.risk_score as u8,
-                safe_to_trade: safety.risk_score < 70,
-                extra_info: HashMap::new(),
-            })
-        }
-        Err(e) => {
-            warn!("Failed to analyze token safety: {}", e);
-            None
-        }
+    // Step 3: Simulate trade to get expected output and gas
+    let (expected_output, estimated_gas) = simulate_trade_execution(params, adapter).await
+        .context("Failed to simulate trade execution")?;
+    
+    info!(
+        "Trade simulation successful. Expected output: {}, Estimated gas: {}",
+        expected_output, estimated_gas
+    );
+    
+    // Step 4: Execute the transaction
+    let (tx_hash, gas_used) = execute_blockchain_transaction(params, adapter, wallet_address).await
+        .context("Failed to execute transaction")?;
+    
+    info!(
+        "Transaction submitted: {}, Gas used: {}",
+        tx_hash, gas_used
+    );
+    
+    // Step 5: Wait for transaction confirmation
+    let success = wait_for_transaction(&tx_hash, adapter, transaction_timeout).await
+        .context("Failed while waiting for transaction confirmation")?;
+    
+    if !success {
+        return Err(anyhow!("Transaction failed or timed out: {}", tx_hash));
+    }
+    
+    info!("Transaction confirmed successfully: {}", tx_hash);
+    
+    Ok((tx_hash, expected_output))
+}
+
+/// Execute a token approval transaction
+///
+/// Approves the DEX router to spend tokens on behalf of the wallet
+///
+/// # Arguments
+/// * `token_address` - Address of the token to approve
+/// * `adapter` - EVM adapter for the chain
+/// * `wallet_address` - Address of the wallet executing the approval
+/// * `amount` - Amount to approve (or max uint256 if None)
+///
+/// # Returns
+/// * `Result<String>` - Transaction hash if successful
+pub async fn execute_token_approval(
+    token_address: &str,
+    adapter: &Arc<EvmAdapter>,
+    wallet_address: &str,
+    amount: Option<f64>
+) -> Result<String> {
+    // Create approval params
+    let params = TradeParams {
+        trade_type: TradeType::Approve,
+        token_address: token_address.to_string(),
+        chain_id: adapter.get_chain_id(),
+        amount: amount.unwrap_or(f64::MAX), // Use max amount if not specified
+        ..Default::default()
     };
     
-    // 4. Simulate transaction
-    let (expected_output, estimated_gas) = simulate_trade_execution(params, adapter).await?;
+    // Execute approval transaction
+    let (tx_hash, _) = execute_blockchain_transaction(&params, adapter, wallet_address).await
+        .context("Failed to execute approval transaction")?;
     
-    // 5. Execute transaction
-    let (tx_hash, gas_used) = match params.trade_type {
-        TradeType::Buy => {
-            // Get base token from chain
-            let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id {
-                    1 => "ETH",   // Ethereum
-                    56 => "BNB",  // Binance Smart Chain
-                    137 => "MATIC", // Polygon
-                    43114 => "AVAX", // Avalanche
-                    _ => "ETH"    // Default
-                }.to_string()
-            });
-            
-            // Execute swap
-            adapter.execute_swap(
-                &base_token,
-                &params.token_address,
-                params.amount,
-                wallet_address,
-                params.slippage.unwrap_or(1.0)
-            ).await.context("Failed to execute buy transaction")?
-        }
-        TradeType::Sell => {
-            // Get base token from chain
-            let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id {
-                    1 => "ETH",   // Ethereum
-                    56 => "BNB",  // Binance Smart Chain
-                    137 => "MATIC", // Polygon
-                    43114 => "AVAX", // Avalanche
-                    _ => "ETH"    // Default
-                }.to_string()
-            });
-            
-            // Execute swap
-            adapter.execute_swap(
-                &params.token_address,
-                &base_token,
-                params.amount,
-                wallet_address,
-                params.slippage.unwrap_or(1.0)
-            ).await.context("Failed to execute sell transaction")?
-        }
-        _ => {
-            return Err(anyhow!("Unsupported trade type for execution: {:?}", params.trade_type));
-        }
+    // Wait for transaction confirmation
+    let success = wait_for_transaction(&tx_hash, adapter, 60).await
+        .context("Failed while waiting for approval confirmation")?;
+    
+    if !success {
+        return Err(anyhow!("Approval transaction failed: {}", tx_hash));
+    }
+    
+    Ok(tx_hash)
+}
+
+/// Check if token approval is needed
+///
+/// Checks if the wallet has already approved enough tokens for trading
+///
+/// # Arguments
+/// * `token_address` - Address of the token to check
+/// * `adapter` - EVM adapter for the chain
+/// * `wallet_address` - Address of the wallet
+/// * `amount_needed` - Amount needed for the trade
+///
+/// # Returns
+/// * `Result<bool>` - True if approval is needed, False otherwise
+pub async fn is_approval_needed(
+    token_address: &str,
+    adapter: &Arc<EvmAdapter>,
+    wallet_address: &str,
+    amount_needed: f64
+) -> Result<bool> {
+    let allowance = adapter.get_token_allowance(token_address, wallet_address)
+        .await
+        .context("Failed to get token allowance")?;
+    
+    Ok(allowance < amount_needed)
+}
+
+/// Verify transaction success and calculate profit/loss
+///
+/// # Arguments
+/// * `adapter` - EVM adapter for the chain
+/// * `tx_hash` - Transaction hash
+/// * `initial_amount` - Initial amount invested
+/// * `token_address` - Address of the token
+///
+/// # Returns
+/// * `Result<(f64, f64)>` - (amount_received, profit_percentage)
+pub async fn verify_transaction_result(
+    adapter: &Arc<EvmAdapter>,
+    tx_hash: &str,
+    initial_amount: f64,
+    token_address: &str
+) -> Result<(f64, f64)> {
+    // Get transaction details
+    let tx_details = adapter.get_transaction_details(tx_hash)
+        .await
+        .context("Failed to get transaction details")?;
+    
+    // Calculate amount received based on transaction logs
+    let amount_received = tx_details.amount_received.unwrap_or(0.0);
+    
+    // Calculate profit/loss percentage
+    let profit_percentage = if initial_amount > 0.0 {
+        ((amount_received - initial_amount) / initial_amount) * 100.0
+    } else {
+        0.0
     };
     
-    // Calculate price
-    let price = if expected_output > 0.0 { params.amount / expected_output } else { 0.0 };
-    
-    Ok((trade_id, tx_hash, gas_used, price, security_check))
+    Ok((amount_received, profit_percentage))
 } 

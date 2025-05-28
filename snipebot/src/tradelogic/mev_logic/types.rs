@@ -197,7 +197,7 @@ pub struct JITLiquidityConfig {
     /// Maximum capital allocation (USD)
     pub max_capital_allocation_usd: f64,
     /// Target pools for JIT
-    pub target_pools: std::collections::HashSet<String>,
+    pub target_pools: HashSet<String>,
     /// Blocks to monitor in advance 
     pub monitor_blocks_ahead: u64,
     /// Maximum transaction delay (ms)
@@ -226,21 +226,21 @@ pub struct CrossDomainMevConfig {
     /// Enabled state
     pub enabled: bool,
     /// Supported chain pairs
-    pub supported_chains: std::collections::HashSet<(u64, u64)>,
+    pub supported_chains: HashSet<(u64, u64)>,
     /// Minimum profit threshold (USD)
     pub min_profit_threshold_usd: f64,
     /// Maximum latency tolerance (ms)
     pub max_latency_ms: u64,
     /// Bridge providers (key=provider name, value=endpoint URL)
-    pub bridge_providers: std::collections::HashMap<String, String>,
+    pub bridge_providers: HashMap<String, String>,
     /// Maximum bridging cost allowed (USD)
     pub max_bridge_cost_usd: f64,
     /// Estimated bridging time per chain (key=chain ID, value=seconds)
-    pub estimated_bridge_time: std::collections::HashMap<u64, u64>,
+    pub estimated_bridge_time: HashMap<u64, u64>,
     /// Estimated bridge cost (USD)
     pub estimated_bridge_cost_usd: f64,
     /// Gas oracle endpoints
-    pub gas_oracle_endpoints: std::collections::HashMap<u64, String>,
+    pub gas_oracle_endpoints: HashMap<u64, String>,
 }
 
 impl Default for CrossDomainMevConfig {
@@ -295,9 +295,9 @@ pub struct SearcherIdentity {
     /// Preferred strategy
     pub strategy: SearcherStrategy,
     /// Builder API endpoints
-    pub builder_api_endpoints: std::collections::HashMap<u64, String>,
+    pub builder_api_endpoints: HashMap<u64, String>,
     /// Private pool endpoints
-    pub private_pool_endpoints: std::collections::HashMap<u64, String>,
+    pub private_pool_endpoints: HashMap<u64, String>,
     /// Signer wallet (address only, not private key)
     pub signer_wallet: Option<String>,
     /// Average success rate (0-1)

@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
+use tracing::info;
+use tokio::join;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::mempool::{MempoolTransaction, SuspiciousPattern};
@@ -18,6 +20,11 @@ use crate::types::TradeParams;
 use super::opportunity::{MevOpportunity, OpportunityManager};
 use super::trader_behavior::TraderBehaviorAnalysis;
 use super::types::MevConfig;
+
+use common::trading_types::{
+    PotentialFailingTx, FailureReason,
+    TraderProfile, RiskAppetite, TradingPattern
+};
 
 /// Trait for MEV bot implementations
 #[async_trait::async_trait]
@@ -38,13 +45,13 @@ pub trait MevBot: Send + Sync + 'static {
     async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>);
     
     /// Evaluate a new token
-    async fn evaluate_new_token(&self, chain_id: u32, token_address: String) -> Option<TokenSafety>;
+    async fn evaluate_new_token(&self, chain_id: u32, token_address: &str) -> Option<TokenSafety>;
     
     /// Analyze trading opportunity from evaluated token
-    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: String, token_safety: TokenSafety) -> Option<MevOpportunity>;
+    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity>;
     
     /// Monitor token liquidity
-    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: String);
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str);
     
     /// Detect suspicious transaction patterns
     async fn detect_suspicious_transaction_patterns(&self, chain_id: u32, transactions: &[MempoolTransaction]) -> Vec<SuspiciousPattern>;
@@ -145,56 +152,99 @@ impl MevBotImpl {
         }
     }
     
-    /// Register opportunity callback for a specific chain
+    /// Register a callback for new opportunities in a specific chain
+    ///
+    /// This method creates a callback function and subscribes it to the mempool provider
+    /// to receive new MEV opportunities. The callback processes opportunities and adds
+    /// them to the opportunity manager if they pass security and risk checks.
+    ///
+    /// # Thread safety
+    /// This implementation avoids cloning Arc unnecessarily and properly handles
+    /// shared state access to prevent race conditions and deadlocks.
+    ///
+    /// # Arguments
+    /// * `chain_id` - Chain ID to register for
+    ///
+    /// # Returns
+    /// * `Result<()>` - Success or error
     async fn register_chain_callback(&self, chain_id: u32) -> Result<()> {
-        // Create a callback for new opportunities
-        let opportunity_manager = self.opportunity_manager.clone();
-        let mempool_provider = self.mempool_provider.clone();
-        let token_provider = self.token_provider.clone();
-        let risk_provider = self.risk_provider.clone();
+        // Create a single callback for new opportunities, using weak references 
+        // to avoid circular references and potential memory leaks
+        let opportunity_manager = Arc::downgrade(&self.opportunity_manager);
+        let mempool_provider = Arc::downgrade(&self.mempool_provider);
+        let token_provider = Arc::downgrade(&self.token_provider);
+        let risk_provider = Arc::downgrade(&self.risk_provider);
         
-        let callback = Arc::new(move |opportunity: MevOpportunity| -> Result<()> {
-            let opportunity_manager = opportunity_manager.clone();
-            let mempool_provider = mempool_provider.clone();
-            let token_provider = token_provider.clone();
-            let risk_provider = risk_provider.clone();
+        let callback = move |opportunity: MevOpportunity| -> Result<()> {
+            // Create a task to process the opportunity asynchronously
+            let weak_opportunity_manager = opportunity_manager.clone();
+            let weak_token_provider = token_provider.clone();
+            let weak_risk_provider = risk_provider.clone();
             
             tokio::spawn(async move {
-                let mut manager = opportunity_manager.write().await;
+                // Try to upgrade weak references to strong references
+                let opportunity_manager = match weak_opportunity_manager.upgrade() {
+                    Some(manager) => manager,
+                    None => {
+                        error!("Opportunity manager has been dropped");
+                        return;
+                    }
+                };
                 
-                // Update risk for the opportunity
-                let mut opportunity = opportunity;
-                if let Ok(_) = opportunity.analyze_risk(&*risk_provider).await {
-                    // Check token safety
-                    match opportunity.verify_token_safety(&*token_provider).await {
-                        Ok(true) => {
-                            // Safe to add
-                            manager.add_opportunity(opportunity);
-                        },
-                        Ok(false) => {
-                            // Not safe, skip
-                            eprintln!("Skipping unsafe opportunity: {}", opportunity.id);
-                        },
-                        Err(e) => {
-                            // Error checking safety
-                            eprintln!("Error checking token safety: {}", e);
-                        }
+                let token_provider = match weak_token_provider.upgrade() {
+                    Some(provider) => provider,
+                    None => {
+                        error!("Token provider has been dropped");
+                        return;
+                    }
+                };
+                
+                let risk_provider = match weak_risk_provider.upgrade() {
+                    Some(provider) => provider,
+                    None => {
+                        error!("Risk provider has been dropped");
+                        return;
+                    }
+                };
+                
+                // Clone opportunity before async processing to avoid ownership issues
+                let mut opportunity = opportunity.clone();
+
+                // Use sequential processing with proper error handling
+                // First analyze risk
+                let risk_result = opportunity.analyze_risk(&*risk_provider).await;
+                if let Err(e) = risk_result {
+                    error!("Failed to analyze risk for opportunity {}: {}", opportunity.id, e);
+                    return;
+                }
+                
+                // Then verify token safety
+                match opportunity.verify_token_safety(&*token_provider).await {
+                    Ok(true) => {
+                        // Safe opportunity, add it to manager
+                        let mut manager = opportunity_manager.write().await;
+                        manager.add_opportunity(opportunity);
+                    },
+                    Ok(false) => {
+                        info!("Skipping unsafe opportunity: {}", opportunity.id);
+                    },
+                    Err(e) => {
+                        error!("Error checking token safety: {}", e);
                     }
                 }
             });
             
             Ok(())
-        });
+        };
         
-        // Register callback with mempool provider
-        let subscription_id = self.mempool_provider.subscribe_to_opportunities(
-            chain_id,
-            callback
-        ).await?;
+        // Get strong reference to mempool provider for registration
+        let mempool_provider = match mempool_provider.upgrade() {
+            Some(provider) => provider,
+            None => return Err(anyhow::anyhow!("Mempool provider has been dropped")),
+        };
         
-        // Store subscription ID
-        let mut subscription_ids = self.subscription_ids.write().await;
-        subscription_ids.insert(chain_id, subscription_id);
+        // Register the callback with the mempool provider
+        mempool_provider.register_opportunity_callback(chain_id, Box::new(callback)).await?;
         
         Ok(())
     }
@@ -349,71 +399,100 @@ impl MevBotImpl {
     }
     
     /// Ước tính xác suất thành công của một giao dịch
-    async fn estimate_transaction_success_probability(&self, tx_hash: &str, chain_id: u32) -> Result<f64> {
-        info!("Đang ước tính xác suất thành công cho giao dịch {}", tx_hash);
+    async fn estimate_transaction_success_probability(
+        &self,
+        chain_id: u32,
+        transaction: &MempoolTransaction,
+        include_details: bool,
+    ) -> (f64, Option<String>) {
+        info!("Estimating success probability for transaction {}", transaction.hash);
         
-        // Lấy adapter cho chain
-        let adapter_opt = self.chain_adapters.read().await.get(&chain_id) {
-            Some(adapter) => adapter,
+        // Get adapter for chain
+        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
+            Some(adapter) => adapter.clone(),
             None => {
-                return Err(anyhow::anyhow!("Không có adapter cho chain ID {}", chain_id));
+                warn!("No adapter found for chain ID {}", chain_id);
+                return (0.0, Some("No chain adapter found".to_string()));
             }
         };
         
-        // Lấy thông tin về giao dịch
-        let tx_info = adapter.get_transaction_info(tx_hash).await?;
-        
-        // Khởi tạo xác suất cơ bản là 85% (giả định hầu hết các giao dịch thành công)
+        // Initialize base probability (85% by default - most transactions succeed)
         let mut success_probability = 85.0;
+        let mut details = Vec::new();
         
-        // Kiểm tra gas limit
-        let estimated_gas = adapter.estimate_gas_for_transaction(tx_hash).await.unwrap_or(21000.0);
-        let gas_limit = tx_info.gas_limit.unwrap_or(21000);
-        
-        if (gas_limit as f64) < estimated_gas {
-            // Gas limit không đủ, giảm xác suất
-            success_probability -= 50.0;
-        } else if (gas_limit as f64) < estimated_gas * 1.1 {
-            // Gas limit có thể không đủ nếu có thay đổi nhỏ
-            success_probability -= 20.0;
-        }
-        
-        // Kiểm tra gas price
-        let current_gas_price = adapter.get_gas_price().await.unwrap_or(1.0);
-        let tx_gas_price = tx_info.gas_price.unwrap_or(0.0);
-        
-        if tx_gas_price < current_gas_price * 0.8 {
-            // Gas price thấp, có thể bị thế chỗ
-            success_probability -= 15.0;
-        }
-        
-        // Kiểm tra số dư của người gửi
-        let sender = &tx_info.from;
-        let balance = adapter.get_balance(sender).await.unwrap_or(0.0);
-        let gas_cost = (gas_limit as f64) * tx_gas_price;
-        let tx_value = tx_info.value.unwrap_or(0.0);
-        
-        if balance < gas_cost + tx_value {
-            // Số dư không đủ, giao dịch sẽ thất bại
-            success_probability -= 80.0;
-        }
-        
-        // Nếu là giao dịch swap token, kiểm tra slippage
-        if tx_info.is_swap() {
-            let slippage = tx_info.slippage.unwrap_or(0.5);
-            let token_address = tx_info.token_address.unwrap_or_default();
-            let price_volatility = self.calculate_token_volatility(&token_address, chain_id).await;
-            
-            if price_volatility > slippage * 2.0 {
-                // Độ biến động cao hơn slippage nhiều
-                success_probability -= 30.0;
+        // Check gas limit
+        if let Ok(estimated_gas) = adapter.estimate_gas_for_transaction(&transaction.hash).await {
+            if let Some(gas_limit) = transaction.gas_limit {
+                if (gas_limit as f64) < estimated_gas {
+                    success_probability -= 50.0;
+                    details.push(format!("Gas limit too low: {} < {}", gas_limit, estimated_gas));
+                } else if (gas_limit as f64) < estimated_gas * 1.1 {
+                    success_probability -= 20.0;
+                    details.push(format!("Gas limit risky: {} < {} + 10%", gas_limit, estimated_gas));
+                }
             }
         }
         
-        // Điều chỉnh xác suất về khoảng 0-100%
+        // Check gas price
+        if let Ok(current_gas_price) = adapter.get_gas_price().await {
+            if let Some(tx_gas_price) = transaction.gas_price {
+                if tx_gas_price < current_gas_price * 0.8 {
+                    let percent_decrease = ((current_gas_price - tx_gas_price) / current_gas_price) * 100.0;
+                    success_probability -= 15.0 + percent_decrease.min(35.0);
+                    details.push(format!("Gas price low: {} vs network {}", tx_gas_price, current_gas_price));
+                }
+            }
+        }
+        
+        // Check balance
+        if let Ok(balance) = adapter.get_balance(&transaction.from).await {
+            let gas_cost = (transaction.gas_limit.unwrap_or(21000) as f64) * (transaction.gas_price.unwrap_or(1.0));
+            let tx_value = transaction.value.unwrap_or(0.0);
+            let total_cost = tx_value + gas_cost;
+            
+            if balance < total_cost {
+                success_probability -= 80.0;
+                details.push(format!("Insufficient balance: {} < {}", balance, total_cost));
+            } else if balance < total_cost * 1.05 {
+                success_probability -= 10.0;
+                details.push(format!("Very low balance margin: {} vs needed {}", balance, total_cost));
+            }
+        }
+        
+        // Check nonce validity
+        if let (Some(nonce), Ok(expected_nonce)) = (transaction.nonce, adapter.get_expected_nonce(&transaction.from).await) {
+            if nonce < expected_nonce {
+                success_probability -= 95.0;
+                details.push(format!("Nonce too low: {} < expected {}", nonce, expected_nonce));
+            } else if nonce > expected_nonce + 2 {
+                success_probability -= 40.0;
+                details.push(format!("Nonce gap: {} > expected {}", nonce, expected_nonce));
+            }
+        }
+        
+        // Check slippage for swaps
+        if transaction.is_swap() {
+            let slippage = transaction.slippage.unwrap_or(0.5);
+            
+            if let Some(token_addr) = &transaction.token_address {
+                let volatility = self.calculate_token_volatility(token_addr, chain_id).await;
+                
+                if volatility > slippage * 2.0 {
+                    success_probability -= 30.0;
+                    details.push(format!("High volatility vs slippage: {}% vs {}%", volatility, slippage));
+                }
+            }
+        }
+        
+        // Cap probability to 0-100%
         success_probability = success_probability.max(0.0).min(100.0);
         
-        Ok(success_probability)
+        // Return with or without details
+        if include_details && !details.is_empty() {
+            (success_probability, Some(details.join("; ")))
+        } else {
+            (success_probability, None)
+        }
     }
     
     /// Phân tích hành vi của trader để phát hiện mẫu giao dịch
@@ -426,9 +505,8 @@ impl MevBotImpl {
         info!("Analyzing trader behavior for {} on chain {}", trader_address, chain_id);
         
         // Get adapter for chain
-        let adapter_opt = self.chain_adapters.read().await.get(&chain_id).cloned();
-        let adapter = match adapter_opt {
-            Some(adapter) => adapter,
+        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
+            Some(adapter) => adapter.clone(),
             None => {
                 warn!("No adapter found for chain ID {}", chain_id);
                 return None;
@@ -612,7 +690,7 @@ impl MevBotImpl {
     }
     
     /// Theo dõi thanh khoản của token để phát hiện cơ hội
-    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: String) {
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str) {
         info!("Monitoring liquidity for token {} on chain {}", token_address, chain_id);
         
         // Get adapter for chain
@@ -626,7 +704,7 @@ impl MevBotImpl {
         };
         
         // Get token metadata
-        let (name, symbol) = match adapter.get_token_metadata(&token_address).await {
+        let (name, symbol) = match adapter.get_token_metadata(token_address).await {
             Ok((name, symbol)) => (name, symbol),
             Err(e) => {
                 error!("Failed to get token metadata: {}", e);
@@ -637,7 +715,7 @@ impl MevBotImpl {
         info!("Starting liquidity monitoring for {}/{} ({})", name, symbol, token_address);
         
         // Get initial liquidity
-        let initial_liquidity = match adapter.get_token_liquidity(&token_address).await {
+        let initial_liquidity = match adapter.get_token_liquidity(token_address).await {
             Ok(liquidity) => liquidity,
             Err(e) => {
                 error!("Failed to get initial liquidity: {}", e);
@@ -648,7 +726,7 @@ impl MevBotImpl {
         info!("Initial liquidity for {}: ${:.2}", symbol, initial_liquidity);
         
         // Start a background task to monitor liquidity
-        let token_address_clone = token_address.clone();
+        let token_address_clone = token_address.to_string();
         let chain_id_clone = chain_id;
         
         tokio::spawn(async move {
@@ -664,7 +742,7 @@ impl MevBotImpl {
                 tokio::time::sleep(std::time::Duration::from_secs(check_interval)).await;
                 
                 // Get current liquidity
-                let current_liquidity = match adapter.get_token_liquidity(&token_address_clone).await {
+                let current_liquidity = match adapter.get_token_liquidity(token_address_clone.as_str()).await {
                     Ok(liquidity) => liquidity,
                     Err(e) => {
                         error!("Failed to get liquidity for {}: {}", token_address_clone, e);
@@ -763,6 +841,116 @@ impl MevBotImpl {
         
         Ok(())
     }
+
+    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity> {
+        use tracing::info;
+        use tokio::join;
+        
+        // Kiểm tra an toàn của token trước khi thực hiện các truy vấn khác
+        if !token_safety.is_safe || token_safety.risk_score > 50 {
+            info!("Token {} không đủ an toàn để giao dịch: risk_score={}", token_address, token_safety.risk_score);
+            return None; // Too risky
+        }
+        
+        // Thực hiện nhiều truy vấn song song để cải thiện hiệu suất
+        let adapter = match self.chain_adapters.read().await.get(&chain_id).cloned() {
+            Some(adapter) => adapter,
+            None => {
+                info!("Không tìm thấy adapter cho chain ID {}", chain_id);
+                return None;
+            }
+        };
+        
+        // Chuẩn bị các Future để thực hiện song song
+        let liquidity_future = adapter.get_token_liquidity(token_address);
+        let price_future = adapter.get_token_price(token_address);
+        let price_history_future = adapter.get_token_price_history(token_address, 24);
+        let market_data_future = self.token_provider.get_token_market_data(chain_id, token_address);
+        
+        // Thực hiện các truy vấn song song
+        let (liquidity_result, price_result, price_history_result, market_data_result) = 
+            join!(liquidity_future, price_future, price_history_future, market_data_future);
+        
+        // Xử lý kết quả truy vấn liquidity
+        let liquidity = match liquidity_result {
+            Ok(liquidity) => liquidity,
+            Err(e) => {
+                info!("Không thể lấy thông tin thanh khoản cho token {}: {}", token_address, e);
+                return None; // Không đủ thông tin để phân tích
+            }
+        };
+        
+        // Kiểm tra thanh khoản tối thiểu
+        if liquidity < 10000.0 { // $10,000 thanh khoản tối thiểu
+            info!("Token {} có thanh khoản thấp: ${}", token_address, liquidity);
+            return None; // Thanh khoản quá thấp
+        }
+        
+        // Xử lý kết quả truy vấn giá
+        let price = price_result.unwrap_or_default();
+        
+        // Xử lý kết quả truy vấn lịch sử giá
+        let price_history = price_history_result.unwrap_or_default();
+        
+        // Tính toán biến động giá
+        let volatility = if price_history.len() >= 2 {
+            let max_price = price_history.iter().fold(0.0f64, |a, b| a.max(*b));
+            let min_price = price_history.iter().fold(f64::INFINITY, |a, b| a.min(*b));
+            if min_price > 0.0 {
+                (max_price - min_price) / min_price
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        
+        // Xử lý kết quả truy vấn dữ liệu thị trường
+        let market_data = market_data_result.ok();
+        
+        // Đánh giá cơ hội dựa trên các yếu tố thu thập được
+        // Tính toán lợi nhuận ước tính (ví dụ đơn giản)
+        let estimated_profit = if volatility > 0.05 && liquidity > 50000.0 {
+            // Tạo cơ hội giao dịch nếu biến động giá > 5% và thanh khoản > $50,000
+            info!("Đã phát hiện cơ hội giao dịch cho token {}: biến động={}%, thanh khoản=${}", 
+                  token_address, volatility * 100.0, liquidity);
+            
+            // Tính toán lợi nhuận dựa trên biến động giá và thanh khoản
+            let estimated_profit_usd = volatility * 100.0; // Đơn giản hóa tính toán lợi nhuận
+            let estimated_gas_cost_usd = 50.0; // Ước tính chi phí gas
+            
+            // Tạo cặp token
+            let token_pairs = vec![
+                TokenPair {
+                    token0: TokenInfo {
+                        address: token_address.clone(),
+                        symbol: "UNKNOWN".to_string(),
+                        decimals: 18,
+                    },
+                    token1: TokenInfo {
+                        address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(), // WETH
+                        symbol: "WETH".to_string(),
+                        decimals: 18,
+                    },
+                }
+            ];
+            
+            // Tạo cơ hội MEV
+            Some(MevOpportunity::new(
+                MevOpportunityType::Arbitrage,
+                chain_id,
+                estimated_profit_usd,
+                estimated_gas_cost_usd,
+                token_pairs,
+                30, // Risk score
+                MevExecutionMethod::Standard,
+            ))
+        } else {
+            None
+        };
+        
+        estimated_profit
+    }
 }
 
 #[async_trait::async_trait]
@@ -834,24 +1022,14 @@ impl MevBot for MevBotImpl {
         }
     }
     
-    async fn evaluate_new_token(&self, chain_id: u32, token_address: String) -> Option<TokenSafety> {
-        match self.token_provider.analyze_token_safety(chain_id, &token_address).await {
+    async fn evaluate_new_token(&self, chain_id: u32, token_address: &str) -> Option<TokenSafety> {
+        match self.token_provider.analyze_token_safety(chain_id, token_address).await {
             Ok(safety) => Some(safety),
             Err(e) => {
                 eprintln!("Error evaluating token {}: {}", token_address, e);
                 None
             }
         }
-    }
-    
-    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: String, token_safety: TokenSafety) -> Option<MevOpportunity> {
-        // Example implementation - in a real bot, this would analyze the token more deeply
-        if !token_safety.is_safe || token_safety.risk_score > 50 {
-            return None; // Too risky
-        }
-        
-        // In a real implementation, we would do more analysis here
-        None
     }
     
     async fn detect_suspicious_transaction_patterns(&self, chain_id: u32, transactions: &[MempoolTransaction]) -> Vec<SuspiciousPattern> {
@@ -947,103 +1125,6 @@ impl MevBot for MevBotImpl {
         failing_txs
     }
     
-    async fn estimate_transaction_success_probability(
-        &self,
-        chain_id: u32,
-        transaction: &MempoolTransaction,
-        include_details: bool,
-    ) -> (f64, Option<String>) {
-        info!("Estimating success probability for transaction {}", transaction.hash);
-        
-        // Get adapter for chain
-        let adapter_opt = self.chain_adapters.read().await.get(&chain_id).cloned();
-        let adapter = match adapter_opt {
-            Some(adapter) => adapter,
-            None => {
-                warn!("No adapter found for chain ID {}", chain_id);
-                return (0.0, Some("No chain adapter found".to_string()));
-            }
-        };
-        
-        // Initialize base probability (85% by default - most transactions succeed)
-        let mut success_probability = 85.0;
-        let mut details = Vec::new();
-        
-        // Check gas limit
-        if let Ok(estimated_gas) = adapter.estimate_gas_for_transaction(&transaction.hash).await {
-            if let Some(gas_limit) = transaction.gas_limit {
-                if (gas_limit as f64) < estimated_gas {
-                    success_probability -= 50.0;
-                    details.push(format!("Gas limit too low: {} < {}", gas_limit, estimated_gas));
-                } else if (gas_limit as f64) < estimated_gas * 1.1 {
-                    success_probability -= 20.0;
-                    details.push(format!("Gas limit risky: {} < {} + 10%", gas_limit, estimated_gas));
-                }
-            }
-        }
-        
-        // Check gas price
-        if let Ok(current_gas_price) = adapter.get_gas_price().await {
-            if let Some(tx_gas_price) = transaction.gas_price {
-                if tx_gas_price < current_gas_price * 0.8 {
-                    let percent_decrease = ((current_gas_price - tx_gas_price) / current_gas_price) * 100.0;
-                    success_probability -= 15.0 + percent_decrease.min(35.0);
-                    details.push(format!("Gas price low: {} vs network {}", tx_gas_price, current_gas_price));
-                }
-            }
-        }
-        
-        // Check balance
-        if let Ok(balance) = adapter.get_balance(&transaction.from).await {
-            let gas_cost = (transaction.gas_limit.unwrap_or(21000) as f64) * (transaction.gas_price.unwrap_or(1.0));
-            let tx_value = transaction.value.unwrap_or(0.0);
-            let total_cost = tx_value + gas_cost;
-            
-            if balance < total_cost {
-                success_probability -= 80.0;
-                details.push(format!("Insufficient balance: {} < {}", balance, total_cost));
-            } else if balance < total_cost * 1.05 {
-                success_probability -= 10.0;
-                details.push(format!("Very low balance margin: {} vs needed {}", balance, total_cost));
-            }
-        }
-        
-        // Check nonce validity
-        if let (Some(nonce), Ok(expected_nonce)) = (transaction.nonce, adapter.get_expected_nonce(&transaction.from).await) {
-            if nonce < expected_nonce {
-                success_probability -= 95.0;
-                details.push(format!("Nonce too low: {} < expected {}", nonce, expected_nonce));
-            } else if nonce > expected_nonce + 2 {
-                success_probability -= 40.0;
-                details.push(format!("Nonce gap: {} > expected {}", nonce, expected_nonce));
-            }
-        }
-        
-        // Check slippage for swaps
-        if transaction.is_swap() {
-            let slippage = transaction.slippage.unwrap_or(0.5);
-            
-            if let Some(token_addr) = &transaction.token_address {
-                let volatility = self.calculate_token_volatility(token_addr, chain_id).await;
-                
-                if volatility > slippage * 2.0 {
-                    success_probability -= 30.0;
-                    details.push(format!("High volatility vs slippage: {}% vs {}%", volatility, slippage));
-                }
-            }
-        }
-        
-        // Cap probability to 0-100%
-        success_probability = success_probability.max(0.0).min(100.0);
-        
-        // Return with or without details
-        if include_details && !details.is_empty() {
-            (success_probability, Some(details.join("; ")))
-        } else {
-            (success_probability, None)
-        }
-    }
-    
     async fn analyze_trader_behavior(
         &self,
         chain_id: u32,
@@ -1053,9 +1134,8 @@ impl MevBot for MevBotImpl {
         info!("Analyzing trader behavior for {} on chain {}", trader_address, chain_id);
         
         // Get adapter for chain
-        let adapter_opt = self.chain_adapters.read().await.get(&chain_id).cloned();
-        let adapter = match adapter_opt {
-            Some(adapter) => adapter,
+        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
+            Some(adapter) => adapter.clone(),
             None => {
                 warn!("No adapter found for chain ID {}", chain_id);
                 return None;
@@ -1306,130 +1386,4 @@ pub fn create_mev_bot(
         opportunity_provider,
         config,
     ))
-}
-
-/// Information about a transaction that may potentially fail
-#[derive(Debug, Clone)]
-pub struct PotentialFailingTx {
-    /// Transaction hash
-    pub tx_hash: String,
-    
-    /// From address
-    pub from: String,
-    
-    /// To address
-    pub to: String,
-    
-    /// Configured gas limit
-    pub gas_limit: u64,
-    
-    /// Estimated gas required
-    pub estimated_gas: u64,
-    
-    /// Reason for potential failure
-    pub reason: FailureReason,
-    
-    /// Prediction confidence (0-100)
-    pub confidence: u8,
-}
-
-/// Reasons why a transaction might fail
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FailureReason {
-    /// Insufficient gas limit
-    InsufficientGas,
-    
-    /// Gas price too low compared to network
-    GasPriceTooLow,
-    
-    /// Insufficient balance
-    InsufficientBalance,
-    
-    /// Slippage too low for high volatility token
-    SlippageToLow,
-    
-    /// Invalid nonce
-    InvalidNonce,
-    
-    /// Contract execution error
-    ContractExecution,
-    
-    /// Unknown reason
-    Unknown,
-}
-
-/// Trader profile information
-#[derive(Debug, Clone)]
-pub struct TraderProfile {
-    /// Trader's address
-    pub address: String,
-    
-    /// Total number of trades
-    pub trade_count: usize,
-    
-    /// Average trade value
-    pub avg_trade_value: f64,
-    
-    /// Number of successful trades
-    pub successful_trades: usize,
-    
-    /// Number of failed trades
-    pub failed_trades: usize,
-    
-    /// Average token hold time (seconds)
-    pub avg_hold_time: f64,
-    
-    /// Preferred tokens
-    pub preferred_tokens: Vec<String>,
-    
-    /// Risk appetite
-    pub risk_appetite: RiskAppetite,
-    
-    /// Trading pattern
-    pub trading_pattern: TradingPattern,
-    
-    /// Whether this is a bot
-    pub is_bot: bool,
-    
-    /// Whether this is an arbitrageur
-    pub is_arbitrageur: bool,
-}
-
-/// Trader's risk appetite
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RiskAppetite {
-    /// Low risk (prefer blue-chip)
-    Low,
-    
-    /// Moderate risk (balanced)
-    Moderate,
-    
-    /// Accept high risk (prefer small altcoin)
-    High,
-    
-    /// Unknown (insufficient data)
-    Unknown,
-}
-
-/// Trading pattern of a trader
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TradingPattern {
-    /// Scalping (very short holding time)
-    Scalping,
-    
-    /// Day trading (holding time <1 day)
-    DayTrading,
-    
-    /// Swing trading (holding time a few days)
-    SwingTrading,
-    
-    /// Long-term investing (holding time >1 week)
-    LongTermInvesting,
-    
-    /// Neutral (no clear trend)
-    Neutral,
-    
-    /// Unknown
-    Unknown,
-} 
 } 

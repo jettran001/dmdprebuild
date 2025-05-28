@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use ethers::types::{Address, H256, U256};
+use common::trading_actions::{TradeAction, TradeStatus};
 
 /// Common type definitions for the SnipeBot project
 ///
@@ -84,20 +85,15 @@ impl TokenPair {
     }
 }
 
-/// Trade type (buy or sell)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TradeType {
-    /// Buy operation
-    Buy,
-    
-    /// Sell operation
-    Sell,
-    
-    /// Liquidity provision
-    AddLiquidity,
-    
-    /// Liquidity removal
-    RemoveLiquidity,
+/// Re-export TradeAction from common module as TradeType for backward compatibility
+/// This allows gradual migration to the new standardized type
+pub use common::trading_actions::TradeAction as TradeType;
+
+// Tạo một conversion để duy trì khả năng tương thích với code cũ
+impl From<TradeAction> for TradeType {
+    fn from(action: TradeAction) -> Self {
+        action
+    }
 }
 
 /// Trade parameters

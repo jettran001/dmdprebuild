@@ -30,13 +30,13 @@ pub trait MevBot {
     async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>);
     
     /// Đánh giá token mới
-    async fn evaluate_new_token(&self, chain_id: u32, token_address: String) -> Option<TokenSafety>;
+    async fn evaluate_new_token(&self, chain_id: u32, token_address: &str) -> Option<TokenSafety>;
     
     /// Phân tích cơ hội giao dịch từ token đã đánh giá
-    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: String, token_safety: TokenSafety) -> Option<MevOpportunity>;
+    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity>;
     
     /// Theo dõi thanh khoản token
-    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: String);
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str);
     
     /// Phát hiện mẫu giao dịch đáng ngờ
     async fn detect_suspicious_transaction_patterns(&self, chain_id: u32, transactions: &[MempoolTransaction]) -> Vec<SuspiciousPattern>;

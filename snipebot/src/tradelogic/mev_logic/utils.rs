@@ -13,6 +13,7 @@ use crate::tradelogic::common::utils::{
     usd_to_eth,
     current_time_seconds
 };
+use crate::tradelogic::common::analysis::analyze_trader_behavior;
 
 /// Tính toán thời gian hiện tại tính từ UNIX epoch (giây)
 pub fn current_time_seconds() -> u64 {
@@ -73,38 +74,6 @@ pub fn evaluate_token_from_info(token: &TokenInfo) -> (f64, Vec<String>) {
     risk_score = risk_score.max(0.0).min(100.0);
     
     (risk_score, warning_messages)
-}
-
-/// Phân tích hành vi trader từ số liệu
-pub fn analyze_trader_behavior(
-    tx_frequency: f64,
-    avg_value: f64,
-    gas_strategy: bool,
-    success_rate: f64,
-) -> (TraderBehaviorType, TraderExpertiseLevel) {
-    // Xác định loại hành vi
-    let behavior_type = if tx_frequency > 20.0 && gas_strategy {
-        TraderBehaviorType::MevBot
-    } else if tx_frequency > 10.0 {
-        TraderBehaviorType::HighFrequencyTrader
-    } else if avg_value > 10.0 {
-        TraderBehaviorType::Whale
-    } else {
-        TraderBehaviorType::Retail
-    };
-    
-    // Xác định mức độ chuyên môn
-    let expertise_level = if tx_frequency > 20.0 && success_rate > 0.95 {
-        TraderExpertiseLevel::Professional
-    } else if tx_frequency > 5.0 && success_rate > 0.8 {
-        TraderExpertiseLevel::Intermediate
-    } else if success_rate < 0.6 {
-        TraderExpertiseLevel::Beginner
-    } else {
-        TraderExpertiseLevel::Unknown
-    };
-    
-    (behavior_type, expertise_level)
 }
 
 /// Tạo market data mẫu cho testing

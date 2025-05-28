@@ -14,6 +14,7 @@ pub mod common;          // Shared code between different trading strategies
 pub mod traits;          // Common traits that all trading strategies must implement
 pub mod manual_trade;    // User-initiated trading through API requests
 pub mod coordinator;     // Coordinator for managing shared state between executors
+pub mod stubs;           // Stub implementations for traits that do not have complete implementations
 
 // Re-export main traits for easy access
 pub use traits::{
@@ -26,4 +27,9 @@ pub use traits::{
 pub use coordinator::create_trade_coordinator;
 pub use smart_trade::create_smart_trade_executor;
 pub use mev_logic::strategy::create_mev_strategy;
-pub use manual_trade::create_manual_trade_executor; 
+pub use manual_trade::create_manual_trade_executor;
+pub use stubs::{
+    create_stub_risk_manager,
+    create_stub_strategy_optimizer,
+    create_stub_cross_chain_trader
+}; 

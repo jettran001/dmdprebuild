@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::SystemTime;
+use std::collections::HashMap;
 
 // === Các hằng số và ngưỡng phân tích ===
 
@@ -161,6 +162,125 @@ pub enum SuspiciousPattern {
     HighFrequencyTrading,
     /// Tạo token và thêm thanh khoản cùng lúc (có thể là scam)
     TokenLiquidityPattern,
+}
+
+/// Metadata for suspicious pattern with additional details and confidence score
+#[derive(Debug, Clone, Default)]
+pub struct PatternMetadata {
+    /// Confidence score (0.0-1.0) with 1.0 being highest confidence
+    pub confidence: f64,
+    /// Detailed description of the pattern
+    pub detail: String,
+    /// Related transaction hashes
+    pub related_txs: Vec<String>,
+    /// Additional properties as key-value pairs
+    pub properties: HashMap<String, String>,
+}
+
+/// Implement methods for SuspiciousPattern
+impl SuspiciousPattern {
+    /// Global pattern metadata storage
+    thread_local! {
+        static PATTERN_METADATA: std::cell::RefCell<HashMap<String, PatternMetadata>> = 
+            std::cell::RefCell::new(HashMap::new());
+    }
+    
+    /// Generate a unique identifier for this pattern instance
+    fn generate_id(&self) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        
+        format!("{:?}_{}", self, timestamp)
+    }
+    
+    /// Set confidence score for this pattern (0.0-1.0)
+    pub fn set_confidence(&mut self, confidence: f64) {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            let mut metadata = metadata.borrow_mut();
+            let entry = metadata.entry(id).or_insert_with(PatternMetadata::default);
+            entry.confidence = confidence.max(0.0).min(1.0);
+        });
+    }
+    
+    /// Get confidence score for this pattern
+    pub fn confidence(&self) -> f64 {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            metadata.borrow().get(&id).map_or(0.5, |m| m.confidence)
+        })
+    }
+    
+    /// Set detailed description for this pattern
+    pub fn set_detail(&mut self, detail: String) {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            let mut metadata = metadata.borrow_mut();
+            let entry = metadata.entry(id).or_insert_with(PatternMetadata::default);
+            entry.detail = detail;
+        });
+    }
+    
+    /// Get detailed description for this pattern
+    pub fn detail(&self) -> String {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            metadata.borrow().get(&id).map_or_else(
+                || format!("{:?} pattern detected", self),
+                |m| m.detail.clone()
+            )
+        })
+    }
+    
+    /// Add related transaction hash
+    pub fn add_related_tx(&mut self, tx_hash: String) {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            let mut metadata = metadata.borrow_mut();
+            let entry = metadata.entry(id).or_insert_with(PatternMetadata::default);
+            entry.related_txs.push(tx_hash);
+        });
+    }
+    
+    /// Set additional property
+    pub fn set_property(&mut self, key: String, value: String) {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            let mut metadata = metadata.borrow_mut();
+            let entry = metadata.entry(id).or_insert_with(PatternMetadata::default);
+            entry.properties.insert(key, value);
+        });
+    }
+    
+    /// Get property value
+    pub fn get_property(&self, key: &str) -> Option<String> {
+        let id = self.generate_id();
+        Self::PATTERN_METADATA.with(|metadata| {
+            metadata.borrow().get(&id).and_then(|m| 
+                m.properties.get(key).cloned()
+            )
+        })
+    }
+    
+    /// Add key-value metadata to this pattern
+    pub fn add_metadata(&mut self, key: &str, value: &str) {
+        self.set_property(key.to_string(), value.to_string());
+    }
+    
+    /// Get all metadata for this pattern
+    pub fn get_all_metadata(&self) -> HashMap<String, String> {
+        Self::PATTERN_METADATA.with(|metadata| {
+            let metadata = metadata.borrow();
+            if let Some(pattern_metadata) = metadata.get(&self.generate_id()) {
+                pattern_metadata.properties.clone()
+            } else {
+                HashMap::new()
+            }
+        })
+    }
 }
 
 /// Cảnh báo từ phân tích mempool
