@@ -5,8 +5,6 @@
 //! - Phát hiện cooling time giữa các giao dịch
 //! - Phát hiện giới hạn số lượng giao dịch và số lượng token trong ví
 
-use regex::Regex;
-
 use super::types::ContractInfo;
 
 /// Kiểm tra xem token có chứa chức năng blacklist hoặc whitelist không

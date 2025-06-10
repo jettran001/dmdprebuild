@@ -14,7 +14,7 @@ pub struct PotentialFailingTx {
     pub tx_hash: String,
     
     /// From address
-    pub from: String,
+    pub from_address: String,
     
     /// To address
     pub to: String,
@@ -55,6 +55,9 @@ pub enum FailureReason {
     
     /// Unknown reason
     Unknown,
+    
+    /// Other specific reason (with description)
+    Other(String),
 }
 
 /// Trader profile information
@@ -154,7 +157,7 @@ impl Default for PotentialFailingTx {
     fn default() -> Self {
         Self {
             tx_hash: String::new(),
-            from: String::new(),
+            from_address: String::new(),
             to: String::new(),
             gas_limit: 0,
             estimated_gas: 0,

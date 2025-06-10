@@ -9,18 +9,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
+use anyhow::{Result, anyhow};
+use uuid::Uuid;
 
-use crate::analys::mempool::{
-    MempoolAnalyzer, MempoolTransaction, TransactionType, TransactionPriority,
-};
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::TokenPair;
-
-use super::types::*;
-use super::constants::*;
-use super::opportunity::MevOpportunity;
+use crate::analys::mempool::{MempoolAnalyzer, MempoolTransaction, TransactionType};
+use super::types::{MevOpportunity, MevOpportunityType, MevExecutionMethod, JITLiquidityConfig};
 
 /// Pool information for JIT liquidity
 #[derive(Debug, Clone)]
@@ -72,6 +67,57 @@ pub struct JITLiquidityOpportunity {
     pub risk_score: f64,
     /// Additional parameters
     pub parameters: HashMap<String, String>,
+}
+
+/// JIT Liquidity configuration
+#[derive(Debug, Clone)]
+pub struct JITLiquidityConfig {
+    /// Whether JIT liquidity monitoring is enabled
+    pub enabled: bool,
+    
+    /// Maximum acceptable network latency in milliseconds
+    pub max_acceptable_latency_ms: u64,
+    
+    /// Minimum block time in milliseconds to be viable for JIT
+    pub min_block_time_ms: u64,
+    
+    /// Enabled chain IDs
+    pub enabled_chains: Vec<u64>,
+    
+    /// Target pools to monitor
+    pub target_pools: Vec<String>,
+    
+    /// Minimum profit threshold in USD
+    pub min_profit_threshold_usd: f64,
+    
+    /// Maximum capital allocation in USD
+    pub max_capital_allocation_usd: f64,
+    
+    /// Scan interval in milliseconds
+    pub scan_interval_ms: u64,
+    
+    /// Number of blocks to monitor ahead
+    pub monitor_blocks_ahead: u64,
+    
+    /// Custom parameters
+    pub parameters: HashMap<String, String>,
+}
+
+impl Default for JITLiquidityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_acceptable_latency_ms: 200,
+            min_block_time_ms: 500,
+            enabled_chains: vec![],
+            target_pools: vec![],
+            min_profit_threshold_usd: 50.0,
+            max_capital_allocation_usd: 10000.0,
+            scan_interval_ms: 1000,
+            monitor_blocks_ahead: 2,
+            parameters: HashMap::new(),
+        }
+    }
 }
 
 /// JIT Liquidity provider service
@@ -177,7 +223,7 @@ impl JITLiquidityProvider {
             // Kiểm tra tình trạng mạng trước khi phân tích
             let mut network_issues = false;
             for (&chain_id, adapter) in &self.evm_adapters {
-                match adapter.get_network_latency_ms().await {
+                match adapter.get_network_latency().await {
                     Ok(latency) => {
                         if latency > config.max_acceptable_latency_ms {
                             error!("Network latency for chain {} is too high: {}ms > {}ms (max acceptable). Skipping analysis.",
@@ -211,7 +257,7 @@ impl JITLiquidityProvider {
                 
                 // Kiểm tra thời gian block trung bình trước khi phân tích
                 if let Some(adapter) = self.evm_adapters.get(&chain_id) {
-                    match adapter.get_average_block_time_ms().await {
+                    match adapter.get_block_time_ms().await {
                         Ok(block_time) => {
                             if block_time < config.min_block_time_ms {
                                 warn!(
@@ -239,7 +285,7 @@ impl JITLiquidityProvider {
             self.cleanup_old_opportunities().await;
             
             // Đợi trước lần quét tiếp theo, điều chỉnh theo cấu hình
-            let scan_interval = config.scan_interval_ms.max(100);
+            let scan_interval = config.scan_interval_ms.max(100_u64);
             sleep(Duration::from_millis(scan_interval)).await;
         }
     }
@@ -309,9 +355,9 @@ impl JITLiquidityProvider {
     /// Get or fetch pool information
     async fn get_or_fetch_pool_info(
         &self, 
-        chain_id: u64, 
+        _chain_id: u64, 
         pool_address: &str,
-        adapter: &Arc<EvmAdapter>
+        _adapter: &Arc<EvmAdapter>
     ) -> Result<PoolInfo, String> {
         // Check cache first
         {

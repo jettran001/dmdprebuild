@@ -24,8 +24,8 @@ use hex;
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::token_status::{TokenSafety, TokenStatusAnalyzer};
-use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
-use crate::tradelogic::traits::{TradeExecutor, RiskManager};
+use crate::types::{TokenPair, TradeParams, TradeType};
+use crate::tradelogic::traits::TradeExecutor;
 
 /// Configuration for manual trading executor
 #[derive(Debug, Clone, Default)]
@@ -153,17 +153,40 @@ pub struct ManualTradeExecutor {
     
     /// Active trades by user
     active_trades: RwLock<HashMap<String, Vec<String>>>,
+    
+    /// Default slippage to use if not specified
+    default_slippage: f64,
+    
+    /// Default transaction deadline in minutes
+    default_deadline_minutes: u64,
+    
+    /// Trade coordinator reference
+    trade_coordinator: Arc<dyn crate::tradelogic::traits::TradeCoordinator>,
 }
 
 impl ManualTradeExecutor {
     /// Create a new manual trade executor
-    pub fn new() -> Self {
+    pub fn new(
+        chain_adapters: Arc<Vec<Arc<EvmAdapter>>>,
+        default_slippage: f64,
+        default_deadline_minutes: u64,
+        trade_coordinator: Arc<dyn crate::tradelogic::traits::TradeCoordinator>,
+    ) -> Self {
+        // Convert Vec of adapters to HashMap by chain_id
+        let mut evm_adapters = HashMap::new();
+        for adapter in chain_adapters.iter() {
+            evm_adapters.insert(adapter.chain_id, adapter.clone());
+        }
+        
         Self {
-            evm_adapters: HashMap::new(),
+            evm_adapters,
             token_analyzers: HashMap::new(),
             config: RwLock::new(ManualTradeConfig::default()),
             trade_history: RwLock::new(Vec::new()),
             active_trades: RwLock::new(HashMap::new()),
+            default_slippage,
+            default_deadline_minutes,
+            trade_coordinator,
         }
     }
     
@@ -236,9 +259,9 @@ impl TradeExecutor for ManualTradeExecutor {
         }
         
         // Validate the requested chain is supported
-        let adapter = match self.evm_adapters.get(&params.chain_id) {
+        let adapter = match self.evm_adapters.get(&params.chain_id()) {
             Some(adapter) => adapter,
-            None => return Err(anyhow::anyhow!("Chain {} not supported", params.chain_id)),
+            None => return Err(anyhow::anyhow!("Chain {} not supported", params.chain_id())),
         };
         
         // 2. Check blacklist before safety check (cheaper operation first)
@@ -254,7 +277,7 @@ impl TradeExecutor for ManualTradeExecutor {
         
         // 3. Check token safety if required
         let safety_result = if config.require_safety_check {
-            match self.check_token_safety(params.chain_id, &params.token_address).await {
+            match self.check_token_safety(params.chain_id(), &params.token_address).await {
                 Ok(safety) => safety,
                 Err(e) => {
                     warn!("Failed to check token safety for {}: {}", params.token_address, e);
@@ -297,7 +320,7 @@ impl TradeExecutor for ManualTradeExecutor {
         
         // Determine base token based on chain
         let base_token = params.base_token.clone().unwrap_or_else(|| {
-            match params.chain_id {
+            match params.chain_id() {
                 1 => "ETH",   // Ethereum
                 56 => "BNB",  // Binance Smart Chain
                 137 => "MATIC", // Polygon
@@ -309,7 +332,7 @@ impl TradeExecutor for ManualTradeExecutor {
         let mut trade_result = ManualTradeResult {
             id: trade_id.clone(),
             user_id: user_id.clone(),
-            chain_id: params.chain_id,
+            chain_id: params.chain_id(),
             token_address: params.token_address.clone(),
             token_name,
             token_symbol,
@@ -342,7 +365,7 @@ impl TradeExecutor for ManualTradeExecutor {
         }
         
         // 6. Try to simulate the trade before executing
-        debug!("Simulating trade execution for token {} on chain {}", params.token_address, params.chain_id);
+        debug!("Simulating trade execution for token {} on chain {}", params.token_address, params.chain_id());
         let simulation_result = self.simulate_trade_execution(&params).await;
         
         // Check simulation result
@@ -401,7 +424,7 @@ impl TradeExecutor for ManualTradeExecutor {
                     }
                 });
                 
-                info!("Trade {} submitted for user {} on chain {}", trade_id, trade_result.user_id, params.chain_id);
+                info!("Trade {} submitted for user {} on chain {}", trade_id, trade_result.user_id, params.chain_id());
             },
             // If simulation failed but we're continuing (sell case usually)
             Err(_) => {
@@ -446,7 +469,7 @@ impl TradeExecutor for ManualTradeExecutor {
                 }
             });
             
-            info!("Trade {} submitted for user {} on chain {}", trade_id, trade_result.user_id, params.chain_id);
+            info!("Trade {} submitted for user {} on chain {}", trade_id, trade_result.user_id, params.chain_id());
         } else if let Err(e) = execution_result {
             trade_result.status = ManualTradeStatus::Failed;
             trade_result.error = Some(e.to_string());
@@ -534,27 +557,27 @@ impl ManualTradeExecutor {
     /// Mô phỏng một giao dịch để kiểm tra tính khả thi
     async fn simulate_trade_execution(&self, params: &TradeParams) -> Result<(String, f64)> {
         debug!("Simulating trade execution for token {} on chain {}", 
-              params.token_address, params.chain_id);
+              params.token_address, params.chain_id());
         
         // 1. Lấy adapter cho chuỗi
-        let adapter = match self.evm_adapters.get(&params.chain_id) {
+        let adapter = match self.evm_adapters.get(&params.chain_id()) {
             Some(adapter) => adapter,
-            None => return Err(anyhow::anyhow!("Chain {} not supported", params.chain_id)),
+            None => return Err(anyhow::anyhow!("Chain {} not supported", params.chain_id())),
         };
         
         // 2. Xác định router phù hợp
         let router_address = {
             let config = self.config.read().await;
             config.preferred_dex_routers
-                .get(&params.chain_id)
+                .get(&params.chain_id())
                 .cloned()
                 .unwrap_or_else(|| {
                     // Nếu không có router được cấu hình, dùng mặc định cho mỗi chain
-                    match params.chain_id {
+                    match params.chain_id() {
                         1 => "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D".to_string(), // Uniswap V2
                         56 => "0x10ED43C718714eb63d5aA57B78B54704E256024E".to_string(), // PancakeSwap
                         137 => "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff".to_string(), // QuickSwap
-                        _ => return Err(anyhow::anyhow!("No default router for chain {}", params.chain_id)),
+                        _ => return Err(anyhow::anyhow!("No default router for chain {}", params.chain_id())),
                     }
                 })
         };
@@ -570,7 +593,7 @@ impl ManualTradeExecutor {
             Err(e) => {
                 warn!("Could not get gas price: {}. Using safe default", e);
                 // Sử dụng giá trị an toàn cho mỗi chuỗi
-                match params.chain_id {
+                match params.chain_id() {
                     1 => 50_000_000_000, // 50 gwei for Ethereum
                     56 => 5_000_000_000, // 5 gwei for BSC
                     137 => 100_000_000_000, // 100 gwei for Polygon
@@ -695,11 +718,14 @@ impl Clone for ManualTradeExecutor {
             config: RwLock::new(ManualTradeConfig::default()),
             trade_history: RwLock::new(Vec::new()),
             active_trades: RwLock::new(HashMap::new()),
+            default_slippage: self.default_slippage,
+            default_deadline_minutes: self.default_deadline_minutes,
+            trade_coordinator: self.trade_coordinator.clone(),
         }
     }
 }
 
 /// Create a new manual trade executor with default configuration
-pub fn create_manual_trade_executor() -> ManualTradeExecutor {
-    ManualTradeExecutor::new()
+pub fn create_manual_trade_executor() -> Result<ManualTradeExecutor, &'static str> {
+    Err("create_manual_trade_executor() is deprecated. Use ManualTradeExecutor::new() with required parameters instead")
 }

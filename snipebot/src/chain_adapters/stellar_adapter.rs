@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
-use anyhow::{Result, Context, bail, anyhow};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn, trace};
 use serde::{Serialize, Deserialize};
 

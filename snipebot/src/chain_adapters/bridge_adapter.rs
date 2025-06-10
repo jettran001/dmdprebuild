@@ -10,11 +10,9 @@
 use std::sync::Arc;
 use anyhow::{Result, bail, Context};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
-use chrono::Utc;
+use tracing::{debug, info, warn};
 use async_trait::async_trait;
 use reqwest;
-use std::time::Duration;
 
 // Import from common bridge types
 use common::bridge_types::{
@@ -25,7 +23,6 @@ use common::bridge_types::{
     MonitorConfig,
     BridgeProvider,
     BridgeAdapter as BridgeAdapterTrait,
-    monitor_transaction,
 };
 
 /// LayerZero bridge provider implementation
@@ -248,41 +245,49 @@ pub struct BridgeAdapter {
 }
 
 /// Implement the common BridgeAdapter trait
+#[async_trait::async_trait]
 impl BridgeAdapterTrait for BridgeAdapter {
-    async fn register_provider(&self, provider_name: &str, provider: Box<dyn BridgeProvider>) -> Result<()> {
-        // Chuyển đổi Box<dyn BridgeProvider> thành Arc<dyn BridgeProvider>
-        let arc_provider = Arc::from(provider);
-        
-        // Sử dụng phương thức nội bộ để đăng ký provider
+    /// Đăng ký một provider mới vào adapter
+    async fn register_provider(&self, name: &str, provider: Box<dyn common::BridgeProvider + 'static>) -> Result<()> {
         let mut providers = self.providers.write().await;
-        providers.push((provider_name.to_string(), arc_provider));
-        info!("Registered bridge provider: {}", provider_name);
+        providers.insert(name.to_string(), provider);
+        debug!("Đã đăng ký provider mới: {}", name);
         Ok(())
     }
     
-    async fn get_provider(&self, provider_name: &str) -> Result<Box<dyn BridgeProvider>> {
+    /// Lấy provider theo tên
+    async fn get_provider(&self, name: &str) -> Result<Box<dyn common::BridgeProvider + 'static>> {
         let providers = self.providers.read().await;
-        
-        for (name, provider) in providers.iter() {
-            if name == provider_name {
-                // Quản lý lại Arc để trả về Box
-                return Ok(Box::new(provider.clone()));
-            }
+        match providers.get(name) {
+            Some(provider) => {
+                // Clone provider để trả về
+                let provider_clone: Box<dyn common::BridgeProvider + 'static> = provider.clone_box();
+                Ok(provider_clone)
+            },
+            None => Err(anyhow!("Không tìm thấy provider với tên: {}", name))
         }
-        
-        bail!("Bridge provider not found: {}", provider_name)
     }
     
+    /// Thực hiện bridge token giữa các chain
     async fn bridge_tokens(
         &self,
         provider_name: &str,
-        source_chain: Chain,
-        target_chain: Chain,
+        source_chain: common::Chain,
+        destination_chain: common::Chain,
         token_address: &str,
         amount: &str,
-        receiver: &str
-    ) -> Result<BridgeTransaction> {
-        self.bridge_tokens_impl(provider_name, source_chain, target_chain, token_address, amount, receiver).await
+        recipient: &str
+    ) -> Result<common::BridgeTransaction> {
+        let provider = self.get_provider(provider_name).await
+            .with_context(|| format!("Không thể lấy provider '{}' khi thực hiện bridge token", provider_name))?;
+        
+        provider.bridge_token(
+            source_chain,
+            destination_chain,
+            token_address,
+            amount,
+            recipient
+        ).await
     }
     
     fn get_supported_chains(&self) -> Vec<Chain> {
@@ -382,7 +387,7 @@ impl BridgeAdapter {
         }
         
         // Check if provider exists
-        let provider = self.get_provider_legacy(provider_name).await
+        let provider = self.get_provider(provider_name).await
             .context(format!("Failed to get provider: {}", provider_name))?;
         
         // Check compatibility between chains and provider
@@ -485,7 +490,7 @@ impl BridgeAdapter {
         }
         
         // Check if provider exists
-        let provider = self.get_provider_legacy(provider_name).await
+        let provider = self.get_provider(provider_name).await
             .context(format!("Failed to get provider: {}", provider_name))?;
         
         // Get status from provider
@@ -532,7 +537,7 @@ impl BridgeAdapter {
         }
         
         // Check if provider exists
-        let provider = self.get_provider_legacy(provider_name).await
+        let provider = self.get_provider(provider_name).await
             .context(format!("Failed to get provider: {}", provider_name))?;
         
         // Check compatibility between chains
@@ -582,20 +587,29 @@ impl BridgeAdapter {
             bail!("Transaction hash cannot be empty");
         }
         
-        // Get the provider
-        let provider = self.get_provider_legacy(provider_name).await
+        // Get provider
+        let provider = self.get_provider(provider_name).await
             .context(format!("Failed to get provider: {}", provider_name))?;
             
-        // Use the common monitor_transaction function from bridge_types
-        let result = monitor_transaction(&*provider, tx_hash, config).await;
+        // Clone tx_hash để nó có thể được capture và tồn tại đủ lâu trong closure
+        let tx_hash_owned = tx_hash.to_string();
         
-        // If monitoring was successful, update the transaction status
-        if let Ok(status) = &result {
-            if let Err(e) = self.update_transaction_status(tx_hash, status.clone()).await {
-                warn!("Failed to update transaction status: {}", e);
-                // Continue monitoring even if update fails
+        // Create closure that will be passed to monitor_transaction
+        let get_status = move |hash: &str| {
+            let provider = provider.clone();
+            let hash_owned = hash.to_string(); // Clone hash để tránh lỗi lifetime
+            
+            async move {
+                provider.get_transaction_status(&hash_owned).await
             }
-        }
+        };
+        
+        let result = common::bridge_types::monitor_transaction(
+            &tx_hash_owned, 
+            get_status,
+            None,
+            config
+        ).await;
         
         result
     }

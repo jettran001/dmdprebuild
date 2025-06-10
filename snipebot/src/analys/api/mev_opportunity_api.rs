@@ -2,7 +2,7 @@
 ///
 /// This module implements the MevOpportunityProvider trait to provide
 /// standardized access to MEV opportunity functionality.
-
+///
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;

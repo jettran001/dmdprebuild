@@ -173,7 +173,7 @@ impl NonceManager {
     
     /// Kiểm tra và đặt chỗ nonce cho transaction
     pub async fn reserve_nonce(&mut self, tx: &Transaction) -> Result<(), QueueError> {
-        let nonces = self.address_nonces.entry(tx.from.clone()).or_default();
+        let nonces = self.address_nonces.entry(tx.from_address.clone()).or_default();
         
         if nonces.contains(&tx.nonce) {
             return Err(QueueError::NonceAlreadyUsed);
@@ -185,7 +185,7 @@ impl NonceManager {
     
     /// Giải phóng nonce đã đặt chỗ
     pub async fn release_nonce(&mut self, tx: &Transaction) -> Result<(), QueueError> {
-        if let Some(nonces) = self.address_nonces.get_mut(&tx.from) {
+        if let Some(nonces) = self.address_nonces.get_mut(&tx.from_address) {
             if let Some(pos) = nonces.iter().position(|&x| x == tx.nonce) {
                 nonces.remove(pos);
             }
@@ -226,7 +226,7 @@ pub struct Transaction {
     pub hash: String,
     
     /// Địa chỉ gửi
-    pub from: String,
+    pub from_address: String,
     
     /// Địa chỉ nhận
     pub to: String,

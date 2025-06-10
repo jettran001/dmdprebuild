@@ -4,16 +4,13 @@
 //! các dịch vụ như Flashbots, Blocknative, Eden Network, và các relay MEV-Boost.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use tokio::time::sleep;
-use ethers::prelude::*;
-use ethers::core::types::{TransactionRequest, U256, Bytes};
-use tracing::{info, debug, warn, error};
-use uuid::Uuid;
-use async_trait::async_trait;
+use anyhow::{Result, anyhow};
+use tracing::error;
+use ethers::types::{TransactionRequest, U256, Address, H160};
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::analys::mempool::MempoolTransaction;
+use super::types::{MevOpportunity, MevExecutionMethod};
 use super::types::MevConfig;
 use super::constants::*;
 
@@ -524,14 +521,17 @@ impl BundleManager {
                 for provider in &self.providers {
                     if let Ok(status) = provider.check_bundle_status(&bundle.id).await {
                         if status != BundleStatus::Submitted {
+                            // Clone status để tránh bị move
+                            let status_clone = status.clone();
+                            
                             // Update status if changed
                             self.update_bundle_status(&bundle.id, status).await;
                             
-                            // Log status change
+                            // Log status change (sử dụng bản clone)
                             info!(
                                 "Bundle {} status changed to {:?}", 
                                 bundle.id, 
-                                status
+                                status_clone
                             );
                             
                             break; // Stop checking with other providers
@@ -601,11 +601,12 @@ impl BundleManager {
     
     /// Clone self reference cho async tasks
     fn clone(&self) -> Self {
+        let running_value = *self.running.read().blocking_lock();
         Self {
             providers: self.providers.clone(),
             bundles: RwLock::new(Vec::new()),
             config: RwLock::new(MevConfig::default()),
-            running: RwLock::new(*self.running.read().blocking_lock()),
+            running: RwLock::new(running_value),
         }
     }
 }

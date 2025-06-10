@@ -5,7 +5,6 @@
 //! - Phát hiện tax động (có thể thay đổi)
 //! - Phát hiện phí ẩn
 
-use std::collections::HashMap;
 use regex::Regex;
 
 use super::types::ContractInfo;

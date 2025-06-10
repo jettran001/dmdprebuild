@@ -9,7 +9,6 @@
 /// - Just-In-Time liquidity provision
 /// - Cross-domain MEV opportunities
 /// - Advanced backrunning and order flow tracking
-
 mod types;
 mod strategy;
 mod opportunity;

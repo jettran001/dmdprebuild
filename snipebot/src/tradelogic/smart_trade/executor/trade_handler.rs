@@ -1,33 +1,24 @@
-/// Trade Handler - Xử lý giao dịch
-///
-/// Module này chứa logic xử lý giao dịch cụ thể (mua, bán, swap)
-/// và các chức năng liên quan đến thực thi giao dịch.
-
-use std::collections::HashMap;
+//! Trade Handler cho Smart Trade Executor
+//!
+//! Module này xử lý việc thực thi các giao dịch, bao gồm
+//! kiểm tra điều kiện, khởi tạo giao dịch, và theo dõi kết quả.
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
-use chrono::Utc;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow, bail};
-use uuid;
-use serde::{Serialize, Deserialize};
-use tokio::time::timeout;
+use std::collections::HashMap;
+use anyhow::{Result, Context};
+use tracing::{debug, info, error, warn};
 
-// Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::token_status::{TokenIssue, IssueSeverity};
-use crate::types::{TokenPair, TradeParams, TradeType};
+use crate::types::{TradeParams, TradeType};
 use crate::tradelogic::traits::{SharedOpportunity};
 use crate::tradelogic::common::{
-    NetworkStatus, NetworkReliabilityManager, RetryStrategy, get_network_manager, ResourcePriority
+    NetworkStatus, RetryStrategy
 };
 
 // Imports from other modules
 use crate::tradelogic::smart_trade::executor::core::SmartTradeExecutor;
 use super::types::{TradeResult, TradeStatus, TradeStrategy, TradeTracker};
-use super::utils::{generate_id, get_current_timestamp, retry_async};
-use super::risk_manager::{validate_token_safety, analyze_risk};
+use super::utils::retry_async;
+use super::risk_manager::validate_token_safety;
 use super::risk_manager::RiskManager;
 use super::position_manager::PositionManager;
 
@@ -114,16 +105,16 @@ pub async fn execute_buy(
     let params = &trade_tracker.params;
     
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id())),
     };
     
     // Lưu trạng thái giao dịch
     save_trade_state(executor, trade_tracker).await?;
     
     // Kiểm tra trạng thái mạng trước khi thực hiện giao dịch
-    let service_id = format!("blockchain_rpc_{}", params.chain_id);
+    let service_id = format!("blockchain_rpc_{}", params.chain_id());
     let network_status = executor.network_manager.get_network_status(&service_id).await;
     
     if network_status == NetworkStatus::Failed {
@@ -141,14 +132,14 @@ pub async fn execute_buy(
             actual_price: None,
             fee: None,
             profit_loss: None,
-            error: Some(format!("Network connection to chain {} is currently unavailable. Scheduled for retry.", params.chain_id)),
+            error: Some(format!("Network connection to chain {} is currently unavailable. Scheduled for retry.", params.chain_id())),
             explorer_url: None,
         });
     }
     
     // Kiểm tra an toàn token trước khi mua với bảo vệ mạng
     let (is_safe, issues) = executor.with_network_protection(
-        params.chain_id,
+        params.chain_id(),
         "validate_token_safety",
         || validate_token_safety(executor, params)
     ).await?;
@@ -202,9 +193,9 @@ pub async fn execute_buy(
     
     // Lấy giá hiện tại với circuit breaker
     let current_price = match executor.with_network_protection(
-        params.chain_id,
+        params.chain_id(),
         "get_token_price",
-        || adapter.get_token_price(&params.token_pair.token_address)
+        || adapter.get_token_price(&params.token_address)
     ).await {
         Ok(price) => price,
         Err(e) => {
@@ -240,10 +231,10 @@ pub async fn execute_buy(
     // Lấy nonce từ NonceManager với bảo vệ mạng
     let mut nonce_manager = executor.nonce_manager.write().await;
     let nonce = match executor.with_network_protection(
-        params.chain_id,
+        params.chain_id(),
         "get_next_nonce",
         || nonce_manager.get_next_nonce(
-            params.chain_id,
+            params.chain_id(),
             &params.wallet_address,
             adapter
         )
@@ -273,7 +264,7 @@ pub async fn execute_buy(
     };
     
     debug!("Using nonce {} for buy transaction {} on chain {}", 
-        nonce, trade_tracker.trade_id, params.chain_id);
+        nonce, trade_tracker.trade_id, params.chain_id());
     
     // Tạo retry strategy từ cấu hình
     let retry_strategy = RetryStrategy {
@@ -288,8 +279,8 @@ pub async fn execute_buy(
     let result = match executor.network_manager.with_circuit_breaker(
         &service_id,
         || adapter.swap_tokens_with_nonce(
-            &params.token_pair.base_token_address,
-            &params.token_pair.token_address,
+            &params.base_token(),
+            &params.token_address,
             params.amount,
             slippage,
             params.wallet_address.clone(),
@@ -302,7 +293,7 @@ pub async fn execute_buy(
             
             // Đánh dấu giao dịch đã được gửi trong NonceManager
             nonce_manager.mark_transaction_sent(
-                params.chain_id,
+                params.chain_id(),
                 &params.wallet_address,
                 nonce,
                 &tx.tx_hash
@@ -337,7 +328,7 @@ pub async fn execute_buy(
                 fee: Some(tx.fee),
                 profit_loss: None,
                 error: None,
-                explorer_url: Some(format!("{}/tx/{}", get_explorer_url(params.chain_id), tx.tx_hash)),
+                explorer_url: Some(format!("{}/tx/{}", get_explorer_url(params.chain_id()), tx.tx_hash)),
             }
         },
         Err(e) => {
@@ -349,7 +340,7 @@ pub async fn execute_buy(
             // Kiểm tra nếu giao dịch đã được đưa vào mempool nhưng gọi API lỗi
             let pending_tx = nonce_manager.check_pending_transactions(
                 adapter, 
-                params.chain_id, 
+                params.chain_id(), 
                 &params.wallet_address
             ).await;
             
@@ -404,16 +395,16 @@ pub async fn execute_sell(
     let params = &trade_tracker.params;
     
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id())),
     };
     
     // Cập nhật trạng thái
     trade_tracker.status = TradeStatus::Executing;
     
     // Lấy giá hiện tại
-    let current_price = match adapter.get_token_price(&params.token_pair.token_address).await {
+    let current_price = match adapter.get_token_price(&params.token_address).await {
         Ok(price) => price,
         Err(e) => {
             warn!("Failed to get token price for trade {}: {}", trade_tracker.trade_id, e);
@@ -454,7 +445,7 @@ pub async fn execute_sell(
     // Lấy nonce từ NonceManager
     let mut nonce_manager = executor.nonce_manager.write().await;
     let nonce = match nonce_manager.get_next_nonce(
-        params.chain_id,
+        params.chain_id(),
         &params.wallet_address,
         adapter
     ).await {
@@ -480,12 +471,12 @@ pub async fn execute_sell(
     };
     
     debug!("Using nonce {} for sell transaction {} on chain {}", 
-        nonce, trade_tracker.trade_id, params.chain_id);
+        nonce, trade_tracker.trade_id, params.chain_id());
     
     // Thực hiện swap từ token sang base token với nonce cụ thể
     let result = match adapter.swap_tokens_with_nonce(
-        &params.token_pair.token_address,
-        &params.token_pair.base_token_address,
+        &params.token_address,
+        &params.base_token(),
         params.amount,
         slippage,
         params.wallet_address.clone(),
@@ -496,7 +487,7 @@ pub async fn execute_sell(
             
             // Đánh dấu giao dịch đã được gửi trong NonceManager
             nonce_manager.mark_transaction_sent(
-                params.chain_id,
+                params.chain_id(),
                 &params.wallet_address,
                 nonce,
                 &tx.tx_hash
@@ -556,7 +547,7 @@ pub async fn execute_opportunity(
     // Tạo trade params từ opportunity
     let params = TradeParams {
         chain_id: opportunity.chain_id,
-        token_pair: opportunity.token_pair.clone(),
+        token_address: opportunity.token_pair.token_address,
         trade_type: opportunity.trade_type.clone(),
         amount: opportunity.recommended_amount,
         slippage: None, // Sử dụng mặc định
@@ -625,24 +616,24 @@ pub async fn simulate_trade(
     params: &TradeParams,
 ) -> Result<TradeResult> {
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id())),
     };
     
     // Mô phỏng swap
     let simulation = match params.trade_type {
         TradeType::Buy => {
             adapter.simulate_swap(
-                &params.token_pair.base_token_address,
-                &params.token_pair.token_address,
+                &params.base_token(),
+                &params.token_address,
                 params.amount,
             ).await
         },
         TradeType::Sell => {
             adapter.simulate_swap(
-                &params.token_pair.token_address,
-                &params.token_pair.base_token_address,
+                &params.token_address,
+                &params.base_token(),
                 params.amount,
             ).await
         },
@@ -881,7 +872,7 @@ impl TradeHandler {
         params: &TradeParams,
         trade_id: &str,
     ) -> Result<TradeResult> {
-        debug!("Thực thi giao dịch mua: chain={}, token={}", params.chain_id, params.token_address);
+        debug!("Thực thi giao dịch mua: chain={}, token={}", params.chain_id(), params.token_address);
         
         // Kiểm tra rủi ro và validation
         self.validate_trade(params).await?;
@@ -908,7 +899,7 @@ impl TradeHandler {
         params: &TradeParams,
         trade_id: &str,
     ) -> Result<TradeResult> {
-        debug!("Thực thi giao dịch bán: chain={}, token={}", params.chain_id, params.token_address);
+        debug!("Thực thi giao dịch bán: chain={}, token={}", params.chain_id(), params.token_address);
         
         // Kiểm tra rủi ro và validation
         self.validate_trade(params).await?;
@@ -1052,7 +1043,7 @@ impl TradeHandler {
         
         let result = TradeResult {
             trade_id: trade_id.to_string(),
-            chain_id: params.chain_id,
+            chain_id: params.chain_id(),
             token_address: params.token_address.clone(),
             amount: params.amount,
             trade_type: params.trade_type,

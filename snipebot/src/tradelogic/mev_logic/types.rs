@@ -4,17 +4,18 @@
 //! các chiến lược MEV và phân tích mempool.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use crate::types::{ChainType, TokenPair};
+use std::time::{SystemTime, UNIX_EPOCH};
+use crate::types::TokenPair;
 
 // Import types từ analys/mempool/types để tránh định nghĩa trùng lặp
 use crate::analys::mempool::types::{
-    SuspiciousPattern, MempoolAlertType, TransactionType, TransactionPriority,
-    AlertSeverity, TokenInfo, MempoolTransaction
+    SuspiciousPattern, MempoolAlertType, MempoolTransaction
 };
 
 // Import from common module
 use crate::tradelogic::common::types::{TraderBehaviorType, TraderExpertiseLevel, GasBehavior, TraderBehaviorAnalysis};
+// Import TradeStatus để thêm phương thức update_status
+use common::trading_actions::TradeStatus;
 
 /// MEV types and data models
 
@@ -27,6 +28,8 @@ pub enum MevOpportunityType {
     Sandwich,
     /// Front run another transaction - dùng từ SuspiciousPattern
     FrontRun,
+    /// Back run another transaction
+    Backrun,
     /// New token creation - dùng từ MempoolAlertType
     NewToken,
     /// New liquidity added - dùng từ MempoolAlertType
@@ -73,11 +76,78 @@ pub enum MevExecutionMethod {
     MultiSwap,
     /// Custom contract call
     CustomContract,
+    /// Thực thi thông qua MEV bundle
+    MevBundle,
+    /// Thực thi thông qua private RPC
+    PrivateRPC,
+    /// Thực thi thông qua builder API
+    BuilderAPI,
+}
+
+// Thêm implementation cho MevExecutionMethod
+impl MevExecutionMethod {
+    /// Validate execution method for a specific chain
+    pub fn validate_for_chain(&self, chain_id: u32) -> Result<(), anyhow::Error> {
+        use anyhow::anyhow;
+        
+        match self {
+            Self::FlashLoan => {
+                // Kiểm tra hỗ trợ flash loan trên chain
+                match chain_id {
+                    1 | 56 | 137 | 42161 | 10 => Ok(()), // Các chain chính hỗ trợ flash loan
+                    _ => Err(anyhow!("Flash loan not supported on chain {}", chain_id))
+                }
+            },
+            Self::MevBundle => {
+                // Kiểm tra hỗ trợ MEV bundle trên chain
+                match chain_id {
+                    1 | 5 | 11155111 => Ok(()), // Ethereum và testnet hỗ trợ MEV bundle
+                    _ => Err(anyhow!("MEV bundle not supported on chain {}", chain_id))
+                }
+            },
+            Self::PrivateRPC => {
+                // Kiểm tra hỗ trợ private RPC trên chain
+                match chain_id {
+                    1 | 56 | 137 | 42161 | 10 | 5 | 11155111 => Ok(()), // Nhiều chain hỗ trợ
+                    _ => Err(anyhow!("Private RPC not configured for chain {}", chain_id))
+                }
+            },
+            Self::BuilderAPI => {
+                // Kiểm tra hỗ trợ builder API trên chain
+                match chain_id {
+                    1 | 5 | 11155111 => Ok(()), // Ethereum và testnet hỗ trợ builder API
+                    _ => Err(anyhow!("Builder API not supported on chain {}", chain_id))
+                }
+            },
+            Self::Standard | Self::MultiSwap | Self::CustomContract => Ok(()), // Các phương thức còn lại được hỗ trợ trên tất cả các chain
+        }
+    }
+}
+
+/// Định nghĩa trạng thái của một cơ hội MEV
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MevOpportunityStatus {
+    /// Cơ hội đã được phát hiện nhưng chưa xử lý
+    Detected,
+    /// Cơ hội đang được đánh giá
+    Evaluating,
+    /// Cơ hội đang được thực thi
+    Executing,
+    /// Cơ hội đã được thực thi thành công
+    Executed,
+    /// Thực thi cơ hội thất bại
+    Failed,
+    /// Cơ hội đã hết hạn
+    Expired,
+    /// Cơ hội bị từ chối (ví dụ: không đủ lợi nhuận)
+    Rejected,
 }
 
 /// Thông tin cơ hội MEV
 #[derive(Debug, Clone)]
 pub struct MevOpportunity {
+    /// ID giao dịch
+    pub id: String,
     /// Loại cơ hội MEV
     pub opportunity_type: MevOpportunityType,
     /// Blockchain và chain ID
@@ -96,6 +166,8 @@ pub struct MevOpportunity {
     pub estimated_net_profit_usd: f64,
     /// Cặp token liên quan
     pub token_pairs: Vec<TokenPair>,
+    /// Token pair chính (nếu có)
+    pub token_pair: Option<TokenPair>,
     /// Độ rủi ro ước tính (0-100, càng cao càng rủi ro)
     pub risk_score: f64,
     /// Giao dịch liên quan
@@ -104,6 +176,26 @@ pub struct MevOpportunity {
     pub execution_method: MevExecutionMethod,
     /// Tham số riêng cho từng loại cơ hội
     pub specific_params: HashMap<String, String>,
+    /// Các tham số cụ thể (định dạng khác)
+    pub parameters: HashMap<String, String>,
+    /// Transaction hash nếu đã thực thi
+    pub execution_tx_hash: Option<String>,
+    /// Trạng thái giao dịch TradeStatus
+    pub status: Option<TradeStatus>,
+    /// Trạng thái cơ hội MEV
+    pub mev_status: MevOpportunityStatus,
+    /// Giao dịch mục tiêu (dùng cho sandwich và backrun)
+    pub target_transaction: Option<MempoolTransaction>,
+    /// Dữ liệu bundle giao dịch (dùng cho MevBundle)
+    pub bundle_data: Option<Vec<u8>>,
+    /// Giao dịch đầu tiên trong sandwich
+    pub first_transaction: Option<Vec<u8>>,
+    /// Giao dịch thứ hai trong sandwich
+    pub second_transaction: Option<Vec<u8>>,
+    /// Lợi nhuận kỳ vọng (ETH)
+    pub expected_profit: f64,
+    /// Lợi nhuận thực tế sau khi thực thi (ETH)
+    pub actual_profit: Option<f64>,
 }
 
 // Thêm constructor cho MevOpportunity để dễ dàng tạo instance
@@ -124,6 +216,7 @@ impl MevOpportunity {
             .as_secs();
             
         Self {
+            id: uuid::Uuid::new_v4().to_string(), // Generate a unique ID
             opportunity_type,
             chain_id,
             detected_at: now,
@@ -133,10 +226,160 @@ impl MevOpportunity {
             estimated_gas_cost_usd,
             estimated_net_profit_usd: estimated_profit_usd - estimated_gas_cost_usd,
             token_pairs,
+            token_pair: token_pairs.first().cloned(),
             risk_score,
             related_transactions: Vec::new(),
             execution_method,
             specific_params: HashMap::new(),
+            parameters: HashMap::new(),
+            execution_tx_hash: None,
+            status: None,
+            target_transaction: None,
+            bundle_data: None,
+            first_transaction: None,
+            second_transaction: None,
+            expected_profit: 0.0,
+            actual_profit: None,
+            mev_status: MevOpportunityStatus::Detected,
+        }
+    }
+    
+    /// Tạo cơ hội MEV mới với validation
+    pub fn new_with_validation(
+        chain_id: u32,
+        opportunity_type: MevOpportunityType,
+        detected_at: u64,
+        expires_at: u64,
+        estimated_profit_usd: f64,
+        estimated_gas_cost_usd: f64,
+        execution_method: MevExecutionMethod,
+        token_pair: Option<TokenPair>,
+        parameters: HashMap<String, String>,
+        risk_score: u8,
+    ) -> Result<Self, anyhow::Error> {
+        use anyhow::anyhow;
+        
+        // Validate opportunity type parameters
+        opportunity_type.validate_parameters(&parameters)?;
+        
+        // Validate execution method
+        execution_method.validate_for_chain(chain_id)?;
+        
+        // Validate profitability
+        if estimated_profit_usd <= 0.0 {
+            return Err(anyhow!("Estimated profit must be positive"));
+        }
+        
+        // Validate gas cost
+        if estimated_gas_cost_usd < 0.0 {
+            return Err(anyhow!("Estimated gas cost cannot be negative"));
+        }
+        
+        // Validate timestamps
+        if detected_at >= expires_at {
+            return Err(anyhow!("Expiration time must be after detection time"));
+        }
+        
+        let token_pairs = if let Some(tp) = &token_pair {
+            vec![tp.clone()]
+        } else {
+            Vec::new()
+        };
+        
+        Ok(Self {
+            id: uuid::Uuid::new_v4().to_string(), // Generate a unique ID
+            chain_id,
+            opportunity_type,
+            detected_at,
+            expires_at,
+            executed: false,
+            estimated_profit_usd,
+            estimated_gas_cost_usd,
+            estimated_net_profit_usd: estimated_profit_usd - estimated_gas_cost_usd,
+            token_pairs,
+            token_pair,
+            risk_score: risk_score as f64,
+            related_transactions: Vec::new(),
+            execution_method,
+            specific_params: HashMap::new(),
+            parameters,
+            execution_tx_hash: None,
+            status: None,
+            target_transaction: None,
+            bundle_data: None,
+            first_transaction: None,
+            second_transaction: None,
+            expected_profit: 0.0,
+            actual_profit: None,
+            mev_status: MevOpportunityStatus::Detected,
+        })
+    }
+    
+    /// Kiểm tra tính hợp lệ của cơ hội
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        use anyhow::anyhow;
+        
+        // Kiểm tra các tham số dựa trên loại cơ hội
+        self.opportunity_type.validate_parameters(&self.parameters)?;
+        
+        // Kiểm tra phương thức thực thi
+        self.execution_method.validate_for_chain(self.chain_id)?;
+        
+        // Kiểm tra thời gian hết hạn
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+            
+        if self.expires_at <= now {
+            return Err(anyhow!("Opportunity has expired"));
+        }
+        
+        // Kiểm tra lợi nhuận
+        if self.estimated_profit_usd <= self.estimated_gas_cost_usd {
+            return Err(anyhow!("Opportunity is not profitable after gas costs"));
+        }
+        
+        Ok(())
+    }
+    
+    /// Tính lợi nhuận ròng (sau khi trừ phí gas)
+    pub fn net_profit_usd(&self) -> f64 {
+        (self.estimated_profit_usd - self.estimated_gas_cost_usd).max(0.0_f64)
+    }
+    
+    /// Tính tỷ lệ lợi nhuận trên chi phí gas
+    pub fn profit_to_gas_ratio(&self) -> f64 {
+        if self.estimated_gas_cost_usd <= 0.0 {
+            return f64::INFINITY;
+        }
+        self.estimated_profit_usd / self.estimated_gas_cost_usd
+    }
+    
+    /// Kiểm tra xem cơ hội có đáng thực hiện dựa trên ngưỡng lợi nhuận
+    pub fn is_worth_executing(&self, min_profit_usd: f64, min_profit_gas_ratio: f64) -> bool {
+        let net_profit = self.net_profit_usd();
+        let profit_gas_ratio = self.profit_to_gas_ratio();
+        
+        net_profit >= min_profit_usd && profit_gas_ratio >= min_profit_gas_ratio
+    }
+    
+    /// Đánh dấu cơ hội đã thực thi với tx hash
+    pub fn mark_as_executed(&mut self, tx_hash: String) {
+        self.executed = true;
+        self.execution_tx_hash = Some(tx_hash);
+        self.status = Some(TradeStatus::Completed);
+        self.mev_status = MevOpportunityStatus::Executed;
+    }
+    
+    /// Cập nhật trạng thái của cơ hội
+    pub fn update_status(&mut self, status: TradeStatus) {
+        self.status = Some(status);
+        
+        // Nếu trạng thái là Completed, đánh dấu là đã thực thi
+        if status == TradeStatus::Completed {
+            self.executed = true;
+            self.mev_status = MevOpportunityStatus::Executed;
         }
     }
 }
@@ -450,191 +693,6 @@ impl MevOpportunityType {
         }
         
         Ok(())
-    }
-}
-
-/// Phương thức thực thi cho MEV
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MevExecutionMethod {
-    /// Giao dịch tiêu chuẩn
-    Standard,
-    /// Flash loan 
-    FlashLoan,
-    /// Thực thi thông qua MEV bundle
-    MevBundle,
-    /// Thực thi thông qua private RPC
-    PrivateRPC,
-    /// Thực thi thông qua builder API
-    BuilderAPI,
-}
-
-impl MevExecutionMethod {
-    /// Validate execution method for a specific chain
-    pub fn validate_for_chain(&self, chain_id: u32) -> Result<(), anyhow::Error> {
-        use anyhow::anyhow;
-        
-        match self {
-            Self::FlashLoan => {
-                // Kiểm tra hỗ trợ flash loan trên chain
-                match chain_id {
-                    1 | 56 | 137 | 42161 | 10 => Ok(()), // Các chain chính hỗ trợ flash loan
-                    _ => Err(anyhow!("Flash loan not supported on chain {}", chain_id))
-                }
-            },
-            Self::MevBundle => {
-                // Kiểm tra hỗ trợ MEV bundle trên chain
-                match chain_id {
-                    1 | 5 | 11155111 => Ok(()), // Ethereum và testnet hỗ trợ MEV bundle
-                    _ => Err(anyhow!("MEV bundle not supported on chain {}", chain_id))
-                }
-            },
-            Self::PrivateRPC => {
-                // Kiểm tra hỗ trợ private RPC trên chain
-                match chain_id {
-                    1 | 56 | 137 | 42161 | 10 | 5 | 11155111 => Ok(()), // Nhiều chain hỗ trợ
-                    _ => Err(anyhow!("Private RPC not configured for chain {}", chain_id))
-                }
-            },
-            Self::BuilderAPI => {
-                // Kiểm tra hỗ trợ builder API trên chain
-                match chain_id {
-                    1 | 5 | 11155111 => Ok(()), // Ethereum và testnet hỗ trợ builder API
-                    _ => Err(anyhow!("Builder API not supported on chain {}", chain_id))
-                }
-            },
-            Self::Standard => Ok(()), // Standard được hỗ trợ trên tất cả các chain
-        }
-    }
-}
-
-/// MEV Opportunity Structure - Thông tin cơ hội MEV
-#[derive(Debug, Clone)]
-pub struct MevOpportunity {
-    /// Chain ID
-    pub chain_id: u32,
-    /// Loại cơ hội
-    pub opportunity_type: MevOpportunityType,
-    /// Thời điểm phát hiện (UNIX timestamp)
-    pub detected_at: u64,
-    /// Thời điểm hết hạn (UNIX timestamp)
-    pub expires_at: u64,
-    /// Lợi nhuận ước tính (USD)
-    pub estimated_profit_usd: f64,
-    /// Phí gas ước tính (USD)
-    pub estimated_gas_cost_usd: f64,
-    /// Phương thức thực thi
-    pub execution_method: MevExecutionMethod,
-    /// Token pair liên quan
-    pub token_pair: Option<TokenPair>,
-    /// Các tham số cụ thể
-    pub parameters: HashMap<String, String>,
-    /// Điểm rủi ro (0-100)
-    pub risk_score: u8,
-}
-
-impl MevOpportunity {
-    /// Tạo cơ hội MEV mới với validation
-    pub fn new(
-        chain_id: u32,
-        opportunity_type: MevOpportunityType,
-        detected_at: u64,
-        expires_at: u64,
-        estimated_profit_usd: f64,
-        estimated_gas_cost_usd: f64,
-        execution_method: MevExecutionMethod,
-        token_pair: Option<TokenPair>,
-        parameters: HashMap<String, String>,
-        risk_score: u8,
-    ) -> Result<Self, anyhow::Error> {
-        use anyhow::anyhow;
-        
-        // Validate opportunity type parameters
-        opportunity_type.validate_parameters(&parameters)?;
-        
-        // Validate execution method
-        execution_method.validate_for_chain(chain_id)?;
-        
-        // Validate profitability
-        if estimated_profit_usd <= 0.0 {
-            return Err(anyhow!("Estimated profit must be positive"));
-        }
-        
-        // Validate gas cost
-        if estimated_gas_cost_usd < 0.0 {
-            return Err(anyhow!("Estimated gas cost cannot be negative"));
-        }
-        
-        // Validate timestamps
-        if detected_at >= expires_at {
-            return Err(anyhow!("Expiration time must be after detection time"));
-        }
-        
-        // Validate risk score
-        if risk_score > 100 {
-            return Err(anyhow!("Risk score must be between 0 and 100"));
-        }
-        
-        Ok(Self {
-            chain_id,
-            opportunity_type,
-            detected_at,
-            expires_at,
-            estimated_profit_usd,
-            estimated_gas_cost_usd,
-            execution_method,
-            token_pair,
-            parameters,
-            risk_score,
-        })
-    }
-    
-    /// Kiểm tra tính hợp lệ của cơ hội
-    pub fn validate(&self) -> Result<(), anyhow::Error> {
-        use anyhow::anyhow;
-        
-        // Kiểm tra các tham số dựa trên loại cơ hội
-        self.opportunity_type.validate_parameters(&self.parameters)?;
-        
-        // Kiểm tra phương thức thực thi
-        self.execution_method.validate_for_chain(self.chain_id)?;
-        
-        // Kiểm tra thời gian hết hạn
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-            
-        if self.expires_at <= now {
-            return Err(anyhow!("Opportunity has expired"));
-        }
-        
-        // Kiểm tra lợi nhuận
-        if self.estimated_profit_usd <= self.estimated_gas_cost_usd {
-            return Err(anyhow!("Opportunity is not profitable after gas costs"));
-        }
-        
-        Ok(())
-    }
-    
-    /// Tính lợi nhuận ròng (sau khi trừ phí gas)
-    pub fn net_profit_usd(&self) -> f64 {
-        (self.estimated_profit_usd - self.estimated_gas_cost_usd).max(0.0)
-    }
-    
-    /// Tính tỷ lệ lợi nhuận trên chi phí gas
-    pub fn profit_to_gas_ratio(&self) -> f64 {
-        if self.estimated_gas_cost_usd <= 0.0 {
-            return f64::INFINITY;
-        }
-        self.estimated_profit_usd / self.estimated_gas_cost_usd
-    }
-    
-    /// Kiểm tra xem cơ hội có đáng thực hiện dựa trên ngưỡng lợi nhuận
-    pub fn is_worth_executing(&self, min_profit_usd: f64, min_profit_gas_ratio: f64) -> bool {
-        let net_profit = self.net_profit_usd();
-        let profit_gas_ratio = self.profit_to_gas_ratio();
-        
-        net_profit >= min_profit_usd && profit_gas_ratio >= min_profit_gas_ratio
     }
 }
 

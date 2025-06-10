@@ -4,15 +4,12 @@
 //! hành vi trader, và tiềm năng các cơ hội MEV trong mempool.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, Utc};
 
 use crate::analys::mempool::{
     MempoolTransaction, TransactionType, TransactionPriority, SuspiciousPattern
 };
 
 use super::types::{TraderBehaviorType, TraderExpertiseLevel};
-use super::utils;
 
 /// Phát hiện mẫu sandwich từ tập các swap
 pub fn detect_sandwich_pattern(swaps: &[&MempoolTransaction]) -> bool {
@@ -926,7 +923,6 @@ pub fn analyze_opportunities(
     current_block_number: u64,
     max_opportunities_per_pool: usize
 ) -> Result<Vec<MevOpportunity>, anyhow::Error> {
-    use anyhow::Context;
     use tracing::{debug, warn, info};
     
     // Clone danh sách để phân tích và không thay đổi input

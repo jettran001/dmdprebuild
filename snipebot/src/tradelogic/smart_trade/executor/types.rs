@@ -1,12 +1,10 @@
-/// Kiểu dữ liệu nội bộ cho SmartTradeExecutor
-///
-/// Module này định nghĩa các struct, enum và type alias
-/// được sử dụng bởi các module con trong executor.
+//! Kiểu dữ liệu nội bộ cho SmartTradeExecutor
+//!
+//! Module này định nghĩa các struct, enum và type alias
+//! được sử dụng bởi các module con trong executor.
 
 use std::collections::HashMap;
-use std::time::Duration;
 use serde::{Serialize, Deserialize};
-use anyhow::Result;
 use tokio::task::JoinHandle;
 
 use crate::types::{TokenPair, TradeParams, TradeType};
@@ -115,7 +113,7 @@ pub struct TradeResult {
 }
 
 /// Theo dõi giao dịch
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TradeTracker {
     /// ID giao dịch
     pub trade_id: String,

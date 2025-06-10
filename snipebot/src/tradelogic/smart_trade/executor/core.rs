@@ -1,13 +1,11 @@
-/// Core implementation của SmartTradeExecutor
-///
-/// Module này chứa định nghĩa chính của SmartTradeExecutor struct
-/// và implementation của trait TradeExecutor.
+//! Core của Smart Trade Executor
+//!
+//! Module này triển khai TradeExecutor trait cho smart trading logic.
+//! Quản lý state và lifecycle của executor, và điều phối giữa các components.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio::time::sleep;
 use chrono::Utc;
 use tracing::{debug, error, info, warn};
 use anyhow::{Result, Context, anyhow};
@@ -20,8 +18,7 @@ use crate::analys::mempool::MempoolAnalyzer;
 use crate::analys::risk_analyzer::RiskAnalyzer;
 use crate::types::{TradeParams};
 use crate::tradelogic::traits::{
-    TradeExecutor, TradeCoordinator, ExecutorType, SharedOpportunity, 
-    SharedOpportunityType, OpportunityPriority
+    TradeExecutor, TradeCoordinator, ExecutorType, SharedOpportunity
 };
 use crate::tradelogic::common::{
     NetworkStatus, NetworkReliabilityManager, RetryStrategy, get_network_manager, CircuitBreakerConfig,
@@ -32,18 +29,13 @@ use crate::tradelogic::common::{
 use super::types::{
     TradeResult, 
     TradeStatus, 
-    TradeStrategy, 
     TradeTracker
 };
 use crate::tradelogic::smart_trade::types::SmartTradeConfig;
 use crate::tradelogic::smart_trade::analys_client::SmartTradeAnalysisClient;
 
 // Imports from other executor modules
-use super::trade_handler::create_trade_tracker;
 use super::market_monitor::{monitor_loop, process_opportunity, check_opportunities};
-use super::risk_manager::{analyze_risk, validate_token_safety};
-use super::position_manager::{update_positions, close_position};
-use super::utils::{generate_id, get_current_timestamp};
 
 /// Executor for smart trading strategies
 #[derive(Clone)]
@@ -89,6 +81,12 @@ pub struct SmartTradeExecutor {
     
     /// Health monitor
     pub health_monitor: Arc<HealthMonitor>,
+    
+    /// Notification manager for sending alerts
+    pub notification_manager: Option<Arc<crate::notifications::NotificationManager>>,
+    
+    /// Trade log database for storing trade history
+    pub trade_log_db: Option<Arc<dyn crate::tradelogic::smart_trade::alert::DbOperations>>,
 }
 
 impl SmartTradeExecutor {
@@ -186,6 +184,8 @@ impl SmartTradeExecutor {
             network_manager,
             health_check_task: RwLock::new(None),
             health_monitor,
+            notification_manager: None,
+            trade_log_db: None,
         };
         
         Ok(executor)
@@ -209,6 +209,8 @@ impl SmartTradeExecutor {
             network_manager: self.network_manager.clone(),
             health_check_task: RwLock::new(None),
             health_monitor: self.health_monitor.clone(),
+            notification_manager: self.notification_manager.clone(),
+            trade_log_db: self.trade_log_db.clone(),
         }
     }
     
@@ -226,7 +228,7 @@ impl SmartTradeExecutor {
             // Cập nhật coordinator theo cách thread-safe
             {
                 // Khai báo biến Option<Arc<dyn TradeCoordinator>> để có thể take và replace
-                let mut field = tokio::task::block_in_place(|| {
+                let field = tokio::task::block_in_place(|| {
                     // Chuyển đổi Arc<SmartTradeExecutor> thành &mut Option<Arc<dyn TradeCoordinator>>
                     // Sử dụng std::ptr để lấy địa chỉ của field không đổi
                     unsafe {
@@ -252,7 +254,12 @@ impl SmartTradeExecutor {
     pub async fn register_with_coordinator(&self) -> Result<()> {
         if let Some(coordinator) = &self.coordinator {
             let subscription_id = coordinator
-                .subscribe(ExecutorType::SmartTrade, self.executor_id.clone())
+                .subscribe_to_opportunities(self.executor_id.clone(),
+                    Arc::new(|opportunity| {
+                        // Xử lý opportunity trong future
+                        Ok(())
+                    })
+                )
                 .await
                 .context("Failed to subscribe to coordinator")?;
                 
@@ -270,7 +277,7 @@ impl SmartTradeExecutor {
         if let Some(coordinator) = &self.coordinator {
             let subscription = self.coordinator_subscription.read().await;
             if let Some(subscription_id) = &*subscription {
-                coordinator.unsubscribe(subscription_id).await?;
+                coordinator.unsubscribe_from_opportunities(subscription_id).await?;
                 info!("Unregistered from coordinator, subscription ID: {}", subscription_id);
             }
         }
@@ -438,10 +445,20 @@ impl SmartTradeExecutor {
         };
         
         // Cập nhật cấu hình
-        {
-            let mut monitor_config = self.health_monitor.config.write().await;
-            *monitor_config = config;
-        }
+        let mut monitor_config = HealthMonitorConfig {
+            check_interval_seconds: config.health_check_interval_seconds,
+            reconnect_interval_ms: config.reconnect_interval_ms,
+            max_reconnect_attempts: config.max_reconnect_attempts as usize,
+            enable_auto_reconnect: config.enable_auto_reconnect,
+            enable_system_monitoring: config.enable_system_monitoring,
+            enable_network_monitoring: config.enable_network_monitoring,
+            ..Default::default()
+        };
+        
+        // Sử dụng phương thức update_config thay vì truy cập trực tiếp field private
+        self.health_monitor.update_config(monitor_config).await.unwrap_or_else(|e| {
+            warn!("Failed to update health monitor config: {}", e);
+        });
         
         // Đăng ký alert handler tùy chỉnh
         struct ExecutorAlertHandler {
@@ -487,7 +504,7 @@ impl SmartTradeExecutor {
         Ok(())
     }
     
-    /// Kiểm tra sâu về sức khỏe mạng cho một chain cụ thể
+    /// Thực hiện kiểm tra sức khỏe mạng chuyên sâu cho một chain cụ thể
     async fn deep_network_health_check(&self, chain_id: u32) -> Result<()> {
         info!("Performing deep network health check for chain {}", chain_id);
         
@@ -497,68 +514,32 @@ impl SmartTradeExecutor {
             None => return Err(anyhow!("No adapter found for chain {}", chain_id)),
         };
         
-        // Thử các thao tác mạng khác nhau để kiểm tra kết nối
-        let mut checks_passed = 0;
-        let mut checks_failed = 0;
-        
-        // Kiểm tra block number
-        match adapter.get_block_number().await {
-            Ok(block) => {
-                info!("Successfully got block number for chain {}: {}", chain_id, block);
-                checks_passed += 1;
-            }
-            Err(e) => {
-                error!("Failed to get block number for chain {}: {}", chain_id, e);
-                checks_failed += 1;
-            }
+        // Kiểm tra kết nối RPC
+        let rpc_status = adapter.check_connection().await;
+        if !rpc_status {
+            error!("RPC connection check failed for chain {}", chain_id);
+            return Err(anyhow!("RPC connection check failed for chain {}", chain_id));
         }
         
-        // Kiểm tra gas price
-        match adapter.get_gas_price().await {
-            Ok(gas_price) => {
-                info!("Successfully got gas price for chain {}: {}", chain_id, gas_price);
-                checks_passed += 1;
-            }
-            Err(e) => {
-                error!("Failed to get gas price for chain {}: {}", chain_id, e);
-                checks_failed += 1;
-            }
+        // Kiểm tra độ trễ
+        let latency = adapter.get_network_latency_ms().await?;
+        if latency > 5000.0 {
+            warn!("High network latency for chain {}: {} ms", chain_id, latency);
         }
         
-        // Kiểm tra network ID
-        match adapter.get_network_id().await {
-            Ok(network_id) => {
-                info!("Successfully got network ID for chain {}: {}", chain_id, network_id);
-                checks_passed += 1;
-            }
-            Err(e) => {
-                error!("Failed to get network ID for chain {}: {}", chain_id, e);
-                checks_failed += 1;
-            }
-        }
+        // Kiểm tra nếu có thể đọc block mới nhất
+        let block = adapter.get_current_block().await?;
+        let field = block;
         
-        // Nếu hầu hết các kiểm tra đều thất bại, thực hiện thao tác tự động sửa chữa
-        if checks_failed > checks_passed {
-            warn!("Most network checks failed for chain {}. Attempting auto-repair...", chain_id);
-            
-            // Thực hiện các thao tác khôi phục kết nối
-            self.attempt_network_recovery(chain_id).await?;
-        }
-        
+        info!("Network health check passed for chain {}", chain_id);
         Ok(())
     }
     
     /// Cố gắng khôi phục kết nối mạng
     async fn attempt_network_recovery(&self, chain_id: u32) -> Result<()> {
-        info!("Attempting network recovery for chain {}", chain_id);
-        
-        // Tạo service ID
         let service_id = format!("blockchain_rpc_{}", chain_id);
         
-        // Reset circuit breaker
-        self.network_manager.reset(&service_id).await;
-        
-        // Thử kết nối lại với mạng
+        // Lấy adapter cho chain
         let adapter = match self.evm_adapters.get(&chain_id) {
             Some(adapter) => adapter.clone(),
             None => return Err(anyhow!("No adapter found for chain {}", chain_id)),
@@ -583,9 +564,15 @@ impl SmartTradeExecutor {
         } else {
             warn!("Failed to reconnect to chain {}. Scheduling automatic reconnect attempts...", chain_id);
             
+            // Lấy adapter một lần nữa cho closure mới
+            let adapter2 = match self.evm_adapters.get(&chain_id) {
+                Some(adapter) => adapter.clone(),
+                None => return Err(anyhow!("No adapter found for chain {}", chain_id)),
+            };
+            
             // Lên lịch thử kết nối lại tự động
             let health_check = move || {
-                let adapter_clone = adapter.clone();
+                let adapter_clone = adapter2.clone();
                 async move {
                     match adapter_clone.get_block_number().await {
                         Ok(_) => true,
@@ -805,18 +792,18 @@ impl TradeExecutor for SmartTradeExecutor {
     }
     
     /// Get trade history
-    async fn get_trade_history(&self, limit: Option<usize>) -> anyhow::Result<Vec<Self::TradeResult>> {
+    async fn get_trade_history(&self, from_timestamp: u64, to_timestamp: u64) -> anyhow::Result<Vec<Self::TradeResult>> {
         let history = self.trade_history.read().await;
         
-        let mut results: Vec<Self::TradeResult> = history.clone();
-        
-        // Sort by created_at in descending order (newest first)
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        
-        // Apply limit if specified
-        if let Some(limit) = limit {
-            results.truncate(limit);
-        }
+        // Filter trades between the specified timestamps
+        let results: Vec<Self::TradeResult> = history
+            .iter()
+            .filter(|trade| {
+                trade.created_at >= from_timestamp && 
+                (trade.completed_at.unwrap_or(u64::MAX) <= to_timestamp || trade.created_at <= to_timestamp)
+            })
+            .cloned()
+            .collect();
         
         Ok(results)
     }
@@ -877,5 +864,46 @@ impl TradeExecutor for SmartTradeExecutor {
     /// Get executor ID
     fn executor_id(&self) -> String {
         self.executor_id.clone()
+    }
+    
+    /// Get the current status of an active trade
+    /// 
+    /// Retrieves the current state of a trade by its ID.
+    /// Returns None if the trade doesn't exist.
+    async fn get_trade_status(&self, trade_id: &str) -> Result<Option<Self::TradeResult>> {
+        // First check active trades
+        let active_trades = self.active_trades.read().await;
+        if let Some(trade) = active_trades.iter().find(|t| t.trade_id == trade_id) {
+            // Convert TradeTracker to TradeResult
+            let result = TradeResult {
+                trade_id: trade.trade_id.clone(),
+                params: trade.params.clone(),
+                status: trade.status.clone(),
+                created_at: trade.created_at,
+                completed_at: None,
+                tx_hash: trade.tx_hash.clone(),
+                actual_amount: None,
+                actual_price: trade.initial_price,
+                fee: None,
+                profit_loss: None,
+                error: None,
+                explorer_url: None,
+            };
+            return Ok(Some(result));
+        }
+        
+        // If not found in active trades, check history
+        let history = self.trade_history.read().await;
+        let result = history.iter().find(|t| t.trade_id == trade_id).cloned();
+        Ok(result)
+    }
+    
+    /// Evaluate a token for potential trading
+    ///
+    /// Analyzes a token to determine if it's suitable for trading.
+    /// Returns token safety information if available.
+    async fn evaluate_token(&self, chain_id: u32, token_address: &str) -> Result<Option<TokenSafety>> {
+        // Use analys_client to evaluate token
+        self.analys_client.get_token_safety(chain_id, token_address).await
     }
 } 

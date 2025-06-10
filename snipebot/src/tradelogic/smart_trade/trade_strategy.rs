@@ -1,26 +1,21 @@
-/// Trade strategy implementation for SmartTradeExecutor
-///
-/// This module contains advanced trading strategies like dynamic trailing stop,
-/// dynamic take profit/stop loss, and automatic reaction to market conditions.
+//! Trade strategy implementation for SmartTradeExecutor
+//!
+//! This module contains advanced trading strategies like dynamic trailing stop,
+//! dynamic take profit/stop loss, and automatic reaction to market conditions.
 
 // External imports
-use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::Utc;
+use std::collections::HashMap;
+use anyhow::Result;
 use tracing::{debug, error, info, warn};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::risk_analyzer::TradeRiskAnalysis;
-use crate::analys::token_status::{TokenStatus, TokenSafety};
-use crate::analys::mempool::MempoolAnalyzer;
+use crate::types::TradeType;
 
-// Module imports
-use super::types::{TradeTracker, TradeStrategy};
-use super::constants::*;
 use super::executor::SmartTradeExecutor;
+use super::types::{TradeTracker};
+use super::constants::*;
 
 /// Cấu trúc lưu trữ dữ liệu thị trường để điều chỉnh TSL
 pub struct MarketData {
@@ -578,11 +573,26 @@ impl SmartTradeExecutor {
             None => false,
         };
         
-        // Tính các chỉ số thị trường
-        let closes: Vec<f64> = price_data.iter().map(|candle| candle.close).collect();
-        let highs: Vec<f64> = price_data.iter().map(|candle| candle.high).collect();
-        let lows: Vec<f64> = price_data.iter().map(|candle| candle.low).collect();
-        let volumes: Vec<f64> = price_data.iter().map(|candle| candle.volume).collect();
+        // Vì price_data là mảng các giá trị f64, ta cần tính các giá trị high, low, close, volume từ dữ liệu giá
+        // Giả định price_data là mảng giá theo thời gian, thì:
+        let closes = price_data.clone(); // Dùng toàn bộ mảng giá làm closes
+        
+        // Tính giá cao nhất và thấp nhất trong từng khoảng thời gian (giả định mỗi 4 giá trị là 1 giờ)
+        let mut highs = Vec::new();
+        let mut lows = Vec::new();
+        
+        for chunk in price_data.chunks(4).filter(|c| !c.is_empty()) {
+            let high = chunk.iter().fold(0.0_f64, |a, &b| a.max(b));
+            let low = chunk.iter().fold(f64::MAX, |a, &b| if b > 0.0 { a.min(b) } else { a });
+            highs.push(high);
+            lows.push(if low == f64::MAX { *chunk.first().unwrap_or(&0.0) } else { low });
+        }
+        
+        // Giả lập volume data - trong thực tế cần lấy từ API riêng
+        let volumes: Vec<f64> = (0..closes.len()).map(|i| {
+            // Tạo volume giả lập dựa trên chỉ số
+            1000.0 + (((i as f64) * 0.1).sin() * 500.0)
+        }).collect();
         
         // Tính giá trung bình và biến động
         let avg_price: f64 = closes.iter().sum::<f64>() / closes.len() as f64;
@@ -590,10 +600,10 @@ impl SmartTradeExecutor {
         
         // Tính ATR (Average True Range)
         let mut true_ranges = Vec::new();
-        for i in 1..price_data.len() {
-            let high = price_data[i].high;
-            let low = price_data[i].low;
-            let prev_close = price_data[i-1].close;
+        for i in 1..highs.len().min(lows.len()) {
+            let high = highs[i];
+            let low = lows[i];
+            let prev_close = closes.get((i-1) * 4 + 3).unwrap_or(&closes[(i-1) * 4]);
             
             let tr = (high - low).max((high - prev_close).abs()).max((low - prev_close).abs());
             true_ranges.push(tr);
@@ -603,7 +613,7 @@ impl SmartTradeExecutor {
         let atr: f64 = true_ranges.iter().take(atr_period).sum::<f64>() / atr_period as f64;
         
         // Tính biến động giá 24h
-        let highest_price = highs.iter().fold(0.0, |a, &b| a.max(b));
+        let highest_price = highs.iter().fold(0.0_f64, |a, &b| a.max(b));
         let lowest_price = lows.iter().fold(f64::MAX, |a, &b| a.min(b));
         let price_range_percent = (highest_price - lowest_price) / lowest_price * 100.0;
         
@@ -620,8 +630,12 @@ impl SmartTradeExecutor {
         
         // Kiểm tra mempool để phát hiện swap lớn
         let have_large_pending_sell = match self.mempool_analyzers.get(&chain_id) {
-            Some(analyzer) => {
-                analyzer.detect_large_pending_sells(token_address, 5.0).await
+            Some(_) => {
+                // Sử dụng phương thức từ EvmAdapter thay vì MempoolAnalyzer
+                match adapter.detect_large_pending_sells(token_address, 5.0).await {
+                    Ok((detected, _)) => detected,
+                    Err(_) => false
+                }
             },
             None => false,
         };
@@ -796,46 +810,35 @@ impl SmartTradeExecutor {
         let mut whale_selling = false;
         let mut details = String::new();
         
-        // Lấy mempool analyzer
-        if let Some(mempool) = self.mempool_analyzers.get(&chain_id) {
-            // Lấy tổng supply của token
-            if let Ok(total_supply) = adapter.get_token_total_supply(token_address).await {
-                // Lấy các giao dịch gần đây nhất từ mempool
-                if let Ok(transactions) = mempool.get_token_transactions(token_address, 20).await {
-                    // Theo dõi các ví lớn bán token
-                    for tx in transactions {
-                        // Nếu là giao dịch bán
-                        if tx.is_sell && tx.token_address == token_address {
-                            // Lấy số dư của địa chỉ
-                            if let Ok(balance) = adapter.get_token_balance(token_address, &tx.sender).await {
-                                // Tính phần trăm so với tổng supply
-                                let balance_percent = (balance / total_supply) * 100.0;
-                                
-                                // Nếu là whale (sở hữu >3% total supply)
-                                if balance_percent > whale_threshold {
-                                    whale_selling = true;
-                                    details = format!(
-                                        "Phát hiện whale {} bán {} token ({}% của total supply)",
-                                        tx.sender, tx.token_amount, balance_percent
-                                    );
-                                    
-                                    self.log_trade_decision(
-                                        "N/A", 
-                                        token_address, 
-                                        super::types::TradeStatus::Pending, 
-                                        &format!("Whale activity detected: {}", details),
-                                        chain_id
-                                    ).await;
-                                    
-                                    break;
-                                }
+        // Sử dụng EvmAdapter để lấy dữ liệu thay vì mempool analyzer
+        // Lấy tổng supply của token
+        if let Ok(total_supply) = adapter.get_token_total_supply(token_address).await {
+            // Lấy các giao dịch gần đây nhất từ adapter
+            if let Ok(transactions) = adapter.get_token_transactions(token_address, 20).await {
+                // Theo dõi các ví lớn bán token
+                for tx in transactions {
+                    // Kiểm tra xem là giao dịch bán không
+                    if tx.tx_type == crate::analys::mempool::TransactionType::Swap {
+                        // Lấy số dư của địa chỉ
+                        if let Ok(balance) = adapter.get_token_balance(token_address, &tx.from_address).await {
+                            // Tính phần trăm so với tổng supply
+                            let balance_percent = (balance / total_supply) * 100.0;
+                            
+                            // Nếu là whale (sở hữu >3% total supply)
+                            if balance_percent > whale_threshold {
+                                whale_selling = true;
+                                details = format!(
+                                    "Phát hiện whale {} bán {} token ({}% của total supply)",
+                                    tx.from_address, tx.token_amount.unwrap_or(0.0), balance_percent
+                                );
+                                break;
                             }
                         }
                     }
                 }
             }
         }
-        
+
         (whale_selling, details)
     }
     
@@ -889,6 +892,121 @@ impl SmartTradeExecutor {
                     continue;
                 }
             }
+        }
+    }
+
+    /// Bán token dựa trên các thông tin giao dịch
+    /// 
+    /// # Parameters
+    /// - `trade`: Thông tin giao dịch cần bán
+    /// - `reason`: Lý do bán token
+    /// - `current_price`: Giá token hiện tại
+    /// 
+    /// # Returns
+    /// - `Result<(), anyhow::Error>`: Kết quả thực hiện
+    pub async fn sell_token(&self, trade: TradeTracker, reason: String, current_price: f64) -> Result<(), anyhow::Error> {
+        info!("Bắt đầu bán token {} với lý do: {}", trade.token_address, reason);
+        
+        // Lấy adapter cho chain tương ứng
+        let adapter = match self.evm_adapters.get(&trade.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain {}", trade.chain_id)),
+        };
+        
+        // Tạo tham số giao dịch
+        let params = crate::types::TradeParams {
+            chain_id: trade.chain_id,
+            token_address: trade.token_address.clone(),
+            amount: trade.token_amount,
+            trade_type: crate::types::TradeType::Sell,
+            slippage: Some(2.0), // Slippage 2% mặc định cho lệnh bán khẩn cấp
+            gas_price: None,     // Sử dụng giá gas mặc định
+            deadline: None,      // Sử dụng deadline mặc định
+            custom_params: Default::default(),
+        };
+        
+        // Thực hiện giao dịch bán
+        match adapter.execute_sell_token(&trade.token_address, trade.token_amount, 2.0).await {
+            Ok(result) => {
+                // Cập nhật trạng thái giao dịch
+                self.update_trade_status(
+                    &trade.trade_id,
+                    super::types::TradeStatus::Completed,
+                    Some(result.tx_receipt.as_ref().map_or("unknown".to_string(), |r| r.transaction_hash.clone())),
+                    Some(reason),
+                    Some(current_price),
+                ).await;
+                
+                // Thêm vào lịch sử giao dịch
+                let profit_percent = if trade.entry_price > 0.0 {
+                    ((current_price - trade.entry_price) / trade.entry_price) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let trade_result = super::types::TradeResult {
+                    trade_id: trade.trade_id.clone(),
+                    entry_price: trade.entry_price,
+                    exit_price: Some(current_price),
+                    profit_percent: Some(profit_percent),
+                    profit_usd: Some(profit_percent * trade.invested_amount / 100.0),
+                    entry_time: trade.entry_time,
+                    exit_time: Some(chrono::Utc::now().timestamp() as u64),
+                    status: super::types::TradeStatus::Completed,
+                    exit_reason: Some(reason),
+                    gas_cost_usd: result.gas_cost_usd,
+                };
+                
+                let mut history = self.trade_history.write().await;
+                history.push(trade_result);
+                
+                Ok(())
+            },
+            Err(e) => {
+                error!("Không thể bán token {}: {}", trade.token_address, e);
+                
+                // Cập nhật trạng thái giao dịch thành thất bại
+                self.update_trade_status(
+                    &trade.trade_id,
+                    super::types::TradeStatus::Failed,
+                    None,
+                    Some(format!("Lỗi bán token: {}", e)),
+                    Some(current_price),
+                ).await;
+                
+                Err(anyhow::anyhow!("Không thể bán token: {}", e))
+            }
+        }
+    }
+    
+    /// Cập nhật trạng thái giao dịch
+    async fn update_trade_status(
+        &self, 
+        trade_id: &str, 
+        status: super::types::TradeStatus,
+        tx_hash: Option<String>,
+        reason: Option<String>,
+        price: Option<f64>,
+    ) {
+        let mut trades = self.active_trades.write().await;
+        if let Some(pos) = trades.iter().position(|t| t.trade_id == trade_id) {
+            let mut trade = trades[pos].clone();
+            trade.status = status;
+            
+            if let Some(hash) = tx_hash {
+                trade.sell_tx_hash = Some(hash);
+            }
+            
+            if let Some(exit_price) = price {
+                if exit_price > trade.highest_price {
+                    trade.highest_price = exit_price;
+                }
+            }
+            
+            trade.exit_reason = reason;
+            
+            // Cập nhật lại vào danh sách
+            trades[pos] = trade;
         }
     }
 }

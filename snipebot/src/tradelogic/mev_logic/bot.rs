@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
 use tracing::info;
-use tokio::join;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::mempool::{MempoolTransaction, SuspiciousPattern};
@@ -15,7 +14,6 @@ use crate::tradelogic::traits::{
     RiskAnalysisProvider,
     MevOpportunityProvider
 };
-use crate::types::TradeParams;
 
 use super::opportunity::{MevOpportunity, OpportunityManager};
 use super::trader_behavior::TraderBehaviorAnalysis;
@@ -262,34 +260,53 @@ impl MevBotImpl {
     
     /// Execute an MEV opportunity
     pub async fn execute_opportunity(&self, opportunity: &MevOpportunity) -> Result<String> {
-        // Example implementation for executing an opportunity
+        // Lấy chain adapter tương ứng
+        let chain_adapters = self.chain_adapters.read().await;
         let chain_id = opportunity.chain_id;
         
-        let chain_adapters = self.chain_adapters.read().await;
-        let adapter = chain_adapters.get(&chain_id)
-            .ok_or_else(|| anyhow!("No chain adapter found for chain ID {}", chain_id))?;
+        let adapter = chain_adapters.get(&chain_id).ok_or_else(|| {
+            anyhow!("No adapter found for chain ID {}", chain_id)
+        })?;
         
-        // Create a trade params object from the opportunity
-        let params = TradeParams {
-            // Fill in parameters based on opportunity details
-            chain_id,
-            token_address: opportunity.token_pairs[0].token0.address.clone(),
-            amount: 0.0, // Calculate based on opportunity
-            // Fill in other required parameters
-            ..Default::default()
+        // Xác định execution method
+        let execution_method = match opportunity.method {
+            MevExecutionMethod::Flash => {
+                // Flash transaction (sử dụng flash loan)
+                ExecutionMethod::Flash
+            },
+            MevExecutionMethod::Bundle => {
+                // Bundle transactions
+                ExecutionMethod::Bundle
+            },
+            MevExecutionMethod::StandardTransaction => {
+                // Standard transaction
+                ExecutionMethod::Standard
+            },
+            _ => {
+                // Default to standard
+                ExecutionMethod::Standard
+            }
         };
         
-        // Execute the trade using the chain adapter
-        let result = adapter.execute_transaction(&params).await?;
+        // Chuẩn bị transaction params
+        let gas_price = crate::chain_adapters::evm_adapter::get_gas_price_from_ref(adapter).await?;
+        let nonce = adapter.get_expected_nonce(self.get_wallet_address(chain_id).await?).await?;
         
-        // Update opportunity status
-        let mut opportunity_manager = self.opportunity_manager.write().await;
-        opportunity_manager.mark_as_executed(
-            &opportunity.id,
-            result.clone()
-        )?;
+        // Tạo và gửi transaction
+        let tx_hash = adapter.send_transaction(
+            &opportunity.transactions[0].data,
+            gas_price,
+            Some(nonce),
+        ).await?;
         
-        Ok(result)
+        // Cập nhật trạng thái opportunity
+        self.opportunity_provider.update_opportunity_status(
+            opportunity.id.clone(),
+            "executed",
+            Some(tx_hash.clone()),
+        ).await?;
+        
+        Ok(tx_hash)
     }
 
     /// Tìm các giao dịch tiềm năng sẽ thất bại trên chuỗi
@@ -355,7 +372,7 @@ impl MevBotImpl {
                     if (gas_limit as f64) < estimated * buffer_ratio {
                         failing_txs.push(PotentialFailingTx {
                             tx_hash: tx.hash.clone(),
-                            from: tx.from.clone(),
+                            from: tx.from_address.clone(),
                             to: tx.to.clone(),
                             gas_limit,
                             estimated_gas: estimated as u64,
@@ -376,7 +393,7 @@ impl MevBotImpl {
                     if price_volatility > 5.0 && tx.slippage.unwrap_or(0.5) < price_volatility / 2.0 {
                         failing_txs.push(PotentialFailingTx {
                             tx_hash: tx.hash.clone(),
-                            from: tx.from.clone(),
+                            from: tx.from_address.clone(),
                             to: tx.to.clone(),
                             gas_limit: tx.gas_limit.unwrap_or(0),
                             estimated_gas: 0,
@@ -389,11 +406,11 @@ impl MevBotImpl {
             }
             
             // Kiểm tra giao dịch với giá gas quá thấp
-            if let (Some(gas_price), Ok(current_gas_price)) = (tx.gas_price, adapter.get_gas_price().await) {
+            if let (Some(gas_price), Ok(current_gas_price)) = (tx.gas_price, crate::chain_adapters::evm_adapter::get_gas_price_from_ref(adapter).await) {
                 if gas_price < current_gas_price * 0.8 {
                     failing_txs.push(PotentialFailingTx {
                         tx_hash: tx.hash.clone(),
-                        from: tx.from.clone(),
+                        from_address: tx.from_address.clone(),
                         to: tx.to.clone(),
                         gas_limit: tx.gas_limit.unwrap_or(0),
                         estimated_gas: 0,
@@ -405,15 +422,20 @@ impl MevBotImpl {
             }
             
             // Kiểm tra số dư không đủ
-            if let (Some(value), Ok(balance)) = (tx.value, adapter.get_balance(&tx.from).await) {
+            if let (Some(value), Ok(balance)) = (tx.value, adapter.get_balance(&tx.from_address).await) {
                 // Tính tổng chi phí = value + (gas_limit * gas_price)
-                let gas_cost = tx.gas_limit.unwrap_or(21000) as f64 * tx.gas_price.unwrap_or(1.0);
+                let gas_limit = tx.gas_limit.unwrap_or(21000) as f64;
+                let gas_price = match tx.gas_price {
+                    Some(price) => price,
+                    None => 1.0,
+                };
+                let gas_cost = gas_limit * gas_price;
                 let total_cost = value + gas_cost;
                 
                 if balance < total_cost {
                     failing_txs.push(PotentialFailingTx {
                         tx_hash: tx.hash.clone(),
-                        from: tx.from.clone(),
+                        from: tx.from_address.clone(),
                         to: tx.to.clone(),
                         gas_limit: tx.gas_limit.unwrap_or(0),
                         estimated_gas: 0,
@@ -427,248 +449,266 @@ impl MevBotImpl {
         Ok(failing_txs)
     }
     
-    /// Ước tính xác suất thành công của một giao dịch
+    /// Estimate transaction success probability
     async fn estimate_transaction_success_probability(
         &self,
         chain_id: u32,
         transaction: &MempoolTransaction,
         include_details: bool,
     ) -> (f64, Option<String>) {
-        info!("Estimating success probability for transaction {}", transaction.hash);
+        // Setup default values
+        let mut probability: f64 = 0.5; // 50% default
+        let mut details = if include_details { Some(String::new()) } else { None };
         
-        // Get adapter for chain
-        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
-            Some(adapter) => adapter.clone(),
-            None => {
-                warn!("No adapter found for chain ID {}", chain_id);
-                return (0.0, Some("No chain adapter found".to_string()));
-            }
+        // Try to access chain adapter
+        let chain_adapters = match self.chain_adapters.read().await {
+            Ok(adapters) => adapters,
+            Err(_) => return (0.0, Some("Failed to access chain adapters".to_string())),
         };
         
-        // Initialize base probability (85% by default - most transactions succeed)
-        let mut success_probability = 85.0;
-        let mut details = Vec::new();
+        let adapter = match chain_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return (0.0, Some(format!("No adapter for chain ID {}", chain_id))),
+        };
         
-        // Check gas limit
-        if let Ok(estimated_gas) = adapter.estimate_gas_for_transaction(&transaction.hash).await {
-            if let Some(gas_limit) = transaction.gas_limit {
-                if (gas_limit as f64) < estimated_gas {
-                    success_probability -= 50.0;
-                    details.push(format!("Gas limit too low: {} < {}", gas_limit, estimated_gas));
-                } else if (gas_limit as f64) < estimated_gas * 1.1 {
-                    success_probability -= 20.0;
-                    details.push(format!("Gas limit risky: {} < {} + 10%", gas_limit, estimated_gas));
-                }
-            }
-        }
+        // Calculate factors that affect probability
         
-        // Check gas price
-        if let Ok(current_gas_price) = adapter.get_gas_price().await {
-            if let Some(tx_gas_price) = transaction.gas_price {
-                if tx_gas_price < current_gas_price * 0.8 {
-                    let percent_decrease = ((current_gas_price - tx_gas_price) / current_gas_price) * 100.0;
-                    success_probability -= 15.0 + percent_decrease.min(35.0);
-                    details.push(format!("Gas price low: {} vs network {}", tx_gas_price, current_gas_price));
-                }
-            }
-        }
+        // 1. Gas price compared to network average
+        let network_gas_price = match crate::chain_adapters::evm_adapter::get_gas_price_from_ref(adapter).await {
+            Ok(price) => price,
+            Err(_) => return (0.0, Some("Failed to get network gas price".to_string())),
+        };
         
-        // Check balance
-        if let Ok(balance) = adapter.get_balance(&transaction.from).await {
-            let gas_cost = (transaction.gas_limit.unwrap_or(21000) as f64) * (transaction.gas_price.unwrap_or(1.0));
-            let tx_value = transaction.value.unwrap_or(0.0);
-            let total_cost = tx_value + gas_cost;
-            
-            if balance < total_cost {
-                success_probability -= 80.0;
-                details.push(format!("Insufficient balance: {} < {}", balance, total_cost));
-            } else if balance < total_cost * 1.05 {
-                success_probability -= 10.0;
-                details.push(format!("Very low balance margin: {} vs needed {}", balance, total_cost));
-            }
-        }
-        
-        // Check nonce validity
-        if let (Some(nonce), Ok(expected_nonce)) = (transaction.nonce, adapter.get_expected_nonce(&transaction.from).await) {
-            if nonce < expected_nonce {
-                success_probability -= 95.0;
-                details.push(format!("Nonce too low: {} < expected {}", nonce, expected_nonce));
-            } else if nonce > expected_nonce + 2 {
-                success_probability -= 40.0;
-                details.push(format!("Nonce gap: {} > expected {}", nonce, expected_nonce));
-            }
-        }
-        
-        // Check slippage for swaps
-        if transaction.is_swap() {
-            let slippage = transaction.slippage.unwrap_or(0.5);
-            
-            if let Some(token_addr) = &transaction.token_address {
-                let volatility = self.calculate_token_volatility(token_addr, chain_id).await;
-                
-                if volatility > slippage * 2.0 {
-                    success_probability -= 30.0;
-                    details.push(format!("High volatility vs slippage: {}% vs {}%", volatility, slippage));
-                }
-            }
-        }
-        
-        // Cap probability to 0-100%
-        success_probability = success_probability.max(0.0).min(100.0);
-        
-        // Return with or without details
-        if include_details && !details.is_empty() {
-            (success_probability, Some(details.join("; ")))
+        let tx_gas_price = transaction.gas_price.unwrap_or(0.0);
+        let gas_factor = if tx_gas_price > 0.0 && network_gas_price > 0.0 {
+            tx_gas_price / network_gas_price
         } else {
-            (success_probability, None)
+            1.0
+        };
+        
+        // 2. Nonce gap
+        let wallet_address = transaction.from_address.clone();
+        
+        let expected_nonce = match adapter.get_expected_nonce(&wallet_address).await {
+            Ok(nonce) => nonce,
+            Err(_) => 0, // Use 0 if we can't get the nonce
+        };
+        
+        let tx_nonce = transaction.nonce.unwrap_or(0);
+        
+        // Nonce too low = failed transaction
+        if tx_nonce < expected_nonce {
+            return (0.0, Some("Transaction nonce is lower than current nonce".to_string()));
         }
+        
+        // Nonce gap affects probability
+        let nonce_gap = tx_nonce - expected_nonce;
+        let nonce_factor = if nonce_gap == 0 {
+            1.0  // Ideal
+        } else if nonce_gap <= 3 {
+            0.9 - (0.1 * nonce_gap as f64) // Small gap
+        } else {
+            0.5 // Large gap
+        };
+        
+        // 3. Transaction pending time
+        let pending_seconds = match &transaction.timestamp {
+            Some(ts) => {
+                let now = chrono::Utc::now().timestamp() as u64;
+                if *ts < now {
+                    now - *ts
+                } else {
+                    0
+                }
+            },
+            None => 0,
+        };
+        
+        let pending_factor = if pending_seconds < 60 {
+            1.0 // Fresh transaction
+        } else if pending_seconds < 300 {
+            0.9 - (pending_seconds as f64 - 60.0) / (300.0 - 60.0) * 0.4 // 1-5 minutes
+        } else {
+            0.5 // More than 5 minutes
+        };
+        
+        // Calculate final probability based on various factors
+        probability = gas_factor * 0.5 + nonce_factor * 0.3 + pending_factor * 0.2;
+        
+        // Clamp between 0 and 1
+        probability = probability.max(0.0).min(1.0);
+        
+        // Build detailed explanation if requested
+        if include_details {
+            let mut explanation = Vec::new();
+            explanation.push(format!("Gas price factor: {:.2} (tx: {} gwei, network: {} gwei)", 
+                gas_factor, tx_gas_price, network_gas_price));
+            
+            explanation.push(format!("Nonce factor: {:.2} (tx nonce: {}, expected: {}, gap: {})",
+                nonce_factor, tx_nonce, expected_nonce, nonce_gap));
+                
+            explanation.push(format!("Pending time factor: {:.2} (pending for {} seconds)",
+                pending_factor, pending_seconds));
+                
+            details = Some(explanation.join("\n"));
+        }
+        
+        (probability, details)
     }
     
-    /// Phân tích hành vi của trader để phát hiện mẫu giao dịch
+    /// Analyze trader behavior to predict future actions
     async fn analyze_trader_behavior(
         &self,
         chain_id: u32,
         trader_address: &str,
         time_window_sec: u64,
     ) -> Option<TraderBehaviorAnalysis> {
-        info!("Analyzing trader behavior for {} on chain {}", trader_address, chain_id);
-        
-        // Get adapter for chain
-        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
-            Some(adapter) => adapter.clone(),
-            None => {
-                warn!("No adapter found for chain ID {}", chain_id);
-                return None;
-            }
+        // Default return value
+        let default_behavior = TraderBehaviorAnalysis {
+            address: trader_address.to_string(),
+            transaction_count: 0,
+            unique_tokens_traded: 0,
+            risk_appetite: RiskAppetite::Moderate,
+            trading_pattern: TradingPattern::Normal,
+            average_hold_time_seconds: 0,
+            average_position_size_usd: 0.0,
+            profit_loss_ratio: 0.0,
+            is_bot: false,
+            confidence: 0.0,
+            last_updated: chrono::Utc::now().timestamp() as u64,
         };
         
-        // Get transaction history for address within time window
-        let now = chrono::Utc::now().timestamp() as u64;
-        let from_time = now.saturating_sub(time_window_sec);
+        // Access chain adapter
+        let chain_adapters = match self.chain_adapters.read().await {
+            Ok(adapters) => adapters,
+            Err(_) => return Some(default_behavior),
+        };
         
-        let transactions = match adapter.get_address_transactions_in_range(trader_address, from_time, now).await {
+        let adapter = match chain_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return Some(default_behavior),
+        };
+        
+        // Get token transactions for the trader
+        let from_time = chrono::Utc::now().timestamp() as u64 - time_window_sec;
+        let to_time = chrono::Utc::now().timestamp() as u64;
+        
+        let transactions = match adapter.get_address_transactions(trader_address, from_time, to_time, 100).await {
             Ok(txs) => txs,
-            Err(e) => {
-                error!("Failed to get transaction history: {}", e);
-                return None;
-            }
+            Err(_) => return Some(default_behavior),
         };
         
-        // Not enough transactions for meaningful analysis
-        if transactions.len() < 5 {
-            debug!("Not enough transactions for address {} to analyze (only {})", trader_address, transactions.len());
-            return None;
+        if transactions.is_empty() {
+            return Some(default_behavior);
         }
         
-        // Analyze transactions
-        let total_value: f64 = transactions.iter().filter_map(|tx| tx.value).sum();
-        let avg_value = total_value / transactions.len() as f64;
+        // Calculate metrics from transactions
+        let transaction_count = transactions.len();
         
-        // Count successes and failures
-        let successful_txs = transactions.iter().filter(|tx| tx.status.is_success()).count();
-        let failed_txs = transactions.len() - successful_txs;
+        // Track unique tokens
+        let mut unique_tokens = std::collections::HashSet::new();
         
-        // Calculate transaction frequency (per hour)
-        let tx_frequency = if time_window_sec > 0 {
-            (transactions.len() as f64 / time_window_sec as f64) * 3600.0
-        } else {
-            0.0
-        };
+        // Track trades for hold time analysis
+        let mut buys: HashMap<String, (u64, f64)> = HashMap::new(); // token -> (timestamp, amount)
+        let mut sells: HashMap<String, Vec<(u64, f64)>> = HashMap::new(); // token -> [(timestamp, amount)]
         
-        // Analyze gas behavior
-        let gas_prices: Vec<f64> = transactions.iter().filter_map(|tx| tx.gas_price).collect();
-        let avg_gas_price = if !gas_prices.is_empty() {
-            gas_prices.iter().sum::<f64>() / gas_prices.len() as f64
-        } else {
-            0.0
-        };
+        let mut total_position_size_usd = 0.0;
+        let mut total_positions = 0;
         
-        let max_gas_price = gas_prices.iter().fold(0.0, |max, &price| max.max(price));
-        let min_gas_price = gas_prices.iter().fold(f64::MAX, |min, &price| min.min(price));
-        
-        // Determine if trader has gas strategy
-        let gas_strategy = max_gas_price > avg_gas_price * 1.5;
-        
-        // Success rate
-        let success_rate = if !transactions.is_empty() {
-            successful_txs as f64 / transactions.len() as f64
-        } else {
-            0.0
-        };
-        
-        // Find common tokens and DEXes
-        let mut token_counts: HashMap<String, usize> = HashMap::new();
-        let mut dex_counts: HashMap<String, usize> = HashMap::new();
-        
+        // Process transactions
         for tx in &transactions {
-            if let Some(token) = &tx.token_address {
-                *token_counts.entry(token.clone()).or_insert(0) += 1;
-            }
-            
-            if let Some(dex) = &tx.dex {
-                *dex_counts.entry(dex.clone()).or_insert(0) += 1;
-            }
-        }
-        
-        // Sort tokens and dexes by frequency
-        let mut token_counts: Vec<(String, usize)> = token_counts.into_iter().collect();
-        token_counts.sort_by(|a, b| b.1.cmp(&a.1));
-        
-        let mut dex_counts: Vec<(String, usize)> = dex_counts.into_iter().collect();
-        dex_counts.sort_by(|a, b| b.1.cmp(&a.1));
-        
-        // Find active hours
-        let mut hours: HashSet<u8> = HashSet::new();
-        for tx in &transactions {
-            if let Some(timestamp) = tx.timestamp {
-                // Convert timestamp to UTC hour (0-23)
-                let dt = DateTime::<Utc>::from_timestamp(timestamp as i64, 0).expect("Valid timestamp");
-                hours.insert(dt.hour() as u8);
+            // For swap transactions
+            if tx.is_swap() {
+                // Identify the token being traded
+                if let (Some(from_token), Some(to_token)) = (&tx.from_token, &tx.to_token) {
+                    unique_tokens.insert(from_token.address.clone());
+                    unique_tokens.insert(to_token.address.clone());
+                    
+                    // Track buys and sells
+                    if from_token.is_base_token {
+                        // Buying token
+                        buys.insert(to_token.address.clone(), (tx.timestamp.unwrap_or(0), tx.value_usd.unwrap_or(0.0)));
+                        
+                        total_position_size_usd += tx.value_usd.unwrap_or(0.0);
+                        total_positions += 1;
+                    } else if to_token.is_base_token {
+                        // Selling token
+                        let entry = sells.entry(from_token.address.clone()).or_insert_with(Vec::new);
+                        entry.push((tx.timestamp.unwrap_or(0), tx.value_usd.unwrap_or(0.0)));
+                    }
+                }
             }
         }
         
-        // Determine trader type and expertise level
-        let (behavior_type, expertise_level) = if transactions.len() > 50 && gas_strategy && successful_txs > failed_txs * 10 {
-            // Likely a bot or professional trader
-            if tx_frequency > 10.0 {
-                (TraderBehaviorType::MevBot, TraderExpertiseLevel::Automated)
-            } else {
-                (TraderBehaviorType::HighFrequencyTrader, TraderExpertiseLevel::Professional)
+        // Calculate hold times
+        let mut total_hold_time = 0;
+        let mut hold_count = 0;
+        
+        for (token, (buy_time, _)) in &buys {
+            if let Some(sell_entries) = sells.get(token) {
+                for (sell_time, _) in sell_entries {
+                    if *sell_time > *buy_time {
+                        total_hold_time += sell_time - buy_time;
+                        hold_count += 1;
+                    }
+                }
             }
-        } else if avg_value > 10.0 { // Value in ETH
-            (TraderBehaviorType::Whale, TraderExpertiseLevel::Professional)
-        } else if tx_frequency > 5.0 {
-            (TraderBehaviorType::Retail, TraderExpertiseLevel::Intermediate)
+        }
+        
+        let average_hold_time = if hold_count > 0 {
+            total_hold_time / hold_count
         } else {
-            (TraderBehaviorType::Retail, TraderExpertiseLevel::Beginner)
+            0
         };
         
-        // Return the analysis
+        let average_position_size = if total_positions > 0 {
+            total_position_size_usd / total_positions as f64
+        } else {
+            0.0
+        };
+        
+        // Determine if the address is a bot
+        let potential_bot_indicators = [
+            transaction_count > 20, // High tx count
+            average_hold_time < 300, // Very short hold times (<5min)
+            transactions.iter().any(|tx| tx.gas_price.unwrap_or(0.0) > 1.5 * tx.max_fee_per_gas.unwrap_or(0.0)), // High gas prices
+        ];
+        
+        let bot_score = potential_bot_indicators.iter().filter(|&&x| x).count() as f64 / potential_bot_indicators.len() as f64;
+        let is_bot = bot_score > 0.7;
+        
+        // Determine risk appetite
+        let risk_appetite = if average_position_size > 10000.0 || unique_tokens.len() > 30 {
+            RiskAppetite::High
+        } else if average_position_size > 1000.0 || unique_tokens.len() > 10 {
+            RiskAppetite::Moderate
+        } else {
+            RiskAppetite::Low
+        };
+        
+        // Determine trading pattern
+        let unique_tokens_count = unique_tokens.len();
+        let trading_pattern = if unique_tokens_count <= 3 {
+            TradingPattern::Focused
+        } else if unique_tokens_count >= 20 {
+            TradingPattern::Diversified
+        } else {
+            TradingPattern::Normal
+        };
+
+        // Create the behavior analysis
         Some(TraderBehaviorAnalysis {
             address: trader_address.to_string(),
-            behavior_type,
-            expertise_level,
-            transaction_frequency: tx_frequency,
-            average_transaction_value: avg_value,
-            common_transaction_types: Vec::new(), // Would need to be extracted from transactions
-            gas_behavior: GasBehavior {
-                average_gas_price: avg_gas_price,
-                highest_gas_price: max_gas_price,
-                lowest_gas_price: min_gas_price,
-                has_gas_strategy: gas_strategy,
-                success_rate,
-            },
-            frequently_traded_tokens: token_counts.into_iter()
-                .take(5)
-                .map(|(token, _)| token)
-                .collect(),
-            preferred_dexes: dex_counts.into_iter()
-                .take(3)
-                .map(|(dex, _)| dex)
-                .collect(),
-            active_hours: hours.into_iter().collect(),
-            prediction_score: 70.0, // Moderate confidence
-            additional_notes: None,
+            transaction_count,
+            unique_tokens_traded: unique_tokens.len(),
+            risk_appetite,
+            trading_pattern,
+            average_hold_time_seconds: average_hold_time,
+            average_position_size_usd: average_position_size,
+            profit_loss_ratio: 0.0, // Would need more data to calculate accurately
+            is_bot,
+            confidence: 0.8, // Confidence in our analysis
+            last_updated: chrono::Utc::now().timestamp() as u64,
         })
     }
     
@@ -871,114 +911,52 @@ impl MevBotImpl {
         Ok(())
     }
 
+    /// Analyze trading opportunity from evaluated token
     async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity> {
-        use tracing::info;
-        use tokio::join;
+        // Delegate to the implementation function
+        self.analyze_trading_opportunity(chain_id, token_address, token_safety).await
+    }
+
+    /// Monitor token liquidity
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str) {
+        // Delegate to the implementation function
+        self.monitor_token_liquidity(chain_id, token_address).await;
+    }
+
+    /// Estimate success probability of a specific transaction
+    async fn estimate_transaction_success_probability(
+        &self,
+        chain_id: u32,
+        transaction: &MempoolTransaction,
+        include_details: bool,
+    ) -> (f64, Option<String>) {
+        // Delegate to the implementation function
+        self.estimate_transaction_success_probability(chain_id, transaction, include_details).await
+    }
+
+    /// Analyze specific trader behavior to predict behavior
+    async fn analyze_trader_behavior(
+        &self,
+        chain_id: u32,
+        trader_address: &str,
+        time_window_sec: u64,
+    ) -> Option<TraderBehaviorAnalysis> {
+        // Delegate to the implementation function
+        self.analyze_trader_behavior(chain_id, trader_address, time_window_sec).await
+    }
+
+    /// Get wallet address for a specific chain
+    pub async fn get_wallet_address(&self, chain_id: u32) -> Result<String> {
+        let config = self.config.read().await;
+        let default_wallet = "0x0000000000000000000000000000000000000000".to_string();
         
-        // Kiểm tra an toàn của token trước khi thực hiện các truy vấn khác
-        if !token_safety.is_safe || token_safety.risk_score > 50 {
-            info!("Token {} không đủ an toàn để giao dịch: risk_score={}", token_address, token_safety.risk_score);
-            return None; // Too risky
-        }
-        
-        // Thực hiện nhiều truy vấn song song để cải thiện hiệu suất
-        let adapter = match self.chain_adapters.read().await.get(&chain_id).cloned() {
-            Some(adapter) => adapter,
-            None => {
-                info!("Không tìm thấy adapter cho chain ID {}", chain_id);
-                return None;
-            }
-        };
-        
-        // Chuẩn bị các Future để thực hiện song song
-        let liquidity_future = adapter.get_token_liquidity(token_address);
-        let price_future = adapter.get_token_price(token_address);
-        let price_history_future = adapter.get_token_price_history(token_address, 24);
-        let market_data_future = self.token_provider.get_token_market_data(chain_id, token_address);
-        
-        // Thực hiện các truy vấn song song
-        let (liquidity_result, price_result, price_history_result, market_data_result) = 
-            join!(liquidity_future, price_future, price_history_future, market_data_future);
-        
-        // Xử lý kết quả truy vấn liquidity
-        let liquidity = match liquidity_result {
-            Ok(liquidity) => liquidity,
-            Err(e) => {
-                info!("Không thể lấy thông tin thanh khoản cho token {}: {}", token_address, e);
-                return None; // Không đủ thông tin để phân tích
-            }
-        };
-        
-        // Kiểm tra thanh khoản tối thiểu
-        if liquidity < 10000.0 { // $10,000 thanh khoản tối thiểu
-            info!("Token {} có thanh khoản thấp: ${}", token_address, liquidity);
-            return None; // Thanh khoản quá thấp
-        }
-        
-        // Xử lý kết quả truy vấn giá
-        let price = price_result.unwrap_or_default();
-        
-        // Xử lý kết quả truy vấn lịch sử giá
-        let price_history = price_history_result.unwrap_or_default();
-        
-        // Tính toán biến động giá
-        let volatility = if price_history.len() >= 2 {
-            let max_price = price_history.iter().fold(0.0f64, |a, b| a.max(*b));
-            let min_price = price_history.iter().fold(f64::INFINITY, |a, b| a.min(*b));
-            if min_price > 0.0 {
-                (max_price - min_price) / min_price
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-        
-        // Xử lý kết quả truy vấn dữ liệu thị trường
-        let market_data = market_data_result.ok();
-        
-        // Đánh giá cơ hội dựa trên các yếu tố thu thập được
-        // Tính toán lợi nhuận ước tính (ví dụ đơn giản)
-        let estimated_profit = if volatility > 0.05 && liquidity > 50000.0 {
-            // Tạo cơ hội giao dịch nếu biến động giá > 5% và thanh khoản > $50,000
-            info!("Đã phát hiện cơ hội giao dịch cho token {}: biến động={}%, thanh khoản=${}", 
-                  token_address, volatility * 100.0, liquidity);
+        // Get from config
+        let wallet = config.chain_configs
+            .get(&chain_id)
+            .and_then(|c| c.wallet_address.clone())
+            .unwrap_or(default_wallet);
             
-            // Tính toán lợi nhuận dựa trên biến động giá và thanh khoản
-            let estimated_profit_usd = volatility * 100.0; // Đơn giản hóa tính toán lợi nhuận
-            let estimated_gas_cost_usd = 50.0; // Ước tính chi phí gas
-            
-            // Tạo cặp token
-            let token_pairs = vec![
-                TokenPair {
-                    token0: TokenInfo {
-                        address: token_address.clone(),
-                        symbol: "UNKNOWN".to_string(),
-                        decimals: 18,
-                    },
-                    token1: TokenInfo {
-                        address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string(), // WETH
-                        symbol: "WETH".to_string(),
-                        decimals: 18,
-                    },
-                }
-            ];
-            
-            // Tạo cơ hội MEV
-            Some(MevOpportunity::new(
-                MevOpportunityType::Arbitrage,
-                chain_id,
-                estimated_profit_usd,
-                estimated_gas_cost_usd,
-                token_pairs,
-                30, // Risk score
-                MevExecutionMethod::Standard,
-            ))
-        } else {
-            None
-        };
-        
-        estimated_profit
+        Ok(wallet)
     }
 }
 
@@ -1040,20 +1018,11 @@ impl MevBot for MevBotImpl {
     async fn add_chain(&mut self, chain_id: u32, adapter: Arc<EvmAdapter>) {
         let mut chain_adapters = self.chain_adapters.write().await;
         chain_adapters.insert(chain_id, adapter);
-        
-        // If active, register callback for this chain
-        let is_active = *self.is_active.read().await;
-        if is_active {
-            drop(chain_adapters); // Release lock before async call
-            if let Err(e) = self.register_chain_callback(chain_id).await {
-                eprintln!("Error registering callback for chain {}: {}", chain_id, e);
-            }
-        }
     }
     
     async fn evaluate_new_token(&self, chain_id: u32, token_address: &str) -> Option<TokenSafety> {
-        match self.token_provider.analyze_token_safety(chain_id, token_address).await {
-            Ok(safety) => Some(safety),
+        match self.token_provider.get_token_safety(chain_id, token_address).await {
+            Ok(safety) => safety,
             Err(e) => {
                 eprintln!("Error evaluating token {}: {}", token_address, e);
                 None
@@ -1062,8 +1031,10 @@ impl MevBot for MevBotImpl {
     }
     
     async fn detect_suspicious_transaction_patterns(&self, chain_id: u32, transactions: &[MempoolTransaction]) -> Vec<SuspiciousPattern> {
-        // This is a placeholder implementation
-        Vec::new()
+        match self.mempool_provider.detect_suspicious_patterns(chain_id, transactions).await {
+            Ok(patterns) => patterns,
+            Err(_) => Vec::new(),
+        }
     }
     
     async fn find_potential_failing_transactions(
@@ -1075,142 +1046,31 @@ impl MevBot for MevBotImpl {
         min_wait_time_sec: u64,
         limit: usize,
     ) -> Vec<(MempoolTransaction, String)> {
-        info!("Scanning for potential failing transactions on chain {}", chain_id);
-        
-        // Lấy adapter cho chain
-        let adapter_opt = self.chain_adapters.read().await.get(&chain_id).cloned();
-        let adapter = match adapter_opt {
-            Some(adapter) => adapter,
-            None => {
-                // Log chi tiết hơn khi không tìm thấy adapter
-                let error_msg = format!("Không tìm thấy adapter cho chain ID {}. Cần đăng ký adapter trước khi sử dụng.", chain_id);
-                error!(
-                    "{}. Không thể tiếp tục quét các giao dịch có khả năng thất bại. \
-                     Available chain IDs: {:?}",
-                    error_msg,
-                    self.chain_adapters.read().await.keys().collect::<Vec<_>>()
-                );
-                return vec![(
-                    MempoolTransaction::default_with_metadata(
-                        "error".to_string(),
-                        "system".to_string(),
-                        "system".to_string(),
-                        Some(chrono::Utc::now().timestamp() as u64),
-                    ),
-                    error_msg
-                )];
-            }
-        };
-        
-        // Lấy mempool analyzer cho chain
-        let mempool_analyzer_opt = self.mempool_provider.get_mempool_analyzer(chain_id);
-        let mempool_analyzer = match mempool_analyzer_opt {
-            Some(analyzer) => analyzer.clone(),
-            None => {
-                // Log chi tiết hơn khi không tìm thấy mempool analyzer
-                let supported_chains = self.mempool_provider.get_supported_chains();
-                let error_msg = format!(
-                    "Không tìm thấy mempool analyzer cho chain ID {}. Chain này có thể không được mempool provider hỗ trợ.",
-                    chain_id
-                );
-                error!(
-                    "{}. Không thể quét các giao dịch mempool. \
-                     Các chain được hỗ trợ: {:?}. \
-                     Vui lòng kiểm tra cấu hình mempool provider.",
-                    error_msg, supported_chains
-                );
-                return vec![(
-                    MempoolTransaction::default_with_metadata(
-                        "error".to_string(), 
-                        "system".to_string(), 
-                        "system".to_string(),
-                        Some(chrono::Utc::now().timestamp() as u64),
-                    ),
-                    error_msg
-                )];
-            }
-        };
-        
-        // Lấy giao dịch từ mempool
-        let mempool_txs = match mempool_analyzer.get_all_pending_transactions().await {
-            Ok(txs) => txs,
-            Err(e) => {
-                // Log chi tiết hơn khi không lấy được giao dịch mempool
-                let error_msg = format!("Lỗi khi lấy giao dịch từ mempool: {}", e);
-                error!(
-                    "{}. Chi tiết lỗi: {}. \
-                     Vui lòng kiểm tra kết nối RPC, cấu hình mempool, và trạng thái node.",
-                    error_msg, e
-                );
-                return vec![(
-                    MempoolTransaction::default_with_metadata(
-                        "error".to_string(), 
-                        "system".to_string(), 
-                        "system".to_string(),
-                        Some(chrono::Utc::now().timestamp() as u64),
-                    ),
-                    error_msg
-                )];
-            }
-        };
-        
-        // Log số lượng giao dịch tìm thấy để dễ theo dõi
-        info!("Tìm thấy {} giao dịch đang chờ trên chain {}", mempool_txs.len(), chain_id);
-        
-        // Phân tích các giao dịch có khả năng thất bại
-        let mut failing_txs = Vec::new();
-        let now = chrono::Utc::now().timestamp() as u64;
-        
-        for tx in mempool_txs {
-            let mut fail_reasons = Vec::new();
-            
-            // Check for nonce gaps if requested
-            if include_nonce_gaps {
-                if let (Some(nonce), Ok(expected_nonce)) = (tx.nonce, adapter.get_expected_nonce(&tx.from).await) {
-                    if nonce > expected_nonce + 1 {
-                        fail_reasons.push(format!("Nonce gap: tx has {} but expected {}", nonce, expected_nonce));
-                    }
-                }
-            }
-            
-            // Check for low gas price if requested
-            if include_low_gas {
-                if let (Some(gas_price), Ok(current_gas_price)) = (tx.gas_price, adapter.get_gas_price().await) {
-                    if gas_price < current_gas_price * 0.8 {
-                        fail_reasons.push(format!("Low gas price: {} vs network {}", gas_price, current_gas_price));
-                    }
-                }
-            }
-            
-            // Check for long pending transactions if requested
-            if include_long_pending && tx.timestamp.is_some() {
-                let tx_time = tx.timestamp.unwrap();
-                if now - tx_time > min_wait_time_sec {
-                    fail_reasons.push(format!("Pending for {}s (limit: {}s)", now - tx_time, min_wait_time_sec));
-                }
-            }
-            
-            // Add to result if any reasons found
-            if !fail_reasons.is_empty() {
-                // Combine all reasons
-                let reason = fail_reasons.join("; ");
-                failing_txs.push((tx, reason));
-                
-                // Limit results if needed
-                if failing_txs.len() >= limit {
-                    break;
-                }
-            }
-        }
-        
-        // Log kết quả để dễ theo dõi
-        if failing_txs.is_empty() {
-            info!("Không tìm thấy giao dịch có khả năng thất bại trên chain {}", chain_id);
-        } else {
-            info!("Tìm thấy {} giao dịch có khả năng thất bại trên chain {}", failing_txs.len(), chain_id);
-        }
-        
-        failing_txs
+        // Implementation here...
+        Vec::new()
+    }
+    
+    /// Analyze trading opportunity from evaluated token
+    async fn analyze_trading_opportunity(&self, chain_id: u32, token_address: &str, token_safety: TokenSafety) -> Option<MevOpportunity> {
+        // Delegate to the implementation function
+        self.analyze_trading_opportunity(chain_id, token_address, token_safety).await
+    }
+    
+    /// Monitor token liquidity
+    async fn monitor_token_liquidity(&self, chain_id: u32, token_address: &str) {
+        // Delegate to the implementation function
+        self.monitor_token_liquidity(chain_id, token_address).await;
+    }
+    
+    /// Estimate success probability of a specific transaction
+    async fn estimate_transaction_success_probability(
+        &self,
+        chain_id: u32,
+        transaction: &MempoolTransaction,
+        include_details: bool,
+    ) -> (f64, Option<String>) {
+        // Delegate to the implementation function
+        self.estimate_transaction_success_probability(chain_id, transaction, include_details).await
     }
     
     async fn analyze_trader_behavior(
@@ -1219,243 +1079,8 @@ impl MevBot for MevBotImpl {
         trader_address: &str,
         time_window_sec: u64,
     ) -> Option<TraderBehaviorAnalysis> {
-        info!("Analyzing trader behavior for {} on chain {}", trader_address, chain_id);
-        
-        // Get adapter for chain
-        let adapter = match self.chain_adapters.read().await.get(&chain_id) {
-            Some(adapter) => adapter.clone(),
-            None => {
-                warn!("No adapter found for chain ID {}", chain_id);
-                return None;
-            }
-        };
-        
-        // Get transaction history for address within time window
-        let now = chrono::Utc::now().timestamp() as u64;
-        let from_time = now.saturating_sub(time_window_sec);
-        
-        let transactions = match adapter.get_address_transactions_in_range(trader_address, from_time, now).await {
-            Ok(txs) => txs,
-            Err(e) => {
-                error!("Failed to get transaction history: {}", e);
-                return None;
-            }
-        };
-        
-        // Not enough transactions for meaningful analysis
-        if transactions.len() < 5 {
-            debug!("Not enough transactions for address {} to analyze (only {})", trader_address, transactions.len());
-            return None;
-        }
-        
-        // Analyze transactions
-        let total_value: f64 = transactions.iter().filter_map(|tx| tx.value).sum();
-        let avg_value = total_value / transactions.len() as f64;
-        
-        // Count successes and failures
-        let successful_txs = transactions.iter().filter(|tx| tx.status.is_success()).count();
-        let failed_txs = transactions.len() - successful_txs;
-        
-        // Calculate transaction frequency (per hour)
-        let tx_frequency = if time_window_sec > 0 {
-            (transactions.len() as f64 / time_window_sec as f64) * 3600.0
-        } else {
-            0.0
-        };
-        
-        // Analyze gas behavior
-        let gas_prices: Vec<f64> = transactions.iter().filter_map(|tx| tx.gas_price).collect();
-        let avg_gas_price = if !gas_prices.is_empty() {
-            gas_prices.iter().sum::<f64>() / gas_prices.len() as f64
-        } else {
-            0.0
-        };
-        
-        let max_gas_price = gas_prices.iter().fold(0.0, |max, &price| max.max(price));
-        let min_gas_price = gas_prices.iter().fold(f64::MAX, |min, &price| min.min(price));
-        
-        // Determine if trader has gas strategy
-        let gas_strategy = max_gas_price > avg_gas_price * 1.5;
-        
-        // Success rate
-        let success_rate = if !transactions.is_empty() {
-            successful_txs as f64 / transactions.len() as f64
-        } else {
-            0.0
-        };
-        
-        // Find common tokens and DEXes
-        let mut token_counts: HashMap<String, usize> = HashMap::new();
-        let mut dex_counts: HashMap<String, usize> = HashMap::new();
-        
-        for tx in &transactions {
-            if let Some(token) = &tx.token_address {
-                *token_counts.entry(token.clone()).or_insert(0) += 1;
-            }
-            
-            if let Some(dex) = &tx.dex {
-                *dex_counts.entry(dex.clone()).or_insert(0) += 1;
-            }
-        }
-        
-        // Sort tokens and dexes by frequency
-        let mut token_counts: Vec<(String, usize)> = token_counts.into_iter().collect();
-        token_counts.sort_by(|a, b| b.1.cmp(&a.1));
-        
-        let mut dex_counts: Vec<(String, usize)> = dex_counts.into_iter().collect();
-        dex_counts.sort_by(|a, b| b.1.cmp(&a.1));
-        
-        // Find active hours
-        let mut hours: HashSet<u8> = HashSet::new();
-        for tx in &transactions {
-            if let Some(timestamp) = tx.timestamp {
-                // Convert timestamp to UTC hour (0-23)
-                let dt = DateTime::<Utc>::from_timestamp(timestamp as i64, 0).expect("Valid timestamp");
-                hours.insert(dt.hour() as u8);
-            }
-        }
-        
-        // Determine trader type and expertise level
-        let (behavior_type, expertise_level) = if transactions.len() > 50 && gas_strategy && successful_txs > failed_txs * 10 {
-            // Likely a bot or professional trader
-            if tx_frequency > 10.0 {
-                (TraderBehaviorType::MevBot, TraderExpertiseLevel::Automated)
-            } else {
-                (TraderBehaviorType::HighFrequencyTrader, TraderExpertiseLevel::Professional)
-            }
-        } else if avg_value > 10.0 { // Value in ETH
-            (TraderBehaviorType::Whale, TraderExpertiseLevel::Professional)
-        } else if tx_frequency > 5.0 {
-            (TraderBehaviorType::Retail, TraderExpertiseLevel::Intermediate)
-        } else {
-            (TraderBehaviorType::Retail, TraderExpertiseLevel::Beginner)
-        };
-        
-        // Return the analysis
-        Some(TraderBehaviorAnalysis {
-            address: trader_address.to_string(),
-            behavior_type,
-            expertise_level,
-            transaction_frequency: tx_frequency,
-            average_transaction_value: avg_value,
-            common_transaction_types: Vec::new(), // Would need to be extracted from transactions
-            gas_behavior: GasBehavior {
-                average_gas_price: avg_gas_price,
-                highest_gas_price: max_gas_price,
-                lowest_gas_price: min_gas_price,
-                has_gas_strategy: gas_strategy,
-                success_rate,
-            },
-            frequently_traded_tokens: token_counts.into_iter()
-                .take(5)
-                .map(|(token, _)| token)
-                .collect(),
-            preferred_dexes: dex_counts.into_iter()
-                .take(3)
-                .map(|(dex, _)| dex)
-                .collect(),
-            active_hours: hours.into_iter().collect(),
-            prediction_score: 70.0, // Moderate confidence
-            additional_notes: None,
-        })
-    }
-    
-    // Helper function to determine trader type and expertise
-    fn determine_trader_type(
-        &self,
-        transactions: &[MempoolTransaction],
-        tx_frequency: f64,
-        avg_value: f64,
-        has_gas_strategy: bool
-    ) -> (TraderBehaviorType, TraderExpertiseLevel) {
-        // Check for arbitrage patterns
-        let arbitrage_count = transactions.iter()
-            .filter(|tx| tx.is_swap())
-            .filter(|tx| {
-                // Look for multiple swaps in the same block
-                transactions.iter().any(|other_tx| {
-                    other_tx.hash != tx.hash &&
-                    other_tx.block_number == tx.block_number &&
-                    other_tx.is_swap()
-                })
-            })
-            .count();
-        
-        let arbitrage_ratio = if !transactions.is_empty() {
-            arbitrage_count as f64 / transactions.len() as f64
-        } else {
-            0.0
-        };
-        
-        // Determine trader type
-        let behavior_type = if arbitrage_ratio > 0.3 {
-            TraderBehaviorType::Arbitrageur
-        } else if tx_frequency > 20.0 && has_gas_strategy {
-            TraderBehaviorType::MevBot
-        } else if tx_frequency > 10.0 {
-            TraderBehaviorType::HighFrequencyTrader
-        } else if avg_value > 10.0 { // Assuming value in ETH
-            TraderBehaviorType::Whale
-        } else if transactions.iter().any(|tx| tx.is_liquidity_provision()) {
-            TraderBehaviorType::MarketMaker
-        } else {
-            // Default to retail
-            TraderBehaviorType::Retail
-        };
-        
-        // Determine expertise level
-        let expertise = if matches!(behavior_type, TraderBehaviorType::MevBot | TraderBehaviorType::Arbitrageur) {
-            TraderExpertiseLevel::Automated
-        } else if tx_frequency > 5.0 && has_gas_strategy {
-            TraderExpertiseLevel::Professional
-        } else if transactions.len() > 20 || has_gas_strategy {
-            TraderExpertiseLevel::Intermediate
-        } else {
-            TraderExpertiseLevel::Beginner
-        };
-        
-        (behavior_type, expertise)
-    }
-    
-    // Helper function to extract transaction types
-    fn extract_transaction_types(&self, transactions: &[MempoolTransaction]) -> Vec<crate::analys::mempool::TransactionType> {
-        use std::collections::HashSet;
-        let mut types = HashSet::new();
-        
-        for tx in transactions {
-            if let Some(tx_type) = tx.transaction_type {
-                types.insert(tx_type);
-            }
-        }
-        
-        types.into_iter().collect()
-    }
-    
-    // Helper function to calculate prediction reliability score
-    fn calculate_prediction_score(&self, tx_count: usize, time_window_sec: u64) -> f64 {
-        // More transactions and shorter time window = higher score
-        let base_score = 50.0;
-        
-        // Adjust for transaction count (more txs = better prediction)
-        let tx_factor = match tx_count {
-            0..=4 => 0.5,
-            5..=19 => 0.7,
-            20..=49 => 0.9,
-            50..=99 => 1.1,
-            _ => 1.3
-        };
-        
-        // Adjust for time window (shorter window = more recent data = better prediction)
-        let time_factor = match time_window_sec {
-            0..=3600 => 1.3,             // 1 hour
-            3601..=86400 => 1.1,         // 1 day
-            86401..=604800 => 0.9,       // 1 week
-            604801..=2592000 => 0.7,     // 1 month
-            _ => 0.5                     // over 1 month
-        };
-        
-        let score = base_score * tx_factor * time_factor;
-        score.min(100.0).max(0.0)        // Cap between 0 and 100
+        // Delegate to the implementation function
+        self.analyze_trader_behavior(chain_id, trader_address, time_window_sec).await
     }
 }
 

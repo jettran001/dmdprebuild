@@ -1,4 +1,4 @@
-/**
+/*!
  * Network Reliability - Module xử lý độ tin cậy kết nối mạng
  * 
  * Module này cung cấp cơ chế circuit breaker, auto-reconnect và health check
@@ -15,7 +15,11 @@ use tracing::{debug, error, info, warn};
 use std::future::Future;
 use std::pin::Pin;
 use rand::Rng;
-use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
+use chrono::{DateTime, Utc};
+use async_trait::async_trait;
+
+use crate::chain_adapters::evm_adapter::EvmAdapter;
 
 /// Trạng thái kết nối mạng
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +243,7 @@ pub struct NetworkReliabilityManager {
     reconnect_interval_ms: RwLock<HashMap<String, u64>>,
     
     /// Hàm callback khi kết nối lại thành công
-    reconnect_callbacks: RwLock<HashMap<String, Vec<Box<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>>,
+    reconnect_callbacks: RwLock<HashMap<String, Vec<Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>>,
 }
 
 impl Default for NetworkReliabilityManager {
@@ -540,15 +544,8 @@ impl NetworkReliabilityManager {
         F: Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
         let mut callbacks = self.reconnect_callbacks.write().await;
-        let callback_list = callbacks.entry(service_id.to_string()).or_insert_with(Vec::new);
-        
-        // Wrap callback trong CallbackWrapper
-        let wrapper = CallbackWrapper::new(callback);
-        
-        // Lưu wrapper vào danh sách
-        callback_list.push(Box::new(move |service_id: &str| {
-            wrapper.call(service_id)
-        }));
+        let service_callbacks = callbacks.entry(service_id.to_string()).or_insert_with(Vec::new);
+        service_callbacks.push(Arc::new(callback));
     }
 
     /// Thử kết nối lại dịch vụ
@@ -616,16 +613,22 @@ impl NetworkReliabilityManager {
                 attempts.insert(service_id.to_string(), 0);
             }
             
-            // Gọi các callback
-            let callbacks = {
+            // Execute callbacks
+            let callbacks_to_run = {
                 let callbacks_map = self.reconnect_callbacks.read().await;
-                callbacks_map.get(service_id).cloned().unwrap_or_default()
+                if let Some(callbacks) = callbacks_map.get(service_id) {
+                    callbacks.clone()
+                } else {
+                    Vec::new()
+                }
             };
             
-            for callback in callbacks {
+            // Chạy các callbacks sau khi đã giải phóng lock
+            for callback in callbacks_to_run {
                 let service_id = service_id.to_string();
                 tokio::spawn(async move {
-                    callback(&service_id).await;
+                    let fut = callback(&service_id);
+                    fut.await;
                 });
             }
             
@@ -902,7 +905,7 @@ impl RetryStrategy {
 
 /// CallbackWrapper cho phép clone callback function an toàn
 struct CallbackWrapper {
-    callback: Box<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    callback: Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
 }
 
 impl CallbackWrapper {
@@ -911,7 +914,7 @@ impl CallbackWrapper {
         F: Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
     {
         Self {
-            callback: Box::new(callback),
+            callback: Arc::new(callback),
         }
     }
     
@@ -922,16 +925,8 @@ impl CallbackWrapper {
 
 impl Clone for CallbackWrapper {
     fn clone(&self) -> Self {
-        // Không thể clone callback thực sự, nên tạo stub function với warning
-        let warning_callback = move |service_id: &str| {
-            let service_id = service_id.to_string();
-            Box::pin(async move {
-                warn!("Using cloned callback for service {}, which may not have full functionality", service_id);
-            }) as Pin<Box<dyn Future<Output = ()> + Send>>
-        };
-        
         Self {
-            callback: Box::new(warning_callback),
+            callback: self.callback.clone(),
         }
     }
 }

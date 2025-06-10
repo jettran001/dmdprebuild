@@ -2,17 +2,12 @@
 ///
 /// Module này chứa logic quản lý vị thế giao dịch, trailing stop loss, take profit,
 /// và các chiến lược quản lý vị thế khác.
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use chrono::Utc;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow, bail};
+use tracing::{debug, error, info};
+use anyhow::{Result, anyhow};
 
 // Internal imports
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TokenPair, TradeParams, TradeType};
+use crate::types::{TradeParams, TradeType};
 
 // Module imports
 use crate::tradelogic::smart_trade::executor::core::SmartTradeExecutor;
@@ -106,9 +101,9 @@ async fn check_position_status(
     trade: &mut TradeTracker,
 ) -> Result<PositionAction> {
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&trade.params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&trade.params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", trade.params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", trade.params.chain_id())),
     };
     
     // Lấy giá hiện tại

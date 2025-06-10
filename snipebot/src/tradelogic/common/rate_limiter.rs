@@ -1,16 +1,16 @@
-/// Rate Limiter Module - Quản lý giới hạn API call đến các dịch vụ bên ngoài
-///
-/// Module này cung cấp cơ chế giới hạn tần suất gọi API (rate limiting) để tránh bị giới hạn hoặc 
-/// bị chặn bởi các exchange và API bên ngoài. Module hỗ trợ nhiều loại giới hạn (token bucket, 
-/// sliding window, fixed window) và quản lý tự động.
+//! Rate Limiter Module - Quản lý giới hạn API call đến các dịch vụ bên ngoài
+//!
+//! Module này cung cấp cơ chế giới hạn tần suất gọi API (rate limiting) để tránh bị giới hạn hoặc
+//! bị chặn bởi các exchange và API bên ngoài. Module hỗ trợ nhiều loại giới hạn (token bucket,
+//! sliding window, fixed window) và quản lý tự động.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, anyhow, Context};
+use tracing::{debug, warn};
+use anyhow::Result;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::future::Future;
@@ -679,7 +679,6 @@ impl ApiRateLimiterManager {
     
     /// Lấy rate limiter từ read lock với timeout
     async fn get_limiter_with_timeout(&self, name: &str) -> Result<Option<Arc<dyn RateLimiter>>, anyhow::Error> {
-        use anyhow::Context;
         use tokio::time::timeout;
         
         // Sử dụng timeout để tránh deadlock khi chờ đợi read lock
@@ -701,7 +700,6 @@ impl ApiRateLimiterManager {
     
     /// Đăng ký rate limiter mới với timeout và cơ chế locking an toàn hơn
     pub async fn register_limiter(&self, name: &str, config: Option<RateLimitConfig>) -> Result<Arc<dyn RateLimiter>, anyhow::Error> {
-        use anyhow::Context;
         use tokio::time::timeout;
         
         // Kiểm tra xem đã có limiter chưa để tránh lấy write lock không cần thiết
@@ -750,8 +748,6 @@ impl ApiRateLimiterManager {
     
     /// Lấy hoặc tạo rate limiter với xử lý lỗi và timeout
     pub async fn get_or_create_limiter(&self, name: &str, config: Option<RateLimitConfig>) -> Result<Arc<dyn RateLimiter>, anyhow::Error> {
-        use anyhow::Context;
-        
         // Thử lấy limiter từ cache
         if let Ok(Some(limiter)) = self.get_limiter_with_timeout(name).await {
             return Ok(limiter);
@@ -788,8 +784,6 @@ impl ApiRateLimiterManager {
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = Result<T, anyhow::Error>> + Send,
     {
-        use anyhow::Context;
-        
         // Lấy limiter từ cache hoặc tạo mới
         let limiter = match self.get_or_create_limiter(api_name, config).await {
             Ok(limiter) => limiter,

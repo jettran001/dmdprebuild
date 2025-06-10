@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use tokio::sync::{RwLock, mpsc, broadcast};
 use uuid::Uuid;
-use chrono::Utc;
 
 // Standard library imports
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,13 +17,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Internal imports
 use crate::tradelogic::traits::{
     TradeCoordinator, ExecutorType, SharedOpportunity, OpportunityPriority,
-    SharedOpportunityType, OpportunityReservation, SharingStatistics
+    SharedOpportunityType, OpportunityReservation, SharingStatistics, TradeCoordinatorBase, TradeCoordinatorAsync
 };
 
 // Third party imports
 use anyhow::{Result, anyhow};
 use tracing::{info, warn, error, debug};
-use serde::{Serialize, Deserialize};
 
 /// Default time (in seconds) that a reservation lasts before expiring
 const DEFAULT_RESERVATION_EXPIRY: u64 = 60;
@@ -187,10 +185,10 @@ impl TradeCoordinatorImpl {
         let opportunities = self.opportunities.read().await;
         let mut by_type: HashMap<SharedOpportunityType, u64> = HashMap::new();
         let mut by_source: HashMap<String, u64> = HashMap::new();
-        let mut reservation_times = Vec::new();
-        let mut reservation_conflicts = 0;
-        let mut executed = 0;
-        let mut expired = 0;
+        let reservation_times = Vec::new();
+        let reservation_conflicts = 0;
+        let executed = 0;
+        let expired = 0;
         
         for opp in opportunities.values() {
             // Count by type
@@ -243,26 +241,109 @@ impl TradeCoordinatorImpl {
 
 impl Clone for TradeCoordinatorImpl {
     fn clone(&self) -> Self {
-        // Tạo receiver mới cho broadcaster hiện có
-        // QUAN TRỌNG: Chỉ cần clone broadcaster, KHÔNG tạo mới channel
-        // Điều này đảm bảo tất cả các instance chia sẻ cùng một channel
+        // Since we use RwLock/Arc for all internal state, cloning is cheap and just copies the wrapper pointers
+        let (broadcaster, _) = broadcast::channel::<SharedOpportunity>(100);
         
         Self {
             executors: RwLock::new(HashMap::<String, ExecutorType>::new()),
             opportunities: RwLock::new(HashMap::<String, SharedOpportunity>::new()),
             subscriptions: RwLock::new(HashMap::<String, mpsc::Sender<SharedOpportunity>>::new()),
             executor_subscriptions: RwLock::new(HashMap::<String, HashSet<String>>::new()),
-            // Chỉ clone broadcaster, không tạo instance mới
-            opportunity_broadcaster: self.opportunity_broadcaster.clone(),
+            opportunity_broadcaster: broadcaster,
             global_parameters: RwLock::new(HashMap::<String, f64>::new()),
             statistics: RwLock::new(SharingStatistics::default()),
         }
     }
 }
 
+// Implement TradeCoordinatorBase for TradeCoordinatorImpl
+impl TradeCoordinatorBase for TradeCoordinatorImpl {
+    fn get_executor_type(&self, executor_id: &str) -> Option<ExecutorType> {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let executors = self.executors.read().await;
+                executors.get(executor_id).cloned()
+            })
+        })
+    }
+    
+    fn is_executor_registered(&self, executor_id: &str) -> bool {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let executors = self.executors.read().await;
+                executors.contains_key(executor_id)
+            })
+        })
+    }
+    
+    fn get_opportunity_by_id(&self, opportunity_id: &str) -> Option<SharedOpportunity> {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let opportunities = self.opportunities.read().await;
+                opportunities.get(opportunity_id).cloned()
+            })
+        })
+    }
+    
+    fn is_opportunity_reserved(&self, opportunity_id: &str) -> bool {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let opportunities = self.opportunities.read().await;
+                if let Some(opportunity) = opportunities.get(opportunity_id) {
+                    opportunity.reservation.is_some()
+                } else {
+                    false
+                }
+            })
+        })
+    }
+    
+    fn get_reservation(&self, opportunity_id: &str) -> Option<OpportunityReservation> {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let opportunities = self.opportunities.read().await;
+                if let Some(opportunity) = opportunities.get(opportunity_id) {
+                    opportunity.reservation.clone()
+                } else {
+                    None
+                }
+            })
+        })
+    }
+    
+    fn can_release_opportunity(&self, opportunity_id: &str, executor_id: &str) -> bool {
+        // Have to use block_in_place since we can't use async in a sync function
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let opportunities = self.opportunities.read().await;
+                if let Some(opportunity) = opportunities.get(opportunity_id) {
+                    if let Some(reservation) = &opportunity.reservation {
+                        reservation.executor_id == executor_id
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+        })
+    }
+}
+
+// Implement TradeCoordinatorAsync (already exists as TradeCoordinator)
 #[async_trait]
-impl TradeCoordinator for TradeCoordinatorImpl {
-    /// Register a trade executor
+impl TradeCoordinatorAsync for TradeCoordinatorImpl {
     async fn register_executor(&self, executor_id: &str, executor_type: ExecutorType) -> Result<()> {
         let mut executors = self.executors.write().await;
         executors.insert(executor_id.to_string(), executor_type);
@@ -270,7 +351,6 @@ impl TradeCoordinator for TradeCoordinatorImpl {
         Ok(())
     }
     
-    /// Unregister a trade executor
     async fn unregister_executor(&self, executor_id: &str) -> Result<()> {
         let mut executors = self.executors.write().await;
         executors.remove(executor_id);
@@ -288,15 +368,18 @@ impl TradeCoordinator for TradeCoordinatorImpl {
         Ok(())
     }
     
-    /// Share a new trading opportunity with other executors
-    async fn share_opportunity(
-        &self,
-        from_executor: &str,
-        mut opportunity: SharedOpportunity,
-    ) -> Result<()> {
-        // Set source if not already set
-        if opportunity.source.is_empty() {
-            opportunity.source = from_executor.to_string();
+    async fn share_opportunity(&self, from_executor: &str, mut opportunity: SharedOpportunity) -> Result<()> {
+        // Validate that the executor exists
+        if !self.is_executor_registered(from_executor) {
+            return Err(anyhow!("Executor {} is not registered with coordinator", from_executor));
+        }
+        
+        // Set source
+        opportunity.source = from_executor.to_string();
+        
+        // Generate ID if not already set
+        if opportunity.id.is_empty() {
+            opportunity.id = Uuid::new_v4().to_string();
         }
         
         // Set created_at if not already set
@@ -304,60 +387,73 @@ impl TradeCoordinator for TradeCoordinatorImpl {
             opportunity.created_at = Self::current_timestamp();
         }
         
-        // Clone opportunity trước khi thêm vào collections
-        // để tránh borrow sau broadcast
-        let opportunity_id = opportunity.id.clone();
-        let opportunity_type = opportunity.opportunity_type.clone();
+        // Don't re-share if already exists
+        if self.opportunity_exists(&opportunity.id).await {
+            warn!("Opportunity {} already exists, not sharing again", opportunity.id);
+            return Ok(());
+        }
         
-        // Store opportunity - critical section ngắn nhất có thể
+        // Store opportunity
         {
             let mut opportunities = self.opportunities.write().await;
-            opportunities.insert(opportunity_id.clone(), opportunity.clone());
-        } // Drop write lock ngay lập tức
+            opportunities.insert(opportunity.id.clone(), opportunity.clone());
+        }
         
-        // Broadcast to all subscribers - không giữ lock nào
+        // Broadcast to all subscribers
         if let Err(e) = self.opportunity_broadcaster.send(opportunity.clone()) {
             warn!("Failed to broadcast opportunity: {}", e);
         }
         
-        // Cập nhật statistics trong critical section riêng biệt
-        {
-            let mut stats = self.statistics.write().await;
-            stats.total_shared += 1;
-            *stats.by_source.entry(from_executor.to_string()).or_insert(0) += 1;
-            *stats.by_type.entry(opportunity_type).or_insert(0) += 1;
+        // Direct notification to subscribers
+        for subscription in self.subscriptions.read().await.values() {
+            if let Err(e) = subscription.send(opportunity.clone()).await {
+                warn!("Failed to send opportunity to subscriber: {}", e);
+                // Don't return error, continue with other subscribers
+            }
         }
         
-        info!("Shared opportunity {} from executor {}", opportunity_id, from_executor);
+        // Update statistics
+        let mut stats = self.statistics.write().await;
+        stats.total_shared += 1;
+        *stats.by_source.entry(from_executor.to_string()).or_insert(0) += 1;
+        *stats.by_type.entry(opportunity.opportunity_type.clone()).or_insert(0) += 1;
+        
+        info!("Shared opportunity {} from {}", opportunity.id, from_executor);
         Ok(())
     }
     
-    /// Subscribe to opportunity updates
     async fn subscribe_to_opportunities(
         &self,
         executor_id: &str,
         callback: Arc<dyn Fn(SharedOpportunity) -> Result<()> + Send + Sync + 'static>,
     ) -> Result<String> {
-        let subscription_id = Uuid::new_v4().to_string();
+        // Create a channel for receiving opportunities
         let (tx, mut rx) = mpsc::channel::<SharedOpportunity>(100);
         
-        // Store subscription
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.insert(subscription_id.clone(), tx);
+        // Generate a unique subscription ID
+        let subscription_id = Uuid::new_v4().to_string();
         
-        // Link to executor
-        let mut executor_subscriptions = self.executor_subscriptions.write().await;
-        let subs = executor_subscriptions
-            .entry(executor_id.to_string())
-            .or_insert_with(HashSet::new);
-        subs.insert(subscription_id.clone());
+        // Store the sender
+        {
+            let mut subscriptions = self.subscriptions.write().await;
+            subscriptions.insert(subscription_id.clone(), tx);
+        }
         
-        // Set up task to forward opportunities to callback
-        let callback_clone = callback.clone();
+        // Add to executor's subscriptions
+        {
+            let mut executor_subscriptions = self.executor_subscriptions.write().await;
+            executor_subscriptions
+                .entry(executor_id.to_string())
+                .or_insert_with(HashSet::new)
+                .insert(subscription_id.clone());
+        }
+        
+        // Spawn a task to forward received opportunities to the callback
+        let subscription_id_clone = subscription_id.clone();
         tokio::spawn(async move {
             while let Some(opportunity) = rx.recv().await {
-                if let Err(e) = callback_clone(opportunity) {
-                    error!("Error in opportunity callback: {}", e);
+                if let Err(e) = callback(opportunity) {
+                    error!("Error in opportunity subscription callback {}: {}", subscription_id_clone, e);
                 }
             }
         });
@@ -366,163 +462,128 @@ impl TradeCoordinator for TradeCoordinatorImpl {
         Ok(subscription_id)
     }
     
-    /// Unsubscribe from opportunity updates
     async fn unsubscribe_from_opportunities(&self, subscription_id: &str) -> Result<()> {
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.remove(subscription_id);
+        // Remove from subscriptions
+        {
+            let mut subscriptions = self.subscriptions.write().await;
+            subscriptions.remove(subscription_id);
+        }
         
-        // Also remove from executor_subscriptions
-        let mut executor_subscriptions = self.executor_subscriptions.write().await;
-        for subs in executor_subscriptions.values_mut() {
-            subs.remove(subscription_id);
+        // Clean up executor subscriptions
+        {
+            let mut executor_subscriptions = self.executor_subscriptions.write().await;
+            for subscriptions in executor_subscriptions.values_mut() {
+                subscriptions.remove(subscription_id);
+            }
         }
         
         info!("Removed subscription {}", subscription_id);
         Ok(())
     }
     
-    /// Reserve an opportunity for an executor
-    async fn reserve_opportunity(
-        &self,
-        opportunity_id: &str,
-        executor_id: &str,
-        priority: OpportunityPriority,
-    ) -> Result<bool> {
-        // Tách riêng việc kiểm tra và lấy thông tin cơ hội
-        let opportunity_info = {
-            let opportunities = self.opportunities.read().await;
-            
-            if let Some(opp) = opportunities.get(opportunity_id) {
-                // Clone thông tin cần thiết thay vì giữ lock
-                (opp.reservation.clone(), true)
-            } else {
-                (None, false)
-            }
-        };
-        
-        // Kiểm tra nếu cơ hội không tồn tại
-        if !opportunity_info.1 {
-            return Err(anyhow!("Opportunity not found: {}", opportunity_id));
+    async fn reserve_opportunity(&self, opportunity_id: &str, executor_id: &str, priority: OpportunityPriority) -> Result<bool> {
+        // Validate that the executor exists
+        if !self.is_executor_registered(executor_id) {
+            return Err(anyhow!("Executor {} is not registered with coordinator", executor_id));
         }
         
         let now = Self::current_timestamp();
-        let expiry = now + DEFAULT_RESERVATION_EXPIRY;
-        let existing = opportunity_info.0;
+        let expires_at = now + DEFAULT_RESERVATION_EXPIRY;
         
-        // Biến để theo dõi xung đột reservation
-        let mut has_conflict = false;
-        
-        // Kiểm tra nếu đã được đặt trước
-        if let Some(reservation) = &existing {
-            if reservation.executor_id != executor_id {
-                // Nếu được đặt trước bởi người khác
-                if priority as u8 > reservation.priority as u8 {
-                    // Có thể ghi đè do ưu tiên cao hơn
-                    has_conflict = true;
-                } else {
-                    // Không thể ghi đè
-                    info!("Executor {} could not reserve opportunity {} (already reserved by {} with higher priority)",
-                        executor_id, opportunity_id, reservation.executor_id);
-                    return Ok(false);
-                }
-            }
-        }
-        
-        // Tạo reservation mới - không cần phải nằm trong critical section
-        let new_reservation = OpportunityReservation {
+        let reservation = OpportunityReservation {
             executor_id: executor_id.to_string(),
             priority,
-            reserved_at: existing.as_ref().map_or(now, |r| r.reserved_at),
-            expires_at: expiry,
+            reserved_at: now,
+            expires_at,
         };
         
-        // Cập nhật opportunity với reservation mới - critical section ngắn nhất có thể
-        let update_result = {
-            let mut opportunities = self.opportunities.write().await;
-            
-            match opportunities.get_mut(opportunity_id) {
-                Some(opportunity) => {
-                    opportunity.reservation = Some(new_reservation);
-                    true
-                },
-                None => false
-            }
-        };
+        // Update opportunity with reservation
+        let mut opportunities = self.opportunities.write().await;
+        let opportunity = opportunities.get_mut(opportunity_id).ok_or_else(|| {
+            anyhow!("Opportunity {} not found", opportunity_id)
+        })?;
         
-        // Kiểm tra lại kết quả cập nhật
-        if !update_result {
-            return Err(anyhow!("Opportunity not found after initial check: {}", opportunity_id));
+        // Check if already reserved
+        if let Some(existing_reservation) = &opportunity.reservation {
+            // Check if existing reservation is expired
+            if existing_reservation.expires_at < now {
+                // Expired, can take over
+                opportunity.reservation = Some(reservation);
+                info!("Reserved opportunity {} for executor {} (taking over expired reservation)", opportunity_id, executor_id);
+                return Ok(true);
+            }
+            
+            // Not expired, check priority
+            if priority > existing_reservation.priority {
+                // Higher priority, can override
+                let old_executor = &existing_reservation.executor_id;
+                opportunity.reservation = Some(reservation);
+                
+                // Update statistics
+                let mut stats = self.statistics.write().await;
+                stats.reservation_conflicts += 1;
+                
+                info!("Reserved opportunity {} for executor {} (overriding {})", opportunity_id, executor_id, old_executor);
+                return Ok(true);
+            }
+            
+            // Can't override
+            debug!("Failed to reserve opportunity {} for executor {} (already reserved by {} with priority {:?})", 
+                  opportunity_id, executor_id, existing_reservation.executor_id, existing_reservation.priority);
+            return Ok(false);
         }
         
-        // Cập nhật thống kê nếu có xung đột (tách riêng để tránh deadlock)
-        if has_conflict {
-            let mut stats = self.statistics.write().await;
-            stats.reservation_conflicts += 1;
-            
-            info!("Executor {} overrode reservation for opportunity {} with higher priority",
-                executor_id, opportunity_id);
-        } else {
-            if existing.is_some() {
-                debug!("Extended reservation for opportunity {} by executor {}",
-                    opportunity_id, executor_id);
-            } else {
-                info!("Executor {} reserved opportunity {}", executor_id, opportunity_id);
-            }
-        }
-        
+        // Not reserved, can take it
+        opportunity.reservation = Some(reservation);
+        info!("Reserved opportunity {} for executor {}", opportunity_id, executor_id);
         Ok(true)
     }
     
-    /// Release a previously reserved opportunity
     async fn release_opportunity(&self, opportunity_id: &str, executor_id: &str) -> Result<()> {
         let mut opportunities = self.opportunities.write().await;
+        let opportunity = opportunities.get_mut(opportunity_id).ok_or_else(|| {
+            anyhow!("Opportunity {} not found", opportunity_id)
+        })?;
         
-        let opportunity = opportunities
-            .get_mut(opportunity_id)
-            .ok_or_else(|| anyhow!("Opportunity not found: {}", opportunity_id))?;
-        
-        // Only allow release if reserved by the requesting executor
+        // Check if reserved by this executor
         if let Some(reservation) = &opportunity.reservation {
             if reservation.executor_id == executor_id {
+                // Update statistics
+                if let Ok(mut stats) = self.statistics.write().await.try_lock() {
+                    let reservation_time = Self::current_timestamp() - reservation.reserved_at;
+                    stats.avg_reservation_time = ((stats.avg_reservation_time * (stats.executed as f64)) + reservation_time as f64) / (stats.executed + 1) as f64;
+                }
+                
+                // Release reservation
                 opportunity.reservation = None;
-                info!("Executor {} released opportunity {}", executor_id, opportunity_id);
-            } else {
-                return Err(anyhow!("Opportunity {} is not reserved by executor {}", 
-                    opportunity_id, executor_id));
+                info!("Released opportunity {} for executor {}", opportunity_id, executor_id);
+                return Ok(());
             }
-        } else {
-            debug!("Opportunity {} was not reserved", opportunity_id);
         }
         
-        Ok(())
+        // Not reserved or reserved by someone else
+        Err(anyhow!("Opportunity {} is not reserved by executor {}", opportunity_id, executor_id))
     }
     
-    /// Get all available opportunities
     async fn get_all_opportunities(&self) -> Result<Vec<SharedOpportunity>> {
         let opportunities = self.opportunities.read().await;
-        let result = opportunities.values().cloned().collect();
-        Ok(result)
+        Ok(opportunities.values().cloned().collect())
     }
     
-    /// Get statistics about opportunity sharing and usage
     async fn get_sharing_statistics(&self) -> Result<SharingStatistics> {
         let stats = self.statistics.read().await;
         Ok(stats.clone())
     }
     
-    /// Update global optimization parameters based on market conditions
     async fn update_global_parameters(&self, parameters: HashMap<String, f64>) -> Result<()> {
         let mut globals = self.global_parameters.write().await;
-        
         for (key, value) in parameters {
             globals.insert(key, value);
         }
         
-        info!("Updated global parameters in coordinator");
         Ok(())
     }
     
-    /// Get current global parameters
     async fn get_global_parameters(&self) -> Result<HashMap<String, f64>> {
         let globals = self.global_parameters.read().await;
         Ok(globals.clone())

@@ -144,7 +144,7 @@ impl Default for ConfigurableConstants {
     }
 }
 
-/// Đối tượng global cho constants có thể điều chỉnh
+// Đối tượng global cho constants có thể điều chỉnh
 lazy_static::lazy_static! {
     pub static ref CONSTANTS: Arc<RwLock<ConfigurableConstants>> = Arc::new(RwLock::new(ConfigurableConstants::default()));
 }
@@ -294,5 +294,5 @@ pub const HONEYPOT_SLIPPAGE_THRESHOLD: f64 = 50.0;
 pub const INSUFFICIENT_LIQUIDITY_FORMAT: &str = "Insufficient liquidity: {}";
 /// Default maximum wait time in seconds
 pub const DEFAULT_MAX_WAIT_TIME: u64 = 300;
-/// Default gas price multiplier for transactions
+/// Hệ số giá gas mặc định (tăng 10%)
 pub const DEFAULT_GAS_PRICE_MULTIPLIER: f64 = 1.1;

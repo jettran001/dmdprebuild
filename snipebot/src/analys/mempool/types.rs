@@ -1,4 +1,4 @@
-/// Định nghĩa các kiểu dữ liệu cho phân tích mempool
+//! Định nghĩa các kiểu dữ liệu cho phân tích mempool
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -7,19 +7,25 @@ use std::collections::HashMap;
 
 // === Các hằng số và ngưỡng phân tích ===
 
-// Các ngưỡng giá trị giao dịch
+/// Giao dịch lớn - Threshold cho giao dịch với giá trị lớn
 pub const LARGE_TRANSACTION_ETH: f64 = 5.0; // >5 ETH là giao dịch lớn
+/// Giao dịch rất lớn - Threshold cho giao dịch với giá trị rất lớn
 pub const VERY_LARGE_TRANSACTION_ETH: f64 = 20.0; // >20 ETH là giao dịch rất lớn
+/// Giao dịch whale - Threshold cho giao dịch với giá trị cực lớn
 pub const WHALE_TRANSACTION_ETH: f64 = 50.0; // >50 ETH là giao dịch whale
 
-// Ngưỡng thời gian theo dõi
+/// Thời gian tối đa theo dõi giao dịch pending (giây)
 pub const MAX_PENDING_TX_AGE_SEC: u64 = 600; // Theo dõi giao dịch trong 10 phút
+/// Tần suất làm mới mempool (mili giây)
 pub const MEMPOOL_REFRESH_INTERVAL_MS: u64 = 3000; // Làm mới mempool 3 giây/lần
+/// Tần suất dọn dẹp các giao dịch cũ (giây)
 pub const TRANSACTION_CLEANUP_INTERVAL_SEC: u64 = 30; // Dọn dẹp giao dịch cũ 30 giây/lần
 
-// Ngưỡng pattern detection
+/// Ngưỡng độ tin cậy tối thiểu để coi một mẫu là đáng ngờ
 pub const MIN_PATTERN_CONFIDENCE: f64 = 0.6; // 60% độ tin cậy nhận dạng mẫu
+/// Cửa sổ thời gian để phát hiện front-running (mili giây)
 pub const FRONT_RUNNING_TIME_WINDOW_MS: u64 = 500; // Cửa sổ thời gian 500ms để phát hiện front-running
+/// Cửa sổ thời gian tối đa để phát hiện sandwich attack (mili giây)
 pub const MAX_SANDWICH_TIME_WINDOW_MS: u64 = 1000; // Cửa sổ thời gian 1000ms để phát hiện sandwich attack
 
 // === Các kiểu dữ liệu phân tích mempool ===
@@ -179,7 +185,7 @@ pub struct PatternMetadata {
 
 /// Implement methods for SuspiciousPattern
 impl SuspiciousPattern {
-    /// Global pattern metadata storage
+    // Global pattern metadata storage
     thread_local! {
         static PATTERN_METADATA: std::cell::RefCell<HashMap<String, PatternMetadata>> = 
             std::cell::RefCell::new(HashMap::new());
@@ -433,6 +439,16 @@ pub struct TokenInfo {
     pub is_base_token: bool,
     /// Token creation timestamp
     pub created_at: u64,
+    /// Chain ID của token
+    pub chain_id: u32,
+    /// Có phải honeypot không
+    pub is_honeypot: bool,
+    /// Có thể mint thêm token không
+    pub is_mintable: bool,
+    /// Có sử dụng proxy không
+    pub is_proxy: bool,
+    /// Có chức năng blacklist không
+    pub has_blacklist: bool,
 }
 
 /// Các tùy chọn lọc giao dịch

@@ -1,10 +1,9 @@
-/// Common type definitions shared between trade logic modules
-///
-/// This module contains types that are used by both smart_trade and mev_logic,
-/// preventing code duplication and ensuring consistency.
+//! Common type definitions shared between trade logic modules
+//!
+//! This module contains types that are used by both smart_trade and mev_logic,
+//! preventing code duplication and ensuring consistency.
 
-use std::collections::{HashMap, HashSet};
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use common::trading_actions::{TradeAction, TradeStatus};
 pub use common::trading_actions::TradeAction as GlobalTradeType;

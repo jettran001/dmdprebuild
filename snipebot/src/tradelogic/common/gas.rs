@@ -7,11 +7,11 @@
 use std::sync::Arc;
 use tokio::sync::{RwLock, OnceCell};
 use std::collections::HashMap;
-use anyhow::{Result, anyhow, Context};
-use tracing::{info, warn, error};
+use anyhow::Result;
+use tracing::{debug, warn};
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::tradelogic::traits::MempoolAnalysisProvider;
+use crate::tradelogic::traits::{MempoolAnalysisProvider, RpcAdapter};
 
 /// Network congestion levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,131 +167,102 @@ pub async fn get_gas_history() -> &'static RwLock<GasHistory> {
     }).await
 }
 
-/// Calculate optimal gas price for any transaction type
+/// Calculate optimal gas price based on network conditions
 ///
-/// This function provides a unified approach to calculating gas prices
-/// across different parts of the application. It considers network congestion,
-/// transaction priority, and historical data.
+/// This function combines data from multiple sources:
+/// - Mempool analysis
+/// - Chain data
+/// - Historical gas prices
+/// - Network congestion
 ///
 /// # Parameters
 /// * `chain_id` - Target blockchain ID
 /// * `priority` - Transaction priority level
 /// * `evm_adapter` - EVM adapter for the chain
-/// * `mempool_provider` - Optional mempool analysis provider for enhanced gas suggestions
-/// * `mev_protection` - Whether to add MEV protection premium
+/// * `mempool_provider` - Optional mempool analysis provider
+/// * `mev_protection` - Whether to add premium to avoid MEV attacks
 ///
 /// # Returns
-/// Optimal gas price in gwei
+/// * `Result<f64>` - Optimal gas price in Gwei
 pub async fn calculate_optimal_gas_price(
     chain_id: u32,
     priority: TransactionPriority,
     evm_adapter: &Arc<EvmAdapter>,
     mempool_provider: Option<&Arc<dyn MempoolAnalysisProvider>>,
-    mev_protection: bool
+    mev_protection: bool,
 ) -> Result<f64> {
-    // Try to get gas suggestions from mempool provider if available
-    let base_gas_price = if let Some(provider) = mempool_provider {
-        match provider.get_gas_suggestions(chain_id).await {
-            Ok(suggestions) => {
-                // Map priority to suggestion type
-                let key = match priority {
-                    TransactionPriority::Low => "slow",
-                    TransactionPriority::Medium => "average",
-                    TransactionPriority::High => "fast",
-                    TransactionPriority::VeryHigh => "urgent",
+    // Fallback values
+    let mut base_gas_price = match priority {
+        TransactionPriority::Low => 5.0,
+        TransactionPriority::Medium => 10.0,
+        TransactionPriority::High => 15.0,
+        TransactionPriority::VeryHigh => 20.0,
+    };
+    
+    // Try to get more accurate gas price
+    let mut gas_price = match get_gas_price_from_chain(evm_adapter).await {
+        Ok(price) => {
+            debug!("Got gas price from chain: {} Gwei", price);
+            price
+        }
+        Err(e) => {
+            debug!("Failed to get gas price from chain: {}, using fallback", e);
+            base_gas_price
+        }
+    };
+    
+    // Apply priority multiplier
+    let priority_multiplier = match priority {
+        TransactionPriority::Low => 0.9,
+        TransactionPriority::Medium => 1.0,
+        TransactionPriority::High => 1.25,
+        TransactionPriority::VeryHigh => 1.5,
+    };
+    
+    gas_price *= priority_multiplier;
+    
+    // Adjust based on mempool congestion if provider available
+    if let Some(provider) = mempool_provider {
+        match get_mempool_congestion(provider, chain_id).await {
+            Ok(congestion) => {
+                let congestion_multiplier = match congestion {
+                    NetworkCongestion::Low => 1.0,
+                    NetworkCongestion::Medium => 1.1,
+                    NetworkCongestion::High => 1.2,
                 };
-                
-                // Try to get the requested priority, fall back to alternatives
-                suggestions.get(key)
-                    .copied()
-                    .or_else(|| match priority {
-                        TransactionPriority::Low => suggestions.get("average").copied(),
-                        TransactionPriority::Medium => suggestions.get("fast").copied(),
-                        TransactionPriority::High => suggestions.get("urgent").copied(),
-                        TransactionPriority::VeryHigh => suggestions.get("urgent").copied()
-                            .map(|p| p * 1.2), // Add 20% for very high priority
-                    })
-                    .unwrap_or_else(|| {
-                        // Fallback: get from chain directly and adjust by priority
-                        match evm_adapter.get_gas_price().await {
-                            Ok(price) => match priority {
-                                TransactionPriority::Low => price * 0.9,
-                                TransactionPriority::Medium => price * 1.1, 
-                                TransactionPriority::High => price * 1.3,
-                                TransactionPriority::VeryHigh => price * 1.5,
-                            },
-                            Err(e) => {
-                                warn!("Failed to get gas price from chain {}: {}", chain_id, e);
-                                match priority {
-                                    TransactionPriority::Low => 5.0,
-                                    TransactionPriority::Medium => 10.0,
-                                    TransactionPriority::High => 15.0,
-                                    TransactionPriority::VeryHigh => 20.0,
-                                }
-                            }
-                        }
-                    })
-            },
+                gas_price *= congestion_multiplier;
+                debug!("Applied congestion multiplier: {}", congestion_multiplier);
+            }
             Err(e) => {
-                warn!("Failed to get gas suggestions from mempool provider: {}", e);
-                // Fallback: get from chain directly
-                match evm_adapter.get_gas_price().await {
-                    Ok(price) => match priority {
-                        TransactionPriority::Low => price * 0.9,
-                        TransactionPriority::Medium => price, 
-                        TransactionPriority::High => price * 1.3,
-                        TransactionPriority::VeryHigh => price * 1.5,
-                    },
-                    Err(e) => {
-                        warn!("Failed to get gas price from chain {}: {}", chain_id, e);
-                        // Final fallback: use default values based on priority
-                        match priority {
-                            TransactionPriority::Low => 5.0,
-                            TransactionPriority::Medium => 10.0,
-                            TransactionPriority::High => 15.0,
-                            TransactionPriority::VeryHigh => 20.0,
-                        }
-                    }
-                }
+                debug!("Failed to get mempool congestion: {}", e);
             }
         }
-    } else {
-        // No mempool provider, use chain data only
-        match evm_adapter.get_gas_price().await {
-            Ok(price) => match priority {
-                TransactionPriority::Low => price * 0.9,
-                TransactionPriority::Medium => price,
-                TransactionPriority::High => price * 1.3,
-                TransactionPriority::VeryHigh => price * 1.5,
-            },
-            Err(e) => {
-                warn!("Failed to get gas price from chain {}: {}", chain_id, e);
-                // Fallback to historical data
-                let gas_history = get_gas_history().await.read().await;
-                gas_history.get_optimal_gas_price(chain_id, priority)
-            }
-        }
-    };
+    }
+    
+    // Add MEV protection premium if requested
+    if mev_protection {
+        gas_price *= 1.15; // 15% premium
+        debug!("Applied MEV protection premium");
+    }
+    
+    // Round to 2 decimal places
+    gas_price = (gas_price * 100.0).round() / 100.0;
+    
+    debug!("Final calculated gas price: {} Gwei", gas_price);
+    Ok(gas_price)
+}
 
-    // Adjust for network congestion based on chain
-    let congestion = check_network_congestion(chain_id, mempool_provider).await;
-    let congestion_adjusted = match congestion {
-        NetworkCongestion::Low => base_gas_price,
-        NetworkCongestion::Medium => base_gas_price * 1.1,
-        NetworkCongestion::High => base_gas_price * 1.3,
-    };
-    
-    // Apply MEV protection if needed
-    let final_gas_price = if mev_protection && needs_mev_protection(chain_id) {
-        congestion_adjusted * 1.25 // 25% premium for MEV protection
-    } else {
-        congestion_adjusted
-    };
-    
-    // Update gas history
-    get_gas_history().await.write().await.add_gas_price(chain_id, final_gas_price);
-    
-    Ok(final_gas_price)
+/// Get gas price directly from the chain
+async fn get_gas_price_from_chain(evm_adapter: &Arc<EvmAdapter>) -> Result<f64> {
+    // Implement proper RPC call to get gas price
+    // This is a placeholder implementation
+    match evm_adapter.get_gas_price().await {
+        Ok(price) => Ok(price),
+        Err(e) => {
+            warn!("Failed to get gas price from chain: {}", e);
+            Err(anyhow!("Failed to get gas price from chain: {}", e))
+        }
+    }
 }
 
 /// Calculate optimal gas for MEV transactions
@@ -423,4 +394,61 @@ async fn check_network_congestion(
 fn needs_mev_protection(chain_id: u32) -> bool {
     // Only apply MEV protection on mainnet and some large chains with MEV
     matches!(chain_id, 1 | 56 | 137 | 43114 | 42161) // ETH, BSC, Polygon, Avalanche, Arbitrum
+}
+
+/// Get current gas price for a specific chain
+///
+/// Uses RpcAdapter trait to get the current gas price from the blockchain
+///
+/// # Parameters
+/// * `chain_id` - Target blockchain ID
+/// * `evm_adapter` - EVM adapter for the chain
+///
+/// # Returns
+/// * `Result<f64>` - Current gas price in gwei
+pub async fn get_gas_price(chain_id: u32, evm_adapter: &Arc<EvmAdapter>) -> Result<f64> {
+    // Use RpcAdapter trait method to get gas price
+    let gas_price = evm_adapter.get_gas_price().await?;
+    
+    // Add to gas history for future optimization
+    let history = get_gas_history().await;
+    let mut history_write = history.write().await;
+    history_write.add_gas_price(chain_id, gas_price);
+    
+    Ok(gas_price)
+}
+
+/// Get pending transaction count for a specific chain
+///
+/// Uses MempoolAnalysisProvider to get the pending transaction count
+///
+/// # Parameters
+/// * `chain_id` - Target blockchain ID
+/// * `mempool_provider` - Mempool analysis provider
+///
+/// # Returns
+/// * `Result<usize>` - Number of pending transactions
+pub async fn get_pending_transaction_count(
+    chain_id: u32,
+    mempool_provider: &Arc<dyn MempoolAnalysisProvider>
+) -> Result<usize> {
+    // Get pending transactions from mempool provider
+    let pending_txs = mempool_provider.get_pending_transactions(1000).await;
+    
+    // Return the count
+    Ok(pending_txs.len())
+}
+
+/// Synchronous version of get_gas_price to use in sync contexts
+/// 
+/// This function returns a default value based on transaction priority
+/// and should only be used in contexts where async is not possible.
+pub fn get_gas_price_sync(priority: TransactionPriority) -> f64 {
+    // Fallback gas prices for different priorities
+    match priority {
+        TransactionPriority::Low => 5.0,
+        TransactionPriority::Medium => 10.0,
+        TransactionPriority::High => 15.0,
+        TransactionPriority::VeryHigh => 20.0,
+    }
 } 

@@ -1,25 +1,15 @@
-/// Risk Manager - Quản lý rủi ro
-///
-/// Module này chứa logic đánh giá rủi ro, phân tích token an toàn,
-/// và cung cấp các API kiểm tra an toàn giao dịch.
+//! Risk Manager - Quản lý rủi ro
+//!
+//! Module này chứa logic đánh giá rủi ro, phân tích token an toàn,
+//! và cung cấp các API kiểm tra an toàn giao dịch.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use chrono::Utc;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow, bail};
+use std::collections::HashMap;
+use anyhow::Result;
+use tracing::debug;
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::token_status::{
-    TokenIssue, IssueSeverity, TokenSafety, TokenStatus,
-    ContractInfo, LiquidityEvent, LiquidityEventType,
-    abnormal_liquidity_events, detect_dynamic_tax, 
-    detect_hidden_fees, analyze_owner_privileges, is_proxy_contract,
-    blacklist::{has_blacklist_or_whitelist, has_trading_cooldown, has_max_tx_or_wallet_limit},
-};
-use crate::analys::risk_analyzer::{RiskFactor, TradeRecommendation, TradeRiskAnalysis};
 use crate::types::{TokenPair, TradeParams, TradeType};
 
 // Module imports
@@ -36,9 +26,9 @@ pub async fn validate_token_safety(
     }
     
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id())),
     };
     
     // Lấy cấu hình
@@ -49,33 +39,55 @@ pub async fn validate_token_safety(
     
     // Kiểm tra trạng thái token qua analys_client
     let token_status = executor.analys_client.get_token_status(
-        params.chain_id,
-        &params.token_pair.token_address,
+        params.chain_id(),
+        &params.token_address,
     ).await?;
     
     // Kiểm tra các vấn đề tiềm ẩn
     for issue in &token_status.issues {
-        match issue.severity {
-            IssueSeverity::Critical => {
-                issues.push(format!("Critical: {}", issue.description));
-            },
-            IssueSeverity::High => {
-                if config.block_high_risk_tokens {
-                    issues.push(format!("High: {}", issue.description));
+        match issue.0 {
+            TokenIssue::ContractNotVerified => {
+                if config.block_unverified_contracts {
+                    issues.push("Critical: Contract not verified".to_string());
                 }
             },
-            IssueSeverity::Medium => {
-                if config.block_medium_risk_tokens {
-                    issues.push(format!("Medium: {}", issue.description));
+            TokenIssue::HoneypotDetected => {
+                issues.push("Critical: Honeypot detected".to_string());
+            },
+            TokenIssue::HighSellTax => {
+                issues.push(format!("Critical: High sell tax detected ({}%)", token_status.tax_sell));
+            },
+            TokenIssue::BlacklistDetected => {
+                issues.push("Critical: Blacklist function detected".to_string());
+            },
+            TokenIssue::SuspiciousOwner => {
+                issues.push("High: Suspicious owner activity detected".to_string());
+            },
+            TokenIssue::LockSellDetected => {
+                issues.push("Critical: Lock sell detected".to_string());
+            },
+            TokenIssue::LowLiquidity => {
+                issues.push("High: Low liquidity".to_string());
+            },
+            _ => {
+                // Handle other issues based on severity
+                match issue.1 {
+                    IssueSeverity::Critical => {
+                        issues.push(format!("Critical: {:?}", issue.0));
+                    },
+                    IssueSeverity::High => {
+                        if config.block_high_risk_tokens {
+                            issues.push(format!("High: {:?}", issue.0));
+                        }
+                    },
+                    IssueSeverity::Medium => {
+                        if config.block_medium_risk_tokens {
+                            issues.push(format!("Medium: {:?}", issue.0));
+                        }
+                    },
+                    _ => {}
                 }
-            },
-            IssueSeverity::Low => {
-                // Chỉ ghi log cho vấn đề mức độ thấp
-                debug!("Low severity issue detected: {}", issue.description);
-            },
-            IssueSeverity::Info => {
-                // Bỏ qua vấn đề thông tin
-            },
+            }
         }
     }
     
@@ -91,19 +103,67 @@ pub async fn analyze_risk(
     params: &TradeParams,
 ) -> Result<TradeRiskAnalysis> {
     // Lấy adapter cho chain
-    let adapter = match executor.evm_adapters.get(&params.chain_id) {
+    let adapter = match executor.evm_adapters.get(&params.chain_id()) {
         Some(adapter) => adapter,
-        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id)),
+        None => return Err(anyhow!("No adapter found for chain ID {}", params.chain_id())),
     };
     
     // Phân tích rủi ro qua analys_client
-    let risk_analysis = executor.analys_client.analyze_trade_risk(
-        params.chain_id,
-        &params.token_pair.token_address,
-        params.amount,
+    let token_status = executor.analys_client.get_token_status(
+        params.chain_id(),
+        &params.token_address,
     ).await?;
     
-    Ok(risk_analysis)
+    // Tạo danh sách các risk factor dựa trên token_status
+    let mut risk_factors = Vec::new();
+    
+    if token_status.honeypot {
+        risk_factors.push(RiskFactor::Critical("Token is a honeypot".to_string()));
+    }
+    
+    if token_status.tax_sell > 10.0 {
+        risk_factors.push(RiskFactor::High(format!("High sell tax: {}%", token_status.tax_sell)));
+    } else if token_status.tax_sell > 5.0 {
+        risk_factors.push(RiskFactor::Medium(format!("Medium sell tax: {}%", token_status.tax_sell)));
+    }
+    
+    if token_status.blacklist {
+        risk_factors.push(RiskFactor::High("Blacklist function detected".to_string()));
+    }
+    
+    if token_status.lock_sell {
+        risk_factors.push(RiskFactor::Critical("Lock sell function detected".to_string()));
+    }
+    
+    if token_status.low_liquidity {
+        risk_factors.push(RiskFactor::Medium("Low liquidity".to_string()));
+    }
+    
+    // Tính điểm rủi ro dựa trên các risk factors
+    let mut risk_score = 0;
+    for factor in &risk_factors {
+        match factor {
+            RiskFactor::Critical(_) => risk_score += 30,
+            RiskFactor::High(_) => risk_score += 20,
+            RiskFactor::Medium(_) => risk_score += 10,
+            RiskFactor::Low(_) => risk_score += 5,
+        }
+    }
+    
+    // Đề xuất dựa trên điểm rủi ro
+    let recommendation = if risk_score >= 30 {
+        TradeRecommendation::Avoid
+    } else if risk_score >= 15 {
+        TradeRecommendation::ProceedWithCaution("Proceed with small position".to_string())
+    } else {
+        TradeRecommendation::SafeToProceed
+    };
+    
+    Ok(TradeRiskAnalysis {
+        risk_score: risk_score.min(100) as u8,
+        risk_factors,
+        recommendation,
+    })
 }
 
 /// Phân tích rủi ro thị trường
@@ -120,7 +180,7 @@ pub async fn analyze_market_risk(
     };
     
     // Lấy thông tin thị trường từ adapter
-    let market_info = adapter.get_market_info(token_address).await?;
+    let market_info = adapter.get_token_market_data(token_address).await?;
     
     // Lấy cấu hình để sử dụng ngưỡng động
     let config = executor.config.read().await;
@@ -135,55 +195,35 @@ pub async fn analyze_market_risk(
     let mut risk_score = 0;
     
     // 1. Kiểm tra thanh khoản
-    if market_info.liquidity_usd < risk_thresholds.min_liquidity_usd {
-        risk_score += risk_thresholds.low_liquidity_penalty; // Thanh khoản thấp là rủi ro lớn
-    } else if market_info.liquidity_usd < risk_thresholds.low_liquidity_usd {
-        risk_score += risk_thresholds.low_liquidity_penalty / 2;
-    } else if market_info.liquidity_usd < risk_thresholds.medium_liquidity_usd {
-        risk_score += risk_thresholds.low_liquidity_penalty / 3;
+    if let Ok(liquidity_info) = adapter.get_token_liquidity(token_address).await {
+        let liquidity_usd = liquidity_info.total_liquidity_usd;
+        
+        if liquidity_usd < risk_thresholds.min_liquidity_usd {
+            risk_score += risk_thresholds.low_liquidity_penalty; // Thanh khoản thấp là rủi ro lớn
+        } else if liquidity_usd < risk_thresholds.low_liquidity_usd {
+            risk_score += risk_thresholds.low_liquidity_penalty / 2;
+        } else if liquidity_usd < risk_thresholds.medium_liquidity_usd {
+            risk_score += risk_thresholds.low_liquidity_penalty / 3;
+        }
     }
     
-    // 2. Kiểm tra tỷ lệ buy/sell
-    let buy_sell_ratio = if market_info.recent_sells > 0 {
-        market_info.recent_buys as f64 / market_info.recent_sells as f64
-    } else {
-        risk_thresholds.max_buy_sell_ratio // Nếu không có sells, đặt tỷ lệ cao
-    };
-    
-    if buy_sell_ratio > risk_thresholds.high_buy_sell_ratio {
-        risk_score += risk_thresholds.high_buy_sell_penalty; // Quá nhiều người mua so với bán là dấu hiệu của pump
-    } else if buy_sell_ratio > risk_thresholds.medium_buy_sell_ratio {
-        risk_score += risk_thresholds.high_buy_sell_penalty / 2;
-    } else if buy_sell_ratio > risk_thresholds.low_buy_sell_ratio {
-        risk_score += risk_thresholds.high_buy_sell_penalty / 3;
-    }
-    
-    // 3. Kiểm tra biến động giá gần đây
-    if market_info.price_change_24h > risk_thresholds.high_price_change_pct {
-        risk_score += risk_thresholds.high_volatility_penalty; // Tăng giá quá mạnh là rủi ro
-    } else if market_info.price_change_24h > risk_thresholds.medium_price_change_pct {
+    // 2. Điều chỉnh theo biến động giá
+    let volatility_24h = market_info.volatility_24h;
+    if volatility_24h > risk_thresholds.high_price_change_pct {
+        risk_score += risk_thresholds.high_volatility_penalty; // Biến động cao là rủi ro
+    } else if volatility_24h > risk_thresholds.medium_price_change_pct {
         risk_score += risk_thresholds.high_volatility_penalty / 2;
-    } else if market_info.price_change_24h > risk_thresholds.low_price_change_pct {
+    } else if volatility_24h > risk_thresholds.low_price_change_pct {
         risk_score += risk_thresholds.high_volatility_penalty / 3;
     }
     
-    // 4. Kiểm tra sự tập trung của token
-    if market_info.top_holders_percentage > risk_thresholds.high_concentration_pct {
-        risk_score += risk_thresholds.high_concentration_penalty; // Token tập trung vào ít ví là rủi ro
-    } else if market_info.top_holders_percentage > risk_thresholds.medium_concentration_pct {
-        risk_score += risk_thresholds.high_concentration_penalty / 2;
-    } else if market_info.top_holders_percentage > risk_thresholds.low_concentration_pct {
-        risk_score += risk_thresholds.high_concentration_penalty / 3;
-    }
-    
-    // 5. Điều chỉnh theo market_risk_factor từ cấu hình (có thể tăng/giảm tùy theo thị trường)
+    // 3. Điều chỉnh theo market_risk_factor từ cấu hình (có thể tăng/giảm tùy theo thị trường)
     let market_risk_factor = config.market_risk_factor.get(&chain_id).unwrap_or(&1.0);
     risk_score = (risk_score as f64 * market_risk_factor) as u8;
     
     debug!(
-        "Market risk analysis for token {} on chain {}: score={}, liquidity=${:.2}K, buy/sell={:.2}, price_change={}%, concentration={}%, risk_factor={:.2}",
-        token_address, chain_id, risk_score, market_info.liquidity_usd / 1000.0, 
-        buy_sell_ratio, market_info.price_change_24h, market_info.top_holders_percentage, market_risk_factor
+        "Market risk analysis for token {} on chain {}: score={}, volatility={}%, risk_factor={:.2}",
+        token_address, chain_id, risk_score, volatility_24h, market_risk_factor
     );
     
     // Giới hạn điểm rủi ro trong khoảng 0-100
@@ -221,11 +261,13 @@ pub async fn check_token_transaction_history(
     
     for tx in &tx_history {
         // Kiểm tra giao dịch lớn bất thường
-        if tx.is_buy && tx.value_usd > 5000.0 {
+        if tx.transaction_type == TransactionType::Swap && tx.value_usd > 5000.0 {
+            // Giả định là mua nếu là swap và có value lớn
             large_buys_count += 1;
         }
         
-        if !tx.is_buy && tx.value_usd > 5000.0 {
+        if tx.transaction_type == TransactionType::TokenTransfer && tx.value_usd > 5000.0 {
+            // Giả định là bán nếu là chuyển token và có value lớn
             large_sells_count += 1;
         }
         
@@ -321,7 +363,7 @@ pub async fn check_whale_activity(
         let recent_sells = adapter.get_address_token_transfers(
             &whale.address,
             token_address,
-            false, // is_buy = false -> sells
+            TransactionType::TokenTransfer,
             10
         ).await?;
         

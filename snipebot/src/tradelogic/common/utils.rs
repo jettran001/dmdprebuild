@@ -1,7 +1,7 @@
-/// Common utility functions for trade logic modules
-///
-/// This module provides shared utility functions used by both smart_trade and mev_logic,
-/// ensuring code reuse and consistent behavior.
+//! Common utility functions for trade logic modules
+//!
+//! This module provides shared utility functions used by both smart_trade and mev_logic,
+//! ensuring code reuse and consistent behavior.
 
 use std::collections::HashMap;
 use anyhow::{Result, Context, anyhow};
@@ -9,13 +9,13 @@ use tracing::{debug, error, info, warn};
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::Utc;
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::token_status::{ContractInfo, TokenStatus};
+use crate::analys::token_status::ContractInfo;
 use crate::types::{TradeParams, TradeType};
-use super::types::{TokenIssue, SecurityCheckResult, TradeAction, TradeStatus, ExecutionMethod, TokenIssueDetail, TokenIssueType};
+use super::types::{TokenIssue, SecurityCheckResult, TradeAction, TradeStatus, TokenIssueDetail, TokenIssueType};
 use crate::tradelogic::smart_trade::types::TradeTracker;
+use crate::tradelogic::traits::ResourceManager;
 
 /// Analyzes transactions from mempool to identify patterns
 ///
@@ -71,15 +71,22 @@ pub async fn calculate_price_impact(
     let current_price = adapter.get_token_price(token_address).await
         .context("Failed to get token price")?;
     
-    // Simulate buy at current amount
-    let (expected_tokens, _) = adapter.simulate_swap_amount_out(
+    // Simulate swap to get expected output amount
+    let simulation_result = adapter.simulate_swap(
         "ETH", 
         token_address, 
         amount_in_eth
     ).await.context("Failed to simulate swap")?;
     
+    // Extract expected tokens from the simulation result
+    let expected_tokens = simulation_result.output_amount;
+    
     // Calculate expected price
-    let expected_price = amount_in_eth / expected_tokens;
+    let expected_price = if expected_tokens > 0.0 {
+        amount_in_eth / expected_tokens
+    } else {
+        current_price // Fallback to current price if simulation returns 0
+    };
     
     // Calculate price impact
     let price_impact = ((expected_price - current_price) / current_price) * 100.0;
@@ -194,11 +201,11 @@ pub async fn is_pump_and_dump(
         .context("Failed to get contract info")?;
     
     // Get price history
-    let price_history = adapter.get_token_price_history(token_address, 24).await
+    let price_history = adapter.get_price_history(token_address, 24).await
         .context("Failed to get price history")?;
     
     // Get transaction history
-    let tx_history = adapter.get_token_transaction_history(token_address, 50).await
+    let tx_history = adapter.get_token_transactions(token_address, 50).await
         .context("Failed to get transaction history")?;
     
     // Calculate buy/sell ratio
@@ -407,9 +414,9 @@ pub fn calculate_moving_average(price_history: &[f64], period: usize) -> f64 {
     sum / (price_history.len() - start_idx) as f64
 }
 
-/// Find price extremes in history
+/// Find min and max prices in a period
 pub fn find_price_extremes(price_history: &[f64], period: usize) -> (f64, f64) {
-    if price_history.is_empty() {
+    if price_history.is_empty() || period == 0 {
         return (0.0, 0.0);
     }
     
@@ -420,6 +427,11 @@ pub fn find_price_extremes(price_history: &[f64], period: usize) -> (f64, f64) {
     };
     
     let slice = &price_history[start_idx..];
+    
+    if slice.is_empty() {
+        return (0.0, 0.0);
+    }
+    
     let min = slice.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let max = slice.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
     
@@ -514,7 +526,7 @@ pub async fn validate_trade_params(params: &TradeParams, adapter: &Arc<EvmAdapte
     }
     
     // Validate token address format
-    if params.token_address.is_empty() || !adapter.is_valid_address(&params.token_address) {
+    if params.token_address.is_empty() || !adapter.is_valid_address(&params.token_address).await? {
         return Err(anyhow!("Invalid token address: {}", params.token_address));
     }
     
@@ -531,58 +543,58 @@ pub async fn validate_trade_params(params: &TradeParams, adapter: &Arc<EvmAdapte
     Ok(())
 }
 
-/// Simulate trade execution to get expected output and gas
+/// Simulates trade execution for given parameters
+///
+/// Simulates buy or sell transaction to estimate output amount and slippage
 ///
 /// # Arguments
 /// * `params` - Trade parameters
-/// * `adapter` - EVM adapter for the chain
+/// * `adapter` - Chain adapter for blockchain interaction
 ///
 /// # Returns
-/// * `Result<(f64, f64)>` - (expected_output, estimated_gas)
+/// * `Result<(f64, f64)>` - (expected_output, slippage_percent)
 pub async fn simulate_trade_execution(params: &TradeParams, adapter: &Arc<EvmAdapter>) -> Result<(f64, f64)> {
-    match params.trade_type {
+    // Log request
+    debug!(
+        "Simulating {} trade for {} on chain {}",
+        params.trade_type,
+        params.token_address,
+        params.chain_id()
+    );
+    
+    let (expected_output, estimated_gas) = match params.trade_type {
         TradeType::Buy => {
-            // For buying, we're swapping native tokens (ETH) for the token
-            let native_token = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"; // Standard placeholder for native token
-            
-            // Simulate the swap to get expected output
-            let expected_output = adapter.simulate_swap_amount_out(
-                native_token,
+            // Simulate buying token with base currency
+            let base_token = params.base_token();
+            let simulation = adapter.simulate_swap_amount_out(
+                &base_token,
                 &params.token_address,
                 params.amount
-            ).await.context("Failed to simulate swap")?;
+            ).await?;
             
-            // Estimated gas (placeholder for now)
-            let estimated_gas = 200000.0;
-            
-            Ok((expected_output, estimated_gas))
+            // For buy trades, apply slippage
+            let min_output = simulation * (1.0 - params.slippage / 100.0);
+            (min_output, 250000) // Default gas estimate for buys
         },
         TradeType::Sell => {
-            // For selling, we're swapping the token for native tokens (ETH)
-            let native_token = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"; // Standard placeholder for native token
-            
-            // Simulate the swap to get expected output
-            let expected_output = adapter.simulate_swap_amount_out(
+            // Simulate selling token for base currency
+            let base_token = params.base_token();
+            let simulation = adapter.simulate_swap_amount_out(
                 &params.token_address,
-                native_token,
+                &base_token,
                 params.amount
-            ).await.context("Failed to simulate swap")?;
+            ).await?;
             
-            // Estimated gas (placeholder for now)
-            let estimated_gas = 250000.0;
-            
-            Ok((expected_output, estimated_gas))
-        },
-        TradeType::Approve => {
-            // For approvals, no output amount but still need gas
-            let estimated_gas = 100000.0;
-            
-            Ok((0.0, estimated_gas))
+            // For sell trades, apply slippage
+            let min_output = simulation * (1.0 - params.slippage / 100.0);
+            (min_output, 300000) // Default gas estimate for sells (often higher than buys)
         },
         _ => {
-            Err(anyhow!("Unsupported trade type for simulation: {:?}", params.trade_type))
+            bail!("Simulation not supported for trade type: {:?}", params.trade_type);
         }
-    }
+    };
+    
+    Ok((expected_output, estimated_gas as f64))
 }
 
 /// Execute a blockchain transaction
@@ -694,16 +706,8 @@ pub async fn execute_blockchain_transaction(
     // Execute the transaction based on trade type
     match params.trade_type {
         TradeType::Buy => {
-            // Get quote token
-            let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id() {
-                    1 => "ETH",   // Ethereum
-                    56 => "BNB",  // Binance Smart Chain
-                    137 => "MATIC", // Polygon
-                    43114 => "AVAX", // Avalanche
-                    _ => "ETH"    // Default
-                }.to_string()
-            });
+            // Get base token
+            let base_token = params.base_token();
             
             // Execute swap transaction using the validated slippage
             let (tx_hash, gas_used) = adapter.execute_swap(
@@ -717,16 +721,8 @@ pub async fn execute_blockchain_transaction(
             Ok((tx_hash, gas_used))
         }
         TradeType::Sell => {
-            // Get base token from chain
-            let base_token = params.base_token.clone().unwrap_or_else(|| {
-                match params.chain_id() {
-                    1 => "ETH",   // Ethereum
-                    56 => "BNB",  // Binance Smart Chain
-                    137 => "MATIC", // Polygon
-                    43114 => "AVAX", // Avalanche
-                    _ => "ETH"    // Default
-                }.to_string()
-            });
+            // Get base token
+            let base_token = params.base_token();
             
             // Execute swap transaction using the validated slippage
             let (tx_hash, gas_used) = adapter.execute_swap(
@@ -889,20 +885,17 @@ pub async fn get_token_metadata(
     // Get token name
     let name = adapter.get_token_name(token_address)
         .await
-        .context("Failed to get token name")
-        .unwrap_or_else(|_| "Unknown".to_string());
+        .context("Failed to get token name")?;
     
     // Get token symbol
     let symbol = adapter.get_token_symbol(token_address)
         .await
-        .context("Failed to get token symbol")
-        .unwrap_or_else(|_| "???".to_string());
+        .context("Failed to get token symbol")?;
     
     // Get token decimals
     let decimals = adapter.get_token_decimals(token_address)
         .await
-        .context("Failed to get token decimals")
-        .unwrap_or(18);
+        .context("Failed to get token decimals")?;
     
     Ok((name, symbol, decimals))
 }
@@ -960,4 +953,54 @@ pub fn check_trade_conditions(
     
     // No action needed
     None
-} 
+}
+
+/// Check if contract has blacklist functionality
+///
+/// # Arguments
+/// * `contract_info` - Contract information
+///
+/// # Returns
+/// * `bool` - True if blacklist functionality is detected
+fn has_blacklist_function(contract_info: &ContractInfo) -> bool {
+    // Check if source code is available
+    if let Some(source_code) = &contract_info.source_code {
+        // Check for common blacklist function patterns
+        let blacklist_patterns = [
+            "blacklist",
+            "blocklist",
+            "isBlacklisted",
+            "isBlocklisted",
+            "addToBlacklist",
+            "removeFromBlacklist",
+            "ban",
+            "unban",
+            "isBanned",
+            "canTransfer",
+        ];
+        
+        for pattern in blacklist_patterns {
+            if source_code.to_lowercase().contains(&pattern.to_lowercase()) {
+                return true;
+            }
+        }
+    }
+    
+    // If no source code, check bytecode for common patterns
+    if let Some(bytecode) = &contract_info.bytecode {
+        // Simple heuristic: check for common blacklist function signatures in bytecode
+        let blacklist_signatures = [
+            "0x7d5d7f33", // addToBlacklist(address)
+            "0xf8b2cb4f", // blacklist(address)
+            "0x83220639", // isBlacklisted(address)
+        ];
+        
+        for signature in blacklist_signatures {
+            if bytecode.contains(signature) {
+                return true;
+            }
+        }
+    }
+    
+    false
+}

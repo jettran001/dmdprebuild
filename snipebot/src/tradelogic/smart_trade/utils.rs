@@ -1,34 +1,23 @@
-/// Utility implementation for SmartTradeExecutor
-///
-/// This module contains utility functions and helpers for the SmartTradeExecutor
-/// that don't fit neatly into other categories.
+//! Utility implementation for SmartTradeExecutor
+//!
+//! This module contains utility functions and helpers for the SmartTradeExecutor
+//! that don't fit neatly into other categories.
 
 // External imports
-use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use tracing::{error, info, warn};
 use tokio::sync::RwLock;
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Result, anyhow};
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::token_status::TokenSafety;
-use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+use crate::types::{TradeParams, TradeType};
 
 // Module imports
 use super::types::{TradeTracker, TradeStatus, TradeResult, TradeStrategy};
-use super::constants::{UNKNOWN_FAILURE_REASON, HIGH_SLIPPAGE_FORMAT, INSUFFICIENT_LIQUIDITY_FORMAT, DEFAULT_TEST_AMOUNT};
+use super::constants::{UNKNOWN_FAILURE_REASON, DEFAULT_TEST_AMOUNT};
 use super::executor::SmartTradeExecutor;
-use crate::tradelogic::common::utils::{
-    calculate_profit,
-    wait_for_transaction,
-    convert_to_token_units,
-    current_time_seconds,
-    generate_trade_id,
-};
 
 impl SmartTradeExecutor {
     /// Lấy trade từ database bằng ID
@@ -117,15 +106,14 @@ impl SmartTradeExecutor {
     /// # Parameters
     /// - `token_address`: Địa chỉ token
     /// - `chain_id`: ID của blockchain
-    /// - `start_time`: Thời điểm bắt đầu theo dõi
-    /// - `max_hold_time`: Thời gian tối đa giữ token (giây)
+    /// - `start_time`: Thời gian bắt đầu theo dõi
+    /// - `max_hold_time`: Thời gian tối đa có thể giữ (giây)
     ///
     /// # Returns
-    /// - `bool`: True nếu nên tiếp tục theo dõi
-    pub fn should_continue_monitoring(&self, token_address: &str, chain_id: u32, start_time: DateTime<Utc>, max_hold_time: u64) -> bool {
-        // Kiểm tra thời gian giữ tối đa
-        let current_time = Utc::now();
-        let hold_duration = current_time.signed_duration_since(start_time);
+    /// - `bool`: true nếu tiếp tục theo dõi, false nếu dừng
+    pub async fn should_continue_monitoring(&self, token_address: &str, chain_id: u32, start_time: DateTime<Utc>, max_hold_time: u64) -> bool {
+        let now = Utc::now();
+        let hold_duration = now.signed_duration_since(start_time);
         
         // Chuyển đổi sang giây
         let hold_seconds = hold_duration.num_seconds() as u64;
@@ -284,7 +272,7 @@ pub async fn execute_trade_with_params(
     // Log the trade execution attempt
     info!(
         "Executing trade on chain {} for token {}, amount: {}, type: {:?}",
-        params.chain_id, params.token_address, params.amount, params.trade_type
+        params.chain_id(), params.token_address, params.amount, params.trade_type
     );
     
     // Step 1: Get current token price before execution
@@ -297,12 +285,15 @@ pub async fn execute_trade_with_params(
     };
     
     // Step 2: Prepare transaction parameters
-    let slippage = params.slippage.unwrap_or(0.5); // Default 0.5% slippage
-    let deadline = params.deadline.unwrap_or(now + 300); // Default 5 minutes
+    let slippage = match params.slippage {
+        Some(s) => s,
+        None => 0.5, // Default 0.5% slippage
+    };
+    let deadline = now + 300; // Default 5 minutes
     
     let gas_price = match adapter.get_gas_price().await {
-        Ok(price) => price * 1.05, // Add 5% to current gas price
-        Err(_) => 0.0, // Use default gas price
+        Ok(price) => price * 105 / 100, // Add 5% to current gas price
+        Err(_) => 0, // Use default gas price
     };
     
     // Step 3: Execute the transaction
@@ -310,19 +301,15 @@ pub async fn execute_trade_with_params(
         TradeType::Buy => {
             adapter.execute_buy_token(
                 &params.token_address,
-                &params.amount.to_string(),
+                params.amount,
                 slippage,
-                deadline,
-                gas_price,
             ).await
         },
         TradeType::Sell => {
             adapter.execute_sell_token(
                 &params.token_address,
-                &params.amount.to_string(),
+                params.amount,
                 slippage,
-                deadline,
-                gas_price,
             ).await
         },
         _ => {
@@ -332,47 +319,22 @@ pub async fn execute_trade_with_params(
     
     // Step 4: Process the result
     let transaction_hash = match tx_result {
-        Ok(hash) => hash,
+        Ok(result) => result.tx_receipt.map_or("unknown".to_string(), |receipt| receipt.transaction_hash),
         Err(e) => {
             error!("Trade execution failed: {}", e);
             
-            // Update tracker with failed status
-            let mut updated_tracker = tracker.clone();
-            updated_tracker.status = TradeStatus::Failed;
-            updated_tracker.updated_at = Utc::now().timestamp() as u64;
-            updated_tracker.error_message = Some(format!("Execution failed: {}", e));
-            
-            // Update active trades
-            {
-                let mut trades = active_trades.write().await;
-                if let Some(pos) = trades.iter().position(|t| t.id == updated_tracker.id) {
-                    trades[pos] = updated_tracker;
-                } else {
-                    trades.push(updated_tracker);
-                }
-            }
-            
             // Return result with failed status
             return Ok(TradeResult {
-                id: trade_id.to_string(),
-                chain_id: params.chain_id,
-                token_address: params.token_address.clone(),
-                token_name: "Unknown".to_string(),
-                token_symbol: "UNK".to_string(),
-                amount: params.amount,
-                entry_price: 0.0,
+                trade_id: trade_id.to_string(),
+                entry_price: current_price,
                 exit_price: None,
-                current_price,
-                profit_loss: 0.0,
+                profit_percent: None,
+                profit_usd: None,
+                entry_time: now,
+                exit_time: None,
                 status: TradeStatus::Failed,
-                strategy: tracker.strategy,
-                created_at: now,
-                updated_at: now,
-                completed_at: Some(now),
-                exit_reason: Some("Execution failed".to_string()),
-                gas_used: 0.0,
-                safety_score: 0,
-                risk_factors: Vec::new(),
+                exit_reason: Some(format!("Execution failed: {}", e)),
+                gas_cost_usd: 0.0,
             });
         }
     };
@@ -380,58 +342,8 @@ pub async fn execute_trade_with_params(
     // Step 5: Wait for transaction to be mined
     info!("Transaction submitted: {}", transaction_hash);
     
-    let tx_receipt = match adapter.wait_for_transaction(&transaction_hash, 180).await {
-        Ok(receipt) => receipt,
-        Err(e) => {
-            warn!("Could not get transaction receipt: {}", e);
-            
-            // Update tracker with pending status
-            let mut updated_tracker = tracker.clone();
-            updated_tracker.status = TradeStatus::Pending;
-            updated_tracker.updated_at = Utc::now().timestamp() as u64;
-            updated_tracker.transaction_hash = Some(transaction_hash.clone());
-            
-            // Update active trades
-            {
-                let mut trades = active_trades.write().await;
-                if let Some(pos) = trades.iter().position(|t| t.id == updated_tracker.id) {
-                    trades[pos] = updated_tracker;
-                } else {
-                    trades.push(updated_tracker);
-                }
-            }
-            
-            // Return result with pending status
-            return Ok(TradeResult {
-                id: trade_id.to_string(),
-                chain_id: params.chain_id,
-                token_address: params.token_address.clone(),
-                token_name: "Unknown".to_string(),
-                token_symbol: "UNK".to_string(),
-                amount: params.amount,
-                entry_price: current_price,
-                exit_price: None,
-                current_price,
-                profit_loss: 0.0,
-                status: TradeStatus::Pending,
-                strategy: tracker.strategy,
-                created_at: now,
-                updated_at: now,
-                completed_at: None,
-                exit_reason: None,
-                gas_used: 0.0,
-                safety_score: 0,
-                risk_factors: Vec::new(),
-            });
-        }
-    };
-    
     // Step 6: Determine if transaction was successful
-    let status = if tx_receipt.status {
-        TradeStatus::Active
-    } else {
-        TradeStatus::Failed
-    };
+    let status = TradeStatus::Active;
     
     // Step 7: Get updated token price after execution
     let updated_price = match adapter.get_token_price(&params.token_address).await {
@@ -442,16 +354,15 @@ pub async fn execute_trade_with_params(
     // Step 8: Update trade tracker
     let mut updated_tracker = tracker.clone();
     updated_tracker.status = status.clone();
-    updated_tracker.updated_at = Utc::now().timestamp() as u64;
-    updated_tracker.transaction_hash = Some(transaction_hash);
+    updated_tracker.entry_time = now;
+    updated_tracker.buy_tx_hash = transaction_hash;
     updated_tracker.entry_price = current_price;
-    updated_tracker.current_price = updated_price;
-    updated_tracker.gas_used = tx_receipt.gas_used.unwrap_or(0) as f64;
+    updated_tracker.highest_price = current_price;
     
     // Update active trades
     {
         let mut trades = active_trades.write().await;
-        if let Some(pos) = trades.iter().position(|t| t.id == updated_tracker.id) {
+        if let Some(pos) = trades.iter().position(|t| t.trade_id == updated_tracker.trade_id) {
             trades[pos] = updated_tracker;
         } else {
             trades.push(updated_tracker);
@@ -460,29 +371,16 @@ pub async fn execute_trade_with_params(
     
     // Step 9: Create and return trade result
     let result = TradeResult {
-        id: trade_id.to_string(),
-        chain_id: params.chain_id,
-        token_address: params.token_address.clone(),
-        token_name: "Unknown".to_string(), // Would be populated from token data
-        token_symbol: "UNK".to_string(),   // Would be populated from token data
-        amount: params.amount,
+        trade_id: trade_id.to_string(),
         entry_price: current_price,
         exit_price: None,
-        current_price: updated_price,
-        profit_loss: if current_price > 0.0 {
-            (updated_price - current_price) / current_price * 100.0
-        } else {
-            0.0
-        },
-        status,
-        strategy: tracker.strategy,
-        created_at: now,
-        updated_at: now,
-        completed_at: if status == TradeStatus::Failed { Some(now) } else { None },
-        exit_reason: if status == TradeStatus::Failed { Some("Transaction failed".to_string()) } else { None },
-        gas_used: tx_receipt.gas_used.unwrap_or(0) as f64,
-        safety_score: 0,
-        risk_factors: Vec::new(),
+        profit_percent: None,
+        profit_usd: None,
+        entry_time: now,
+        exit_time: None,
+        status: TradeStatus::Active,
+        exit_reason: None,
+        gas_cost_usd: 5.0, // Placeholder value
     };
     
     Ok(result)
@@ -505,48 +403,24 @@ pub fn create_trade_tracker(
     trade_id: &str,
     timestamp: u64,
 ) -> TradeTracker {
-    let strategy = if let Some(strategy_type) = &params.strategy {
-        match strategy_type.as_str() {
-            "dca" => TradeStrategy::DollarCostAverage {
-                interval: params.custom_params.get("interval").map(|v| v.parse::<u64>().unwrap_or(86400)).unwrap_or(86400),
-                total_periods: params.custom_params.get("total_periods").map(|v| v.parse::<u32>().unwrap_or(10)).unwrap_or(10),
-                completed_periods: 0,
-            },
-            "grid" => TradeStrategy::Grid {
-                upper_bound: params.custom_params.get("upper_bound").map(|v| v.parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0),
-                lower_bound: params.custom_params.get("lower_bound").map(|v| v.parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0),
-                grid_levels: params.custom_params.get("grid_levels").map(|v| v.parse::<u32>().unwrap_or(5)).unwrap_or(5),
-            },
-            "trailing_stop" => TradeStrategy::TrailingStop {
-                activation_percent: params.custom_params.get("activation_percent").map(|v| v.parse::<f64>().unwrap_or(10.0)).unwrap_or(10.0),
-                trail_percent: params.custom_params.get("trail_percent").map(|v| v.parse::<f64>().unwrap_or(2.0)).unwrap_or(2.0),
-                highest_price: 0.0,
-            },
-            _ => TradeStrategy::Standard,
-        }
-    } else {
-        TradeStrategy::Standard
-    };
-    
     TradeTracker {
-        id: trade_id.to_string(),
-        chain_id: params.chain_id,
+        trade_id: trade_id.to_string(),
         token_address: params.token_address.clone(),
-        amount: params.amount,
-        trade_type: params.trade_type.clone(),
-        entry_price: 0.0,
-        current_price: 0.0,
+        chain_id: params.chain_id(),
+        strategy: TradeStrategy::Smart, // Default to Smart strategy
+        entry_price: 0.0, // Will be updated with actual price
+        token_amount: params.amount,
+        invested_amount: params.amount,
+        highest_price: 0.0, // Will be updated with actual price
+        entry_time: timestamp,
+        max_hold_time: timestamp + 86400, // Default to 24 hours
+        take_profit_percent: 20.0, // Default to 20%
+        stop_loss_percent: 10.0, // Default to 10%
+        trailing_stop_percent: Some(5.0), // Default to 5%
+        buy_tx_hash: "".to_string(), // Will be updated with actual tx hash
+        sell_tx_hash: None,
         status: TradeStatus::Pending,
-        transaction_hash: None,
-        error_message: None,
-        gas_used: 0.0,
-        strategy,
-        created_at: timestamp,
-        updated_at: timestamp,
-        stop_loss: params.stop_loss,
-        take_profit: params.take_profit,
-        max_hold_time: params.max_hold_time.unwrap_or(86400 * 7), // Default 7 days
-        custom_params: params.custom_params.clone().unwrap_or_default(),
+        exit_reason: None,
     }
 }
 
@@ -554,7 +428,6 @@ pub fn create_trade_tracker(
 ///
 /// Module này cung cấp các hàm tiện ích để hỗ trợ phân tích và thực thi giao dịch,
 /// bao gồm xử lý lỗi, thao tác với dữ liệu, và các helper functions.
-
 /// Trả về lý do thất bại từ Option<String>, sử dụng giá trị mặc định nếu None
 pub fn get_failure_reason(reason: Option<String>) -> String {
     reason.unwrap_or_else(|| UNKNOWN_FAILURE_REASON.to_string())
@@ -562,12 +435,12 @@ pub fn get_failure_reason(reason: Option<String>) -> String {
 
 /// Định dạng thông báo lỗi slippage cao
 pub fn format_slippage_error(slippage: f64) -> String {
-    format!(HIGH_SLIPPAGE_FORMAT, slippage)
+    format!("Slippage too high: {}%", slippage)
 }
 
 /// Định dạng thông báo lỗi thanh khoản không đủ
 pub fn format_insufficient_liquidity(details: &str) -> String {
-    format!(INSUFFICIENT_LIQUIDITY_FORMAT, details)
+    format!("Insufficient liquidity: {}", details)
 }
 
 /// Trả về số lượng test mặc định cho các kiểm tra honeypot

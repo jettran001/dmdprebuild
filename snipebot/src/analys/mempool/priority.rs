@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use tracing;
 
 use crate::analys::mempool::types::{MempoolTransaction, TransactionPriority};
-use crate::analys::mempool::utils;
 
 /// Calculate transaction priority based on gas price and current network conditions
 ///

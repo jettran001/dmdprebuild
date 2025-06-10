@@ -6,7 +6,6 @@
 //! - Phát hiện backdoor để lấy lại quyền
 //! - Phát hiện proxy contract có thể upgrade logic
 
-use std::collections::HashMap;
 use regex::Regex;
 
 use super::types::{OwnerAnalysis, ContractInfo};

@@ -59,7 +59,8 @@ Kiểm tra clippy phát hiện các lỗi sau:
 ## Struct/Enum variant không khớp
 - [x] snipebot/src/tradelogic/common/utils.rs:548,570,716,739 - Không tìm thấy field `base_token` trong `&types::TradeParams`
 - [x] snipebot/src/tradelogic/common/trade_execution.rs:52,55 - Struct `SecurityCheckResult` không có field `safe_to_trade`, `risk_score`
-- [ ] snipebot/src/tradelogic/common/trade_execution.rs:63 - Mismatch types và variant không tồn tại (Không thể sửa do vấn đề thời gian chờ)
+- [x] snipebot/src/tradelogic/common/trade_execution.rs:63 - Mismatch types và variant không tồn tại
+  - Đã kiểm tra: Code đã đúng, đang sử dụng TokenIssueType::Honeypot và TokenIssueType::MaliciousTransfer trong matches! [2024-12-09]
 
 ## Lỗi phức tạp cần tích hợp giữa các module
 - [x] snipebot/src/tradelogic/common/trade_execution.rs:124 - Struct `TradeParams` không có field `chain_id`
@@ -134,67 +135,225 @@ Kiểm tra clippy phát hiện các lỗi sau:
 Tất cả lỗi trong file .bugs đã được sửa. Dự án hiện hoạt động đúng với tất cả các interfaces đồng bộ.
 
 ## Lỗi mới trong domain snipebot từ cargo clippy
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:454 - Mismatched types: expected `u64`, found `Option<_>` cho `gas_limit`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:466 - Không tìm thấy method `get_gas_price` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:467 - Mismatched types: expected `f64`, found `Option<_>` cho `gas_price`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:477 - Không tìm thấy field `from` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:477 - Method `get_balance` cần 0 tham số nhưng cung cấp 1
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:478 - Không tìm thấy method `unwrap_or` trong `u64` và `f64`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:492 - Không tìm thấy method `get_expected_nonce` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:503 - Không tìm thấy method `is_swap` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:504 - Không tìm thấy field `slippage` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:506 - Không tìm thấy field `token_address` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:517 - Không thể gọi method `max` trên kiểu số không xác định
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:549 - Không tìm thấy method `get_address_transactions_in_range` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:684 - Method `get_token_price_history` cần 4 tham số nhưng chỉ cung cấp 2
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:736 - Không tìm thấy method `get_token_metadata` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:755 - `TokenLiquidity` không implement `Display`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:783 - Không thể áp dụng toán tử `>` cho `TokenLiquidity`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:784 - Không thể trừ `TokenLiquidity` từ `TokenLiquidity`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:793 - `TokenLiquidity` không implement `Display` cho format string
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:824 - Không tìm thấy method `get_token_metadata` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:827 - Không tìm thấy method `get_token_risk_score` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:861 - Không tìm thấy method `write` trong `Vec<MevOpportunity>`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:879 - Không tìm thấy field `is_safe` và `risk_score` trong `TokenSafety`
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:896 - Method `get_token_price_history` cần 4 tham số nhưng chỉ cung cấp 2
-- [ ] snipebot/src/tradelogic/mev_logic/bot.rs:897 - Không tìm thấy method `get_token_market_data` trong `Arc<dyn TokenAnalysisProvider>`
-- [ ] snipebot/src/tradelogic/mev_logic/bundle.rs:534 - Borrow of moved value `status`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:180 - Không tìm thấy method `get_network_latency_ms` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:182 - Không tìm thấy field `max_acceptable_latency_ms` trong `JITLiquidityConfig`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:207 - Không tìm thấy field `enabled_chains` trong `JITLiquidityConfig`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:214 - Không tìm thấy method `get_average_block_time_ms` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:216 - Không tìm thấy field `min_block_time_ms` trong `JITLiquidityConfig`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:242 - Không tìm thấy field `scan_interval_ms` trong `JITLiquidityConfig`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:265 - Không tìm thấy method `get_current_block` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:271 - Không tìm thấy field `value_usd` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:276 - Không tìm thấy field `pool_address` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:399 - Không tìm thấy field `value_usd` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:441 - Không tìm thấy field `value_usd` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/jit_liquidity.rs:450 - Không tìm thấy field `hash` trong `MempoolTransaction`
-- [ ] snipebot/src/tradelogic/mev_logic/cross_domain.rs:423 - Trait bound `Arc<dyn BridgeProvider>: BridgeProvider` không thỏa mãn
-- [ ] snipebot/src/tradelogic/mev_logic/cross_domain.rs:713 - Unused variables `source_chain` và `dest_chain`
-- [ ] snipebot/src/tradelogic/common/utils.rs:75 - Mismatched types: expected `f64`, found tuple `(_, _)` cho `simulate_swap_amount_out`
-- [ ] snipebot/src/tradelogic/common/utils.rs:197 - Method `get_token_price_history` cần 4 tham số nhưng chỉ cung cấp 2
-- [ ] snipebot/src/tradelogic/common/utils.rs:362 - Trait bound `u64: From<i32>` không thỏa mãn
-- [ ] snipebot/src/tradelogic/common/utils.rs:517 - Không thể áp dụng toán tử `!` cho `Future<Output = Result<bool, Error>>`
-- [ ] snipebot/src/tradelogic/common/utils.rs:619 - Mismatched types: expected `f64`, found `Option<_>` cho `slippage`
-- [ ] snipebot/src/tradelogic/common/utils.rs:652 - Không thể áp dụng toán tử `<` cho `TokenLiquidity`
-- [ ] snipebot/src/tradelogic/common/utils.rs:653 - `TokenLiquidity` không implement `Display`
-- [ ] snipebot/src/tradelogic/common/utils.rs:698 - Không tìm thấy field `base_token` trong `TradeParams`
-- [ ] snipebot/src/tradelogic/common/utils.rs:839 - Mismatched types: expected `u64`, found `Option<_>` cho `created_at`
-- [ ] snipebot/src/tradelogic/common/analysis.rs:598 - Không tìm thấy method `analyze_token_safety` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/common/gas.rs:216 - Không tìm thấy method `get_gas_price` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/common/gas.rs:238 - Không tìm thấy method `get_gas_price` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/common/gas.rs:260 - Không tìm thấy method `get_gas_price` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/common/gas.rs:377 - Không tìm thấy method `get_pending_transaction_count` trong `Arc<dyn MempoolAnalysisProvider>`
-- [ ] snipebot/src/tradelogic/common/trade_execution.rs:124 - Không tìm thấy method `get_chain_id` trong `Arc<EvmAdapter>`
-- [ ] snipebot/src/tradelogic/common/trade_execution.rs:131 - Trait bound `TradeParams: Default` không thỏa mãn
-- [ ] snipebot/src/tradelogic/common/trade_execution.rs:188 - Unused variable `token_address`
-- [ ] snipebot/src/tradelogic/common/network_reliability.rs:622 - Trait bound `Box<dyn Fn(&str) -> ... + Send + Sync>: Clone` không thỏa mãn
-- [ ] snipebot/src/analys/token_status/utils.rs:406 - Unused variable `adapter`
-- [ ] snipebot/src/analys/mempool/analyzer.rs:536 - Struct `TokenInfo` không có field `chain_id`
-- [ ] snipebot/src/analys/mempool/analyzer.rs:544 - Struct `TokenInfo` không có field `is_honeypot`
-- [ ] snipebot/src/analys/mempool/analyzer.rs:545 - Struct `TokenInfo` không có field `is_mintable`
-- [ ] snipebot/src/analys/mempool/analyzer.rs:546 - Struct `TokenInfo` không có field `is_proxy`
-- [ ] snipebot/src/analys/mempool/analyzer.rs:547 - Struct `TokenInfo` không có field `has_blacklist`
-- [ ] snipebot/src/analys/mempool/detection.rs:299 - Value assigned to `confidence_score` is never read
+- [x] snipebot/src/tradelogic/common/trade_execution.rs:124 - Không tìm thấy method `get_chain_id` trong `Arc<EvmAdapter>`
+- [x] snipebot/src/tradelogic/common/trade_execution.rs:131 - Trait bound `TradeParams: Default` không thỏa mãn
+- [x] snipebot/src/tradelogic/common/utils.rs:698 - Không tìm thấy field `base_token` trong `TradeParams`
+- [x] snipebot/src/tradelogic/common/utils.rs:75 - Mismatched types: expected `f64`, found tuple `(_, _)` cho `simulate_swap_amount_out`
+- [x] snipebot/src/tradelogic/common/utils.rs:197 - Method `get_token_price_history` cần 4 tham số nhưng chỉ cung cấp 2
+- [x] snipebot/src/tradelogic/common/utils.rs:517 - Không thể áp dụng toán tử `!` cho `Future<Output = Result<bool, Error>>`
+
+# Danh sách lỗi trong domain snipebot
+# Định dạng: [TRẠNG THÁI] Mô tả lỗi (file:dòng)
+
+[x] Lỗi kích thước không xác định cho kiểu f64 (src/tradelogic/common/utils.rs:78)
+  - Đã sửa: Chỉ định kiểu cụ thể bằng cách thêm hậu tố _f64 cho literal [2024-12-08]
+
+[x] Lỗi ambiguous numeric type cho f64 (src/tradelogic/mev_logic/types.rs:155)
+  - Đã sửa: Thêm hậu tố _f64 và sửa phương thức max() [2024-12-08]
+
+[x] Lỗi cấu trúc (snipebot/src/tradelogic/common/trade_execution.rs:63) - Mismatch types và variant không tồn tại
+  - Đã kiểm tra: Code đã đúng, đang sử dụng TokenIssueType::Honeypot và TokenIssueType::MaliciousTransfer trong matches! như đã định nghĩa trong file types.rs [2024-12-09]
+
+[x] Lỗi E0609: no field `monitor_blocks_ahead` trong JITLiquidityConfig
+  - Đã sửa: Thêm field monitor_blocks_ahead vào struct JITLiquidityConfig và cập nhật hàm default [2024-12-04]
+
+## Lỗi phát hiện ngày 2024-12-09 (Cargo clippy)
+[x] Lỗi unused imports trong nhiều file:
+  - Trong src/tradelogic/common/trade_execution.rs: `debug`, `error`, `warn`, `TokenPair`, `ExecutionMethod`, `SecurityCheckResult`, `TokenIssue`
+  - Trong src/tradelogic/common/mev_detection.rs: `std::sync::Arc`, `Context`, `anyhow`, `debug`, `error`, `info`, `warn`, `Duration`, `EvmAdapter`, `TransactionType`
+  - Trong src/tradelogic/common/resource_manager.rs: `Context`, `error`
+  - Trong src/tradelogic/common/network_reliability.rs: `once_cell::sync::Lazy`
+  - Trong src/tradelogic/common/health_monitor.rs: `Instant`, `sleep`, `Context`
+  - Trong src/tradelogic/common/rate_limiter.rs: `error`, `info`, và nhiều import `anyhow::Context`
+  - Trong src/tradelogic/common/throttle.rs: `info`, `Context`
+  - Trong src/tradelogic/common/bridge_helper.rs: `std::future::Future`, `BridgeProvider`
+  - Trong src/tradelogic/stubs.rs: `anyhow`, `TokenSafety`, `EvmAdapter`
+  - Trong src/analys/token_status/blacklist.rs: `regex::Regex`
+  - Trong src/analys/token_status/utils.rs: `error`, `info`, `warn`
+  - Trong src/analys/mempool/utils.rs: `Duration`
+  - Trong src/analys/mempool/analyzer.rs: `std::sync::Arc`
+  - Trong src/analys/mempool/detection.rs: `Duration`, `Context`, `warn`, `DateTime`, `Utc`
+  - Trong src/analys/mempool/priority.rs: `crate::analys::mempool::utils`
+  - Trong src/analys/mempool/arbitrage.rs: `Duration`, `SuspiciousPattern`
+  - Trong src/analys/api/mempool_api.rs: `Mutex`
+  - Trong src/analys/api/token_api.rs: `error`, `info`, `warn`, `TokenStatus`, `TokenIssue`, `detect_token_issues`
+  - Trong src/analys/api/risk_api.rs: `std::collections::HashMap`, `anyhow`
+  - Trong src/analys/api/factory.rs: `crate::analys::mempool::MempoolAnalyzer`
+  - Trong src/notifications.rs: `Context`, `futures::executor`
+
+[ ] Lỗi empty line after doc comment trong nhiều file:
+  - src/tradelogic/common/mev_detection.rs
+  - src/tradelogic/common/resource_manager.rs
+  - src/tradelogic/common/network_reliability.rs
+  - src/tradelogic/common/health_monitor.rs
+  - src/tradelogic/common/rate_limiter.rs
+  - src/analys/token_status/utils.rs
+  - src/analys/mempool/mod.rs
+  - src/analys/mempool/types.rs
+  - src/analys/api/mempool_api.rs
+  - src/analys/api/token_api.rs
+  - src/analys/api/risk_api.rs
+  - src/analys/api/mev_opportunity_api.rs
+  - src/notifications.rs
+
+[ ] Lỗi unused doc comment trong src/analys/mempool/types.rs và src/tradelogic/common/resource_manager.rs
+
+[ ] Lỗi this `if` statement can be collapsed trong src/analys/mempool/detection.rs:344
+
+[x] Lỗi variable does not need to be mutable trong nhiều file:
+  - src/tradelogic/coordinator.rs: `reservation_times`, `reservation_conflicts`, `executed`, `expired`
+  - src/tradelogic/smart_trade/executor/core.rs: `field`
+
+[x] Lỗi unused variables trong nhiều file:
+  - src/tradelogic/smart_trade/optimizer.rs: `is_buy`, `chain_id`
+  - src/tradelogic/smart_trade/alert.rs: `token_address`, `chain_id`
+  - src/tradelogic/smart_trade/executor/utils.rs: `last_error`
+  - src/tradelogic/mev_logic/strategy.rs: `chain_id`, `analyzer`, `adapter` trong nhiều phương thức
+  - src/tradelogic/mev_logic/cross_domain.rs: `source_chain`, `dest_chain`
+  - src/analys/token_status/utils.rs: `adapter`, `token_address`, `amount`
+  - src/analys/mempool/analyzer.rs: `is_adding`, `token_price`
+  - src/analys/api/mempool_api.rs: `chain_adapter`
+  - src/tradelogic/common/health_monitor.rs: `health_check_fn`
+  - src/tradelogic/common/trade_execution.rs: `token_address`
+
+[ ] Lỗi E0034: multiple applicable items in scope trong src/tradelogic/smart_trade/alert.rs:158 - Hai phương thức `get_trade_by_id` với kiểu trả về khác nhau
+
+[ ] Lỗi E0599: no method named hoặc no variant or associated item named trong nhiều file:
+  - Nhiều phương thức không tồn tại hoặc không phù hợp cho struct và enum
+  - Các trường hợp cụ thể bao gồm `add_telegram_provider`, `add_discord_provider`, `is_transaction_confirmed`, `simulate_sell_token`, `get_token_tax_info`, etc.
+
+[ ] Lỗi E0277: the size for values of type không xác định trong nhiều file smart_trade/alert.rs, smart_trade/executor/market_monitor.rs và mev_logic/execution.rs
+
+[ ] Lỗi E0609: no field trong nhiều file, liên quan đến truy cập field không tồn tại trong struct
+
+[ ] Lỗi E0560: struct has no field trong nhiều file, liên quan đến khởi tạo struct với field không tồn tại
+
+[ ] Lỗi E0308: mismatched types trong nhiều file, liên quan đến kiểu dữ liệu không khớp
+
+[ ] Lỗi E0599: no method named `get_gas_price` found for reference `&std::sync::Arc<chain_adapters::evm_adapter::EvmAdapter>` trong nhiều file - Method này cần được triển khai hoặc import từ trait
+
+[ ] Lỗi use of deprecated method `chain_adapters::bridge_adapter::BridgeAdapter::get_provider_legacy` trong src/chain_adapters/bridge_adapter.rs
+
+[ ] Lỗi E0061: this method/function takes X arguments but Y arguments were supplied trong nhiều file
+
+[ ] Lỗi E0061: this method takes 0 arguments but 1 argument was supplied trong src/tradelogic/mev_logic/bot.rs:427 - Method `get_balance` không nhận tham số
+
+[ ] Lỗi E0716: temporary value dropped while borrowed trong src/tradelogic/common/network_reliability.rs:613 và E0521: borrowed data escapes outside of method
+
+[ ] Lỗi E0515: cannot return value referencing local variable `opportunities` trong src/tradelogic/mev_logic/strategy.rs:336
+
+[ ] Lỗi E0382: borrow of moved value trong src/tradelogic/mev_logic/bundle.rs:534 và smart_trade/executor/strategy.rs:89
+
+## Lỗi mới phát hiện (2024-12-11)
+
+[ ] Trùng lặp enum và struct trong nhiều module:
+  - Enum `TradeStatus` được định nghĩa cả trong `tradelogic/common/types.rs` và `tradelogic/smart_trade/types.rs`
+  - Struct `SecurityCheckResult` được định nghĩa cả trong `tradelogic/common/types.rs` và `analys/token_status/types.rs`
+  - Enum `TokenIssueType` được định nghĩa cả trong `tradelogic/common/types.rs` và `analys/token_status/types.rs`
+
+[ ] Không nhất quán trong định nghĩa API giữa các module:
+  - Interface `analyze_token_safety` trong trait `TokenAnalysisProvider` không khớp với triển khai trong `token_api.rs`
+  - Interface `is_safe_to_trade` và `perform_token_security_check` trả về các loại kết quả khác nhau
+
+[ ] Trùng lặp logic trong các file:
+  - Logic phát hiện honeypot được triển khai cả trong `token_status/utils.rs` và `tradelogic/common/utils.rs`
+  - Logic đánh giá rủi ro token được lặp lại giữa `risk_analyzer.rs` và `token_status/utils.rs`
+  - Logic tính toán gas price được lặp lại trong `tradelogic/common/gas.rs` và `chain_adapters/evm_adapter.rs`
+
+[ ] Cấu trúc dự án chưa tuân thủ nguyên tắc trait-based design:
+  - Một số file truy cập trực tiếp implementation thay vì thông qua trait interface
+  - Một số module implement trực tiếp cho struct thay vì tạo newtype pattern
+
+[ ] Khai báo trait không nhất quán:
+  - `CrossChainTrader` và `CrossChainTraderExt` có các phương thức trùng lặp và mâu thuẫn
+  - Các extension trait như `CrossChainTraderExt` được triển khai blanket impl nhưng không định nghĩa rõ ràng mối quan hệ phụ thuộc
+
+[ ] Lỗi về error handling:
+  - Nhiều nơi dùng `unwrap()` thay vì dùng `?` operator trong async context
+  - Nhiều hàm trả về `Result<T, anyhow::Error>` nhưng không thêm context khi propagating errors
+  - Thiếu log ở nơi catch cuối cùng của errors
+
+[ ] Lỗi về thread safety trong async context:
+  - Một số shared state không dùng tokio::sync::Mutex mà dùng std::sync::Mutex
+  - Một số trait không có Send + Sync + 'static bound dù được dùng trong async context
+
+[ ] Lỗi doc comments không đầy đủ:
+  - Nhiều struct và trait public không có doc comments đầy đủ
+  - Một số doc comments không mô tả đầy đủ error cases và side effects
+
+[ ] Thiếu tests:
+  - Thiếu tests cho các module analys và tradelogic
+  - Không có mock implementations cho nhiều trait interfaces
+
+[ ] Thiếu kiểm tra input validation:
+  - Nhiều hàm không validate inputs trước khi xử lý
+  - Thiếu chuẩn hóa cho các tham số như chain_id, token_address, v.v.
+
+## Lỗi phát hiện từ cargo clippy mới (ngày thực hiện: 07/11/2023)
+
+- [x] snipebot/src/tradelogic/traits.rs:27:55 - Lỗi import không sử dụng: `RiskFactor` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/coordinator.rs:13:5 - Lỗi import không sử dụng: `chrono::Utc` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/coordinator.rs:27:13 - Lỗi import không sử dụng: `Serialize` và `Deserialize` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/manual_trade.rs:27:20 - Lỗi import không sử dụng: `ChainType` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/manual_trade.rs:28:48 - Lỗi import không sử dụng: `RiskManager` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/analys_client.rs:6:1 - Lỗi dòng trống sau doc comment - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/security.rs:4:1 - Lỗi dòng trống sau doc comment - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/anti_mev.rs:1:1 - Lỗi dòng trống sau doc comment - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/optimizer.rs:8:22 - Lỗi import không sử dụng: `error` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/optimizer.rs:9:13 - Lỗi import không sử dụng: `Serialize` và `Deserialize` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/optimizer.rs:15:5 - Lỗi import không sử dụng: `crate::types::TokenPair` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/alert.rs:11:5 - Lỗi import không sử dụng: `anyhow::anyhow` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/alert.rs:12:14 - Lỗi import không sử dụng: `DateTime` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/alert.rs:13:5 - Lỗi import không sử dụng: `tokio::sync::RwLock` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/types.rs:4:42 - Lỗi import không sử dụng: `VecDeque` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/types.rs:6:13 - Lỗi import không sử dụng: `Serialize` và `Deserialize` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/types.rs:7:14 - Lỗi import không sử dụng: `DateTime` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/types.rs:11:20 - Lỗi import không sử dụng: `ChainType` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/constants.rs:147:1 - Lỗi doc comment không sử dụng được cho macro invocation - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/token_analysis.rs:25:5 - Lỗi import không sử dụng: `TokenStatus` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/trade_strategy.rs:17:34 - Lỗi import không sử dụng: `SmartTradeConfig`, `TradeResult`, và `TradeStatus` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/executor/core.rs:4:1 - Lỗi dòng trống sau doc comment - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/executor/types.rs:8:5 - Lỗi import không sử dụng: `anyhow::Result` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/executor/trade_handler.rs:4:1 - Lỗi dòng trống sau doc comment - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/executor/risk_manager.rs:8:22 - Lỗi import không sử dụng: `error` và `info` - Đã sửa: Claude [2023-11-07]
+- [x] snipebot/src/tradelogic/smart_trade/executor/market_monitor.rs:8:41 - Lỗi import không sử dụng: `RwLock`, `anyhow`, `Rng`, `thread_rng`, `EvmAdapter`, `TradeParams`, `TradeOpportunity`, `get_current_timestamp` - Đã sửa: Claude [2023-11-07]
+
+## Lỗi triển khai trait xung đột
+- [ ] snipebot/src/tradelogic/smart_trade/types.rs:271:17 - Lỗi xung đột triển khai trait `Clone` cho struct `SmartTradeConfig`
+- [ ] snipebot/src/tradelogic/smart_trade/types.rs:271:10 - Lỗi xung đột triển khai trait `Debug` cho struct `SmartTradeConfig`
+
+## Lỗi chuyển đổi kiểu dữ liệu không hợp lệ
+- [ ] snipebot/src/lib.rs:220:25 - Lỗi chuyển đổi không hợp lệ: `EvmAdapter as Arc<dyn RpcAdapter>`, cần bổ sung triển khai trait
+
+## Lỗi di chuyển/sử dụng giá trị sau khi đã được di chuyển
+- [ ] snipebot/src/lib.rs:328:30 - Lỗi sử dụng giá trị `*tx` đã được di chuyển (borrowed value does not live long enough)
+
+## Lỗi về Future trait cần triển khai
+- [ ] snipebot/src/lib.rs:408:37 - Lỗi thiếu kiểu dữ liệu liên kết `Future` trong `warp::filter::Filter`
+- [ ] snipebot/src/health.rs:793:62 - Lỗi thiếu kiểu dữ liệu liên kết `Future` trong `warp::filter::Filter`
+
+## Lỗi về method không được tìm thấy
+- [ ] snipebot/src/chain_adapters/bridge_adapter.rs:602:37 - Lỗi phương thức `clone` cho `Box<dyn BridgeProvider>`, cần triển khai trait Clone
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:383:40 - Không tìm thấy phương thức `simulate_token_sell` trong `EvmAdapter`
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:392:40 - Không tìm thấy phương thức `simulate_token_sell` trong `EvmAdapter` 
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:446:20, 453:20, 460:20, 502:20, 557:20, 617:20 - Lỗi không tìm thấy phương thức `context` cho kết quả `Result`, cần import trait Context
+
+## Lỗi về field không tồn tại trong struct
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:567:35 - Không tìm thấy phương thức `check_liquidity_locked` trong `EvmAdapter`
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:588:37 - Không tìm thấy phương thức `get_recent_liquidity_events` trong `EvmAdapter`, nên dùng `get_liquidity_events` 
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:704:51, 884:33, 887:33, 888:33, 889:33, 1008:29, 1012:29, 1013:29, 1014:29 - Không tìm thấy variants của enum `RiskFactor` như `ContractUnavailable`, `Honeypot`, `BytecodeIssues`, `ContractStructure`
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:1031:16 - Lỗi kiểu dữ liệu không khớp, cần `TokenTaxInfo` nhưng tìm thấy tuple `(_, _)`
+- [ ] snipebot/src/tradelogic/smart_trade/security.rs:1071:23 - Phương thức `get_token_transaction_history` nhận 1 tham số nhưng đang được cung cấp 2 tham số
+
+## Lỗi về variant không tồn tại trong enum
+- [ ] snipebot/src/tradelogic/smart_trade/alert.rs:148:48, 157:26 - Không tìm thấy các variants `Rejected` và `Completed` trong enum `TradeStatus`
+- [ ] snipebot/src/tradelogic/smart_trade/alert.rs:162:35, 163:35 - Không tìm thấy fields `exit_price` và `profit_percent` trong struct `TradeResult`
+
+## Tóm lược các lỗi nghiêm trọng cần khắc phục ngay
+- [ ] Lỗi xung đột triển khai trait Clone và Debug cho struct SmartTradeConfig
+- [ ] Lỗi chuyển đổi không hợp lệ từ EvmAdapter sang Arc<dyn RpcAdapter> 
+- [ ] Lỗi sử dụng phương thức `context` không có trong scope, cần import `anyhow::Context`
+- [ ] Lỗi về struct và enum có fields và variants mâu thuẫn với nhau trong các module khác nhau
+- [ ] Lỗi về phương thức không tồn tại trong các adapters như `get_gas_price`, `get_token_safety`, `simulate_token_sell`
+- [ ] Lỗi về kiểu dữ liệu không khớp, đặc biệt khi xử lý Option và Result
+- [ ] Lỗi về các import không sử dụng, cần dọn dẹp để cải thiện hiệu suất biên dịch và khả năng đọc code

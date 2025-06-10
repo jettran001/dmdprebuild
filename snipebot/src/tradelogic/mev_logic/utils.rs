@@ -4,16 +4,12 @@
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use anyhow::Result;
+use ethers::types::{U256, H256, Address};
 
 use crate::analys::mempool::TokenInfo;
-use super::types::{MarketData, TraderBehaviorType, TraderExpertiseLevel};
-use crate::tradelogic::common::utils::{
-    calculate_percentage_change,
-    eth_to_usd,
-    usd_to_eth,
-    current_time_seconds
-};
-use crate::tradelogic::common::analysis::analyze_trader_behavior;
+use crate::types::TokenPair;
+use super::types::MarketData;
 
 /// Tính toán thời gian hiện tại tính từ UNIX epoch (giây)
 pub fn current_time_seconds() -> u64 {

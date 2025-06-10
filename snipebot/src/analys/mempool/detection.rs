@@ -4,13 +4,12 @@
 //! in the mempool, such as front-running, sandwich attacks, and suspicious activities.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use anyhow::{Result, Context};
-use tracing::{debug, info, warn};
-use chrono::{DateTime, Utc};
+use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::Result;
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
 use std::ops::DerefMut;
+use tracing::warn;
 
 use super::types::*;
 
@@ -27,7 +26,7 @@ fn get_current_timestamp(fallback: Option<u64>) -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
         Err(e) => {
-            tracing::warn!("Failed to get current time: {}", e);
+            warn!("Failed to get current time: {}", e);
             // Use fallback value or 0
             fallback.unwrap_or(0)
         }
@@ -201,7 +200,7 @@ pub async fn detect_front_running(
     if highest_confidence >= 0.7 {
         // Return front-running pattern with details
         let detail = format!("Front-running detected with {:.1}% confidence", highest_confidence * 100.0);
-        info!("{}", detail);
+        warn!("{}", detail);
         
         // Tạo một basic pattern vì struct SuspiciousPattern::FrontRunning không có các fields 
         let mut pattern = SuspiciousPattern::FrontRunning;
@@ -236,8 +235,6 @@ pub async fn detect_sandwich_attack(
     transaction: &MempoolTransaction,
     pending_txs: &HashMap<String, MempoolTransaction>
 ) -> Result<Option<SuspiciousPattern>> {
-    use tracing::{debug, info, warn};
-    
     // Only check swap transactions with sufficient value
     if transaction.transaction_type != TransactionType::Swap {
         return Ok(None);
@@ -272,7 +269,7 @@ pub async fn detect_sandwich_attack(
         return Ok(None);
     }
     
-    debug!("Found {} potential front-running transactions for possible sandwich attack", front_txs.len());
+    warn!("Found {} potential front-running transactions for possible sandwich attack", front_txs.len());
     
     // Find potential back-running transaction (sell side of sandwich)
     let back_txs = filter_transactions_in_window(pending_txs,
@@ -293,7 +290,7 @@ pub async fn detect_sandwich_attack(
         return Ok(None);
     }
     
-    debug!("Found {} potential back-running transactions for possible sandwich attack", back_txs.len());
+    warn!("Found {} potential back-running transactions for possible sandwich attack", back_txs.len());
     
     // Enhanced detection with token, value, and path analysis
     let mut confidence_score = 0.0;
@@ -331,21 +328,20 @@ pub async fn detect_sandwich_attack(
                 
                 if front_buys_victims_token && back_sells_same_token {
                     confidence_score += 0.3;
-                    debug!("Found strong token path evidence for sandwich attack");
+                    sandwich_details = Some((format!("Token matching: front buys victim's token, back sells it"), confidence_score));
                 }
                 
                 // Check for router signature
                 if optional_address_matches(&front_tx.to_address, &transaction.to_address) && 
                    optional_address_matches(&transaction.to_address, &back_tx.to_address) {
-                    confidence_score += 0.1;
+                    confidence_score += 0.2;
                 }
             }
             // If no token info, rely on router contract interaction
-            else if address_matches(&front_tx.from_address, &back_tx.from_address) {
-                if optional_address_matches(&front_tx.to_address, &transaction.to_address) && 
-                   optional_address_matches(&transaction.to_address, &back_tx.to_address) {
-                    confidence_score += 0.2;
-                }
+            else if address_matches(&front_tx.from_address, &back_tx.from_address) &&
+                   optional_address_matches(&front_tx.to_address, &back_tx.to_address) {
+                confidence_score += 0.15;
+                should_update = true;
             }
             
             // Check gas price patterns
@@ -416,7 +412,7 @@ pub async fn detect_sandwich_attack(
     
     // Return the highest confidence sandwich attack if found
     if let Some((detail, confidence)) = sandwich_details {
-        info!("{}", detail);
+        warn!("{}", detail);
         
         // Add additional details to pattern
         let mut pattern = SuspiciousPattern::SandwichAttack;
@@ -560,7 +556,7 @@ pub fn detect_sudden_liquidity_removal(
         let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_secs(),
             Err(e) => {
-                tracing::warn!("Failed to get current time in detect_sudden_liquidity_removal: {}", e);
+                warn!("Failed to get current time in detect_sudden_liquidity_removal: {}", e);
                 return None;
             }
         };
@@ -610,103 +606,4 @@ pub fn detect_whale_movement(
 ///
 /// # Arguments
 /// * `transactions` - Map of pending transactions
-/// * `address` - Address to check
-/// * `time_window_sec` - Time window to consider
-///
-/// # Returns
-/// * `Option<SuspiciousPattern>` - SuspiciousPattern::TokenLiquidityPattern if detected
-pub async fn detect_token_liquidity_pattern(
-    transactions: &HashMap<String, MempoolTransaction>,
-    address: &str,
-    time_window_sec: u64,
-) -> Option<SuspiciousPattern> {
-    // Find token creation transaction
-    let token_creation: Option<&MempoolTransaction> = transactions.values()
-        .find(|tx| {
-            tx.transaction_type == TransactionType::TokenCreation &&
-            tx.from_address == address
-        });
-    
-    if token_creation.is_none() {
-        return None;
-    }
-    
-    let token_creation = token_creation.unwrap();
-    
-    // Find liquidity addition after token creation
-    let liquidity_addition: Option<&MempoolTransaction> = transactions.values()
-        .find(|tx| {
-            tx.transaction_type == TransactionType::AddLiquidity &&
-            tx.from_address == address && 
-            tx.detected_at > token_creation.detected_at &&
-            tx.detected_at <= token_creation.detected_at + time_window_sec
-        });
-    
-    if liquidity_addition.is_some() {
-        return Some(SuspiciousPattern::TokenLiquidityPattern);
-    }
-    
-    None
-}
-
-/// Extension trait để thêm metadata vào SuspiciousPattern
-trait SuspiciousPatternExt {
-    /// Thêm metadata cho pattern
-    fn add_metadata(&mut self, key: &str, value: &str);
-    
-    /// Đặt confidence level cho pattern
-    fn set_confidence(&mut self, confidence: f64);
-    
-    /// Đặt mô tả chi tiết cho pattern
-    fn set_detail(&mut self, detail: String);
-    
-    /// Lấy metadata đã lưu (private method để sử dụng trong trait)
-    fn get_metadata(&self) -> &HashMap<String, String>;
-    
-    /// Lấy metadata dạng mutable (private method để sử dụng trong trait)
-    fn get_metadata_mut(&mut self) -> &mut HashMap<String, String>;
-}
-
-impl SuspiciousPatternExt for SuspiciousPattern {
-    fn add_metadata(&mut self, key: &str, value: &str) {
-        // Lưu metadata vào internal HashMap
-        let metadata = self.get_metadata_mut();
-        metadata.insert(key.to_string(), value.to_string());
-        
-        // Log khi debug để tracking
-        debug!("Adding metadata ({}: {}) to {:?}", key, value, self);
-    }
-    
-    fn set_confidence(&mut self, confidence: f64) {
-        // Lưu confidence vào metadata
-        self.add_metadata("confidence", &format!("{:.2}", confidence));
-        debug!("Setting confidence to {:.2} for {:?}", confidence, self);
-    }
-    
-    fn set_detail(&mut self, detail: String) {
-        // Lưu detail vào metadata
-        self.add_metadata("detail", &detail);
-        debug!("Setting detail for {:?}: {}", self, detail);
-    }
-    
-    fn get_metadata(&self) -> &HashMap<String, String> {
-        // Trong môi trường thực tế, sẽ trả về reference đến HashMap trong struct
-        // Nhưng đây là stub implementation, nên trả về reference đến HashMap rỗng (static)
-        static EMPTY_METADATA: Lazy<HashMap<String, String>> = Lazy::new(HashMap::new);
-        &EMPTY_METADATA
-    }
-    
-    fn get_metadata_mut(&mut self) -> &mut HashMap<String, String> {
-        // Đây là stub implementation, thực tế sẽ trả về mutable reference
-        // đến HashMap trong struct
-        thread_local! {
-            static THREAD_METADATA: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
-        }
-        
-        THREAD_METADATA.with(|cell| {
-            // Cảnh báo: metadata này sẽ được chia sẻ giữa tất cả các pattern trên cùng một thread
-            // Chỉ dùng cho stub implementation
-            cell.borrow_mut().deref_mut()
-        })
-    }
-} 
+/// * `

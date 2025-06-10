@@ -7,13 +7,11 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;
-use anyhow::{Result, anyhow};
-use tracing::{warn, info};
+use anyhow::Result;
+use tracing::warn;
 
 use super::traits::{RiskManager, StrategyOptimizer, CrossChainTrader};
-use crate::types::TokenPair;
-use crate::analys::token_status::TokenSafety;
-use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::types::{TokenPair, ChainType};
 
 /// Stub implementation of RiskManager
 #[derive(Debug, Clone)]

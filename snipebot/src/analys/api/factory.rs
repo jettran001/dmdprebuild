@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::analys::mempool::MempoolAnalyzer;
 use crate::analys::risk_analyzer::RiskAnalyzer;
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::tradelogic::traits::{

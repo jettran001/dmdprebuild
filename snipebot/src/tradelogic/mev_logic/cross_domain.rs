@@ -3,36 +3,29 @@
 //! Module này xử lý các cơ hội MEV xuyên chuỗi (cross-domain), cho phép
 //! phát hiện và khai thác chênh lệch giữa các blockchain khác nhau.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
-use tokio::time::sleep;
-use async_trait::async_trait;
-use tracing::{debug, error, info, warn};
-use futures::future::join_all;
-use anyhow::Result;
+use tokio::sync::{RwLock, Mutex};
+use tokio::time::{sleep, Duration};
+use anyhow::{Result, anyhow};
+use tracing::{debug, error, info};
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::chain_adapters::bridge_adapter::BridgeProvider;
+use super::types::{MevOpportunity, MevOpportunityType, MevExecutionMethod, CrossDomainMevConfig};
 use crate::types::{ChainType, TokenPair};
 use crate::chain_adapters::{
-    BridgeProvider,
-    BridgeStatus,
-    Chain,
     FeeEstimate,
     BridgeTransaction,
     MonitorConfig,
 };
-use common::bridge_types::monitoring::monitor_transaction;
-use common::bridge_types::status::BridgeStatus;
-use common::bridge_types::types::{BridgeFee, MonitorConfig};
 
 use super::constants::*;
 use super::types::*;
 use super::opportunity::MevOpportunity;
 use crate::tradelogic::common::{
     get_source_chain_id, get_destination_chain_id, is_token_supported, 
-    read_provider_from_vec, read_provider_from_map, monitor_transaction_with_config
+    read_provider_from_vec, read_provider_from_map
 };
 
 /// Cross-domain price source
@@ -375,8 +368,10 @@ impl CrossDomainMevManager {
         }
     }
     
-    /// Create arbitrage opportunity from calculated values
-    fn create_arbitrage_opportunity(
+    /// Create arbitrage opportunity from data
+    ///
+    /// This combines all analyzed data into a structured arbitrage opportunity
+    async fn create_arbitrage_opportunity(
         &self,
         token_address: String,
         source_chain_id: u64,
@@ -418,11 +413,15 @@ impl CrossDomainMevManager {
     ) -> Option<Arc<dyn BridgeProvider>> {
         // Filter bridges that support this token and chain pair
         let valid_bridges: Vec<_> = self.bridges.iter()
-            .filter(|b| {
+            .filter(|bridge| {
                 // Sử dụng helper functions thay vì gọi trực tiếp
-                let source_match = get_source_chain_id(&**b) == Some(source_chain_id);
-                let dest_match = get_destination_chain_id(&**b) == Some(dest_chain_id);
-                let token_supported = is_token_supported(&**b, token_address);
+                // Lấy tham chiếu đến dyn BridgeProvider từ Arc
+                let bridge_ref: &dyn BridgeProvider = bridge.as_ref();
+                
+                let source_match = bridge_ref.get_source_chain_id() == Some(source_chain_id);
+                let dest_match = bridge_ref.get_destination_chain_id() == Some(dest_chain_id);
+                let token_supported = bridge_ref.is_token_supported(token_address);
+                
                 source_match && dest_match && token_supported
             })
             .cloned()
@@ -442,7 +441,7 @@ impl CrossDomainMevManager {
     /// Returns a list of token addresses that are supported on both chains
     /// This is a placeholder implementation that returns hardcoded common tokens
     /// In a real implementation, this would query on-chain data or a database
-    async fn get_common_tokens(&self, _chain1: u64, _chain2: u64) -> Option<Vec<String>> {
+    async fn get_common_tokens(&self, _source_chain: u64, _dest_chain: u64) -> Option<Vec<String>> {
         // This is a placeholder implementation
         // In a real implementation, would query supported tokens from both chains
         // and return the intersection
@@ -539,8 +538,11 @@ impl CrossDomainMevManager {
         tx_hash: &str,
         config: Option<MonitorConfig>
     ) -> Result<BridgeStatus> {
+        // Lấy tham chiếu đến trait object từ Arc
+        let provider_ref: &dyn BridgeProvider = bridge_provider.as_ref();
+        
         // Sử dụng helper function để monitor transaction
-        monitor_transaction_with_config(&*bridge_provider, tx_hash, config).await
+        monitor_transaction_with_config(provider_ref, tx_hash, config).await
     }
     
     /// Create MEV opportunity from cross-domain arbitrage
@@ -596,28 +598,17 @@ impl CrossDomainMevManager {
         Some(opportunity)
     }
     
-    /// Clone for using in async contexts
-    fn clone(&self) -> Self {
-        // Không sử dụng read trực tiếp cho Vec<Arc<dyn BridgeProvider>>
-        // Sử dụng get_bridges() đã sửa ở trên
-        let bridges = self.get_bridges();
+    /// Clone the CrossDomainAnalyzer
+    pub fn clone(&self) -> Self {
+        let config_clone = futures::executor::block_on(self.config.read()).clone();
+        let running_clone = futures::executor::block_on(self.running.read());
         
-        // Không sử dụng read trực tiếp cho HashMap
-        let mut evm_adapters = HashMap::new();
-        for (chain_id, adapter) in &self.evm_adapters {
-            evm_adapters.insert(*chain_id, adapter.clone());
-        }
-        
-        // Cấu trúc phần còn lại của hàm clone
-        // ... (code còn lại giữ nguyên)
-        
-        Self {
-            config: RwLock::new(self.config.read().await.clone()),
-            evm_adapters,
-            price_cache: RwLock::new(HashMap::new()),
-            bridges,
-            running: RwLock::new(*self.running.read().await),
-            recent_opportunities: RwLock::new(Vec::new()),
+        CrossDomainAnalyzer {
+            chain_adapters: self.chain_adapters.clone(),
+            bridge_adapters: self.bridge_adapters.clone(),
+            config: RwLock::new(config_clone),
+            running: RwLock::new(*running_clone),
+            opportunities: self.opportunities.clone(),
         }
     }
     
@@ -690,12 +681,12 @@ impl CrossDomainMevManager {
     }
 
     /// Get bridges by chain pair
-    fn get_bridges_by_chain_pair(&self, source_chain: u64, dest_chain: u64) -> Vec<Arc<dyn BridgeProvider>> {
+    fn get_bridges_by_chain_pair(&self, _source_chain: u64, _dest_chain: u64) -> Vec<Arc<dyn BridgeProvider>> {
         self.bridges.iter()
             .filter(|b| {
                 // Sử dụng helper functions
-                get_source_chain_id(&**b) == Some(source_chain) &&
-                get_destination_chain_id(&**b) == Some(dest_chain)
+                get_source_chain_id(&**b) == Some(_source_chain) &&
+                get_destination_chain_id(&**b) == Some(_dest_chain)
             })
             .cloned()
             .collect()

@@ -1,7 +1,7 @@
-/// Common functionality shared between smart_trade and mev_logic
-///
-/// This module contains code that is shared between different trade logic modules
-/// to avoid duplication and ensure consistency.
+//! Common functionality shared between smart_trade and mev_logic
+//!
+//! This module contains code that is shared between different trade logic modules
+//! to avoid duplication and ensure consistency.
 
 pub mod types;
 pub mod utils;
@@ -18,11 +18,70 @@ pub mod bridge_helper;
 
 // Re-exports for convenience
 pub use types::*;
-pub use utils::*;
-pub use analysis::*;
+
+// Re-export specific functions from utils to avoid ambiguity
+pub use utils::{
+    analyze_transaction_pattern,
+    calculate_price_impact,
+    is_proxy_contract,
+    format_token_address,
+    is_pump_and_dump,
+    calculate_risk_score,
+    current_time_seconds,
+    calculate_percentage_change,
+    eth_to_usd,
+    usd_to_eth,
+    calculate_profit,
+    wait_for_transaction,
+    convert_to_token_units,
+    calculate_moving_average,
+    find_price_extremes,
+    calculate_rsi,
+    detect_price_trend,
+    generate_trade_id,
+    validate_trade_params,
+    simulate_trade_execution,
+    execute_blockchain_transaction,
+    perform_token_security_check,
+    get_token_metadata,
+    check_trade_conditions,
+};
+
+// Re-export specific functions from analysis to avoid ambiguity
+pub use analysis::{
+    analyze_trader_behavior,
+    detect_token_issues,
+    is_proxy_contract as analysis_is_proxy_contract,
+    convert_token_safety_to_security_check,
+    analyze_token_security,
+};
+
 pub use trade_execution::*;
-pub use gas::*;
-pub use mev_detection::*;
+
+// Re-export specific functions from gas to avoid ambiguity
+pub use gas::{
+    NetworkCongestion,
+    TransactionPriority,
+    GasHistory,
+    get_gas_history,
+    calculate_optimal_gas_price,
+    calculate_optimal_gas_for_mev,
+    get_gas_price,
+    get_pending_transaction_count,
+    get_gas_price_sync,
+};
+
+// Re-export specific types and functions from mev_detection to avoid ambiguity
+pub use mev_detection::{
+    MevAttackType,
+    MevAnalysisResult,
+    analyze_mempool_for_mev,
+    calculate_optimal_gas_price as mev_calculate_optimal_gas_price,
+    calculate_optimal_slippage,
+    generate_anti_mev_tx_params,
+    AntiMevTxParams,
+};
+
 pub use resource_manager::{
     ResourceManager,
     ResourcePriority,

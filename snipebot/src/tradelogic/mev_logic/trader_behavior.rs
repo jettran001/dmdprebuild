@@ -3,11 +3,11 @@
 /// This module re-exports types and functionality from the common analysis module.
 /// All implementation details are centralized in common/analysis.rs to avoid duplication.
 use std::collections::HashMap;
-use crate::analys::mempool::{MempoolTransaction, TransactionType};
+use crate::analys::mempool::MempoolTransaction;
 
 // Re-export common types
 pub use crate::tradelogic::common::types::{
-    TraderBehaviorType, TraderExpertiseLevel, GasBehavior, TraderBehaviorAnalysis
+    GasBehavior, TraderBehaviorAnalysis
 };
 
 // Import the canonical implementation from common

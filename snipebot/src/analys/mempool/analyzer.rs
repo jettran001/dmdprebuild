@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -253,19 +252,19 @@ impl MempoolAnalyzer {
     }
     
     /// Phân tích token creation mà không ghi vào new_tokens
-    async fn analyze_liquidity_event(&self, transaction: &MempoolTransaction, is_adding: bool) -> Option<MempoolAlert> {
+    async fn analyze_liquidity_event(&self, transaction: &MempoolTransaction, _is_adding: bool) -> Option<MempoolAlert> {
         let token_address = match self.extract_token_from_liquidity_event(transaction) {
             Some(addr) => addr,
             None => return None,
         };
         
         // Lấy giá token từ cache hoặc API
-        let token_price = self.get_token_price_with_cache(&token_address).await.unwrap_or(0.0);
+        let _token_price = self.get_token_price_with_cache(&token_address).await.unwrap_or(0.0);
         
         // Check for liquidity removal
         if transaction.transaction_type == TransactionType::RemoveLiquidity {
             if let Some(token_address) = transaction.to_token.as_ref().map(|t| t.address.clone()) {
-                let token_price = transaction.to_token.as_ref().map(|t| t.price).unwrap_or(0.0);
+                let token_price = transaction.to_token.as_ref().map(|t| t.price_usd).unwrap_or(0.0);
                 
                 // Alert về việc rút thanh khoản đột ngột
                 return Some(MempoolAlert {
@@ -519,6 +518,43 @@ impl MempoolAnalyzer {
             total_supply: None,
             score: None,
         }
+    }
+
+    /// Lấy danh sách cảnh báo từ mempool
+    ///
+    /// # Arguments
+    /// * `min_severity` - Filter các cảnh báo theo mức độ nghiêm trọng
+    ///
+    /// # Returns
+    /// * `Vec<MempoolAlert>` - Danh sách các cảnh báo
+    pub async fn get_alerts(&self, min_severity: Option<AlertSeverity>) -> Vec<MempoolAlert> {
+        let alerts = self.alerts.read().await;
+        
+        if let Some(severity) = min_severity {
+            // Filter alerts theo mức độ nghiêm trọng
+            alerts.iter()
+                .filter(|alert| alert.severity >= severity)
+                .cloned()
+                .collect()
+        } else {
+            // Return all alerts
+            alerts.clone()
+        }
+    }
+
+    /// Kiểm tra một giao dịch có trong mempool hay không
+    ///
+    /// # Arguments
+    /// * `tx_hash` - Hash của giao dịch cần kiểm tra
+    ///
+    /// # Returns
+    /// * `Result<bool>` - true nếu giao dịch đang trong mempool, false nếu không
+    pub async fn is_transaction_in_mempool(&self, tx_hash: &str) -> Result<bool, anyhow::Error> {
+        // Check if transaction exists in mempool
+        let transactions = self.pending_transactions.read().await;
+        let result = transactions.iter().any(|tx| tx.hash == tx_hash);
+        
+        Ok(result)
     }
 }
 

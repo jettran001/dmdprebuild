@@ -1,17 +1,15 @@
-/**
- * Resource Manager - Module quản lý tài nguyên giữa các thành phần
- * 
- * Module này cung cấp cơ chế phân phối tài nguyên thông qua TokenBucket, Semaphore,
- * ưu tiên tác vụ, và các giới hạn động dựa trên tải hệ thống.
- */
+//! Resource Manager - Module quản lý tài nguyên giữa các thành phần
+//! 
+//! Module này cung cấp cơ chế phân phối tài nguyên thông qua TokenBucket, Semaphore,
+//! ưu tiên tác vụ, và các giới hạn động dựa trên tải hệ thống.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore, Mutex};
 use tokio::time::sleep;
-use anyhow::{Result, anyhow, Context};
-use tracing::{debug, error, info, warn};
+use anyhow::{Result, anyhow};
+use tracing::{debug, info, warn};
 
 // Re-export cho tiện sử dụng
 pub use tokio::sync::Semaphore as TaskSemaphore;
@@ -604,7 +602,7 @@ impl ResourceManager {
     }
 }
 
-/// Khởi tạo singleton ResourceManager
+// Khởi tạo singleton ResourceManager
 lazy_static::lazy_static! {
     pub static ref GLOBAL_RESOURCE_MANAGER: Arc<ResourceManager> = Arc::new(ResourceManager::new());
 }

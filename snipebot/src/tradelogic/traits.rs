@@ -21,10 +21,10 @@ use std::collections::HashMap;
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+use crate::types::{ChainType, TradeParams, TradeType};
 use crate::analys::token_status::TokenSafety;
 use crate::analys::mempool::{MempoolTransaction, TransactionType, MempoolAlert};
-use crate::analys::risk_analyzer::{TradeRiskAnalysis, RiskFactor};
+use crate::analys::risk_analyzer::TradeRiskAnalysis;
 use crate::tradelogic::common::types::{RiskScore, SecurityCheckResult, TokenIssue};
 use crate::tradelogic::mev_logic::types::{MevOpportunityType, MevExecutionMethod};
 use crate::tradelogic::mev_logic::opportunity::MevOpportunity;

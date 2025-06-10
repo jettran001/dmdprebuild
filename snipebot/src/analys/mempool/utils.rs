@@ -4,7 +4,7 @@
 //! extracting data, and performing common operations on blockchain transactions.
 
 use sha2::{Sha256, Digest};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Hash dữ liệu thành chuỗi hex
 ///

@@ -1,16 +1,16 @@
-/// Common trade execution functionality
-///
-/// This module provides shared functionality for executing trades
-/// that can be used by both smart_trade and manual_trade modules.
-/// These functions help reduce code duplication and ensure consistent trade execution.
+//! Common trade execution functionality
+//!
+//! This module provides shared functionality for executing trades
+//! that can be used by both smart_trade and manual_trade modules.
+//! These functions help reduce code duplication and ensure consistent trade execution.
 
 use anyhow::{Result, Context, anyhow};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{info};
 
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TradeParams, TradeType, TokenPair};
-use super::types::{TradeStatus, ExecutionMethod, SecurityCheckResult, TokenIssue, TokenIssueType};
+use crate::types::{TradeParams, TradeType};
+use super::types::{TokenIssueType};
 use super::utils::{
     wait_for_transaction, 
     validate_trade_params,
@@ -66,7 +66,7 @@ pub async fn execute_trade_flow(
             ) && issue.severity > 70 // Chỉ xem xét các vấn đề nghiêm trọng
         });
         
-        if has_critical_issue {
+        if has_critical_issue || security_result.is_honeypot {
             return Err(anyhow!("Token has critical security issues: {:?}", security_result.issues));
         }
     }
@@ -125,10 +125,23 @@ pub async fn execute_token_approval(
     
     // Create approval params
     let params = TradeParams {
+        chain_type: crate::types::ChainType::EVM(chain_id),
         trade_type: TradeType::Approve,
         token_address: token_address.to_string(),
-        amount: amount.unwrap_or(f64::MAX), // Use max amount if not specified
-        ..Default::default()
+        amount: match amount {
+            Some(amt) => amt,
+            None => f64::MAX
+        }, // Use max amount if not specified
+        slippage: 0.5, // Default slippage for approvals
+        deadline_minutes: 30, // Default 30 minutes
+        router_address: "".to_string(), // Default empty router (use default)
+        gas_limit: None,
+        gas_price: None,
+        strategy: None,
+        stop_loss: None,
+        take_profit: None,
+        max_hold_time: None,
+        custom_params: None,
     };
     
     // Execute approval transaction

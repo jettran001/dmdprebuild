@@ -1,8 +1,6 @@
 /// MEV execution logic
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::sync::OnceCell;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 use super::opportunity::MevOpportunity;
 use super::types::{MevOpportunityType, MevExecutionMethod};
@@ -690,13 +688,13 @@ async fn build_multi_swap_calldata(
     Ok(calldata)
 }
 
-/// Đợi xác nhận transaction
+/// Đợi transaction được xác nhận
 async fn wait_for_transaction_confirmation(
     evm_adapter: &Arc<EvmAdapter>,
     tx_hash: &str,
     confirmations: u64,
     timeout_seconds: u64
-) -> anyhow::Result<web3::types::TransactionReceipt> {
+) -> anyhow::Result<crate::chain_adapters::evm_adapter::TransactionReceipt> {
     use tokio::time::{timeout, Duration};
     
     // Tạo future để đợi transaction
@@ -779,7 +777,7 @@ fn pad_uint256(value: &str) -> String {
     format!("{:0>64}", value)
 }
 
-/// Pad bytes32 thành 64 ký tự (32 bytes)
+/// Pad giá trị thành 64 ký tự (32 bytes), sử dụng cho bytes32
 fn pad_bytes32(value: &str) -> String {
     let value = value.trim_start_matches("0x");
     format!("{:0<64}", value)

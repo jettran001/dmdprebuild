@@ -1,20 +1,20 @@
-/// Utils - Các tiện ích phụ trợ
-///
-/// Module này chứa các hàm tiện ích được sử dụng bởi các module khác
-/// trong executor.
+//! Utils - Các tiện ích phụ trợ
+//!
+//! Module này chứa các hàm tiện ích được sử dụng bởi các module khác
+//! trong executor.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use chrono::Utc;
 use rand::{thread_rng, Rng};
-use anyhow::{Result, Context, anyhow, bail};
+use anyhow::{Result, anyhow};
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TokenPair, TradeParams, TradeType};
+use crate::types::{TokenPair, TradeType};
 
 /// Tạo ID ngẫu nhiên
 pub fn generate_id() -> String {
@@ -119,14 +119,14 @@ pub async fn calculate_gas_price(
     priority: &str,
 ) -> Result<u64> {
     // Lấy gas price từ adapter
-    let gas_prices = adapter.get_gas_prices().await?;
+    let base_gas_price = adapter.get_gas_price().await?;
     
     // Chọn gas price dựa trên mức độ ưu tiên
     let gas_price = match priority {
-        "high" => gas_prices.fast,
-        "medium" => gas_prices.standard,
-        "low" => gas_prices.slow,
-        _ => gas_prices.standard,
+        "high" => base_gas_price * 15 / 10,  // 1.5x
+        "medium" => base_gas_price,          // 1.0x
+        "low" => base_gas_price * 8 / 10,    // 0.8x
+        _ => base_gas_price,
     };
     
     Ok(gas_price)
@@ -1048,7 +1048,7 @@ where
 {
     let mut delay_ms = initial_delay_ms;
     let mut attempt = 0;
-    let mut last_error = None;
+    let mut _last_error = None;
     
     loop {
         attempt += 1;
@@ -1064,12 +1064,12 @@ where
                 return Ok(value);
             }
             Err(err) => {
-                last_error = Some(err);
+                _last_error = Some(err);
                 
                 if attempt >= max_retries {
                     let err_msg = format!(
                         "API call to {}:{} failed after {} attempts: {}",
-                        api_type, endpoint, attempt, last_error.as_ref().unwrap()
+                        api_type, endpoint, attempt, _last_error.as_ref().unwrap()
                     );
                     return Err(anyhow!(err_msg));
                 }
@@ -1080,7 +1080,7 @@ where
                 
                 debug!(
                     "Attempt {} for {}:{} failed: {}. Retrying in {}ms...",
-                    attempt, api_type, endpoint, last_error.as_ref().unwrap(), delay_ms
+                    attempt, api_type, endpoint, _last_error.as_ref().unwrap(), delay_ms
                 );
                 
                 sleep(Duration::from_millis(delay_ms)).await;

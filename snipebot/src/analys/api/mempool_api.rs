@@ -1,9 +1,9 @@
-/// Mempool Analysis Provider Implementation
-///
-/// This module implements the MempoolAnalysisProvider trait to provide
-/// standardized access to mempool analysis functionality.
+//! Mempool Analysis Provider Implementation
+//!
+//! This module implements the MempoolAnalysisProvider trait to provide
+//! standardized access to mempool analysis functionality.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
@@ -51,7 +51,7 @@ impl MempoolAnalysisProviderImpl {
         drop(analyzers); // Release read lock
         
         // Create new analyzer
-        let chain_adapter = self.chain_adapters.get(&chain_id)
+        let _chain_adapter = self.chain_adapters.get(&chain_id)
             .ok_or_else(|| anyhow!("No chain adapter found for chain ID {}", chain_id))?;
         
         let analyzer = Arc::new(MempoolAnalyzer::new(chain_id));

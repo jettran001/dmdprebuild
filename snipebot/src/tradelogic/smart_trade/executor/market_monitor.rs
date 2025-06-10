@@ -1,33 +1,29 @@
-/// Market Monitor - Giám sát thị trường
-///
-/// Module này chứa logic giám sát thị trường và giá cả,
-/// vòng lặp monitor, và phát hiện cơ hội giao dịch.
+//! Market Monitor - Giám sát thị trường
+//!
+//! Module này chứa logic giám sát thị trường và giá cả,
+//! vòng lặp monitor, và phát hiện cơ hội giao dịch.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::collections::HashMap;
+use tracing::{info, debug, error, warn};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use chrono::Utc;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow, bail};
+use anyhow::Result;
 use uuid;
-use rand::{thread_rng, Rng};
 
 // Internal imports
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TokenPair, TradeParams, TradeType};
+use crate::types::{TokenPair, TradeType};
 use crate::tradelogic::traits::{
     SharedOpportunity, SharedOpportunityType, OpportunityPriority
 };
 
 // Module imports
 use crate::tradelogic::smart_trade::executor::core::SmartTradeExecutor;
-use super::types::{TradeStatus, TradeOpportunity};
+use super::types::TradeStatus;
 use super::trade_handler::execute_opportunity;
 use super::position_manager::update_positions;
 use super::risk_manager::analyze_market_risk;
-use super::utils::get_current_timestamp;
 
 /// Vòng lặp monitor để theo dõi thị trường và cập nhật vị thế
 pub async fn monitor_loop(executor: Arc<SmartTradeExecutor>) {
@@ -183,7 +179,7 @@ pub async fn check_opportunities(executor: &SmartTradeExecutor) -> Result<Vec<Sh
                 // Kiểm tra nếu có token trong vị thế đang mở
                 let active_trades = executor.active_trades.read().await;
                 let has_position = active_trades.iter().any(|t| {
-                    t.params.chain_id == *chain_id && 
+                    t.params.chain_id() == *chain_id && 
                     t.params.token_pair.token_address == token_address &&
                     t.status == TradeStatus::Monitoring
                 });

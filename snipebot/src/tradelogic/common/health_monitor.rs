@@ -1,14 +1,14 @@
-/// Health Monitor - Module theo dõi sức khỏe mạng và hệ thống
-///
-/// Module này cung cấp các chức năng giám sát sức khỏe hệ thống, tự động phát hiện
-/// và khắc phục các vấn đề mạng, kết nối blockchain, và tài nguyên hệ thống.
+//! Health Monitor - Module theo dõi sức khỏe mạng và hệ thống
+//!
+//! Module này cung cấp các chức năng giám sát sức khỏe hệ thống, tự động phát hiện
+//! và khắc phục các vấn đề mạng, kết nối blockchain, và tài nguyên hệ thống.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{RwLock, Mutex, mpsc};
-use tokio::time::{sleep, interval};
-use anyhow::{Result, anyhow, Context};
+use tokio::time::{interval};
+use anyhow::{Result, anyhow};
 use tracing::{debug, error, info, warn};
 use async_trait::async_trait;
 
@@ -335,7 +335,7 @@ impl HealthMonitor {
         let monitored_services = self.monitored_services.read().await;
         let config = self.config.read().await;
         
-        for (service_id, health_check_fn) in monitored_services.iter() {
+        for (service_id, _health_check_fn) in monitored_services.iter() {
             // Thiết lập interval reconnect
             self.network_manager.set_reconnect_interval(service_id, config.reconnect_interval_ms).await;
             
@@ -561,52 +561,33 @@ impl HealthMonitor {
         F: Fn() -> Fut + Send + Sync + Clone + 'static,
         Fut: std::future::Future<Output = bool> + Send + 'static,
     {
-        // Tạo boxed future function
-        let check_fn = move || {
-            let health_check = health_check_fn.clone();
-            Box::pin(async move {
-                health_check().await
-            }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
-        };
+        // Convert the health check function to the required type
+        let boxed_fn: Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync> = 
+            Arc::new(move || Box::pin(health_check_fn()) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>);
         
-        // Lưu service
-        {
-            let mut services = self.monitored_services.write().await;
-            services.insert(service_id.to_string(), Arc::new(check_fn));
-        }
+        // Register with monitored services
+        let mut services = self.monitored_services.write().await;
+        services.insert(service_id.to_string(), boxed_fn);
         
-        // Nếu auto-reconnect được bật, thiết lập cho service này
+        // Also register with network manager if using auto-reconnect
         let config = self.config.read().await;
         if config.enable_auto_reconnect {
-            // Thiết lập interval reconnect
-            self.network_manager.set_reconnect_interval(service_id, config.reconnect_interval_ms).await;
+            let nm = self.network_manager.clone();
+            let service_id_owned = service_id.to_string();
             
-            // Đăng ký callback
-            let alert_sender = self.alert_sender.clone();
-            self.network_manager.register_reconnect_callback(service_id, move |service_id| {
-                let alert_sender = alert_sender.clone();
-                let service_id = service_id.to_string();
+            let boxed_fn_clone = boxed_fn.clone();
+            let check_wrapper = move || {
+                let fn_clone = boxed_fn_clone.clone();
                 Box::pin(async move {
-                    let alert = HealthAlert {
-                        resource_type: format!("network_service_{}", service_id),
-                        message: format!("Successfully reconnected to service {}", service_id),
-                        severity: AlertSeverity::Info,
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        threshold: 0.0,
-                        actual_value: 0.0,
-                        suggested_action: None,
-                    };
-                    
-                    if let Err(e) = alert_sender.send(alert).await {
-                        error!("Failed to send reconnection alert: {}", e);
-                    }
-                })
-            }).await;
+                    let fut = fn_clone();
+                    fut.await
+                }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+            };
+            
+            nm.register_health_check(&service_id_owned, check_wrapper).await?;
         }
         
+        info!("Registered service {} for health monitoring", service_id);
         Ok(())
     }
     
@@ -653,9 +634,17 @@ impl HealthMonitor {
             None => history.clone(),
         }
     }
+    
+    /// Cập nhật cấu hình health monitor
+    pub async fn update_config(&self, new_config: HealthMonitorConfig) -> Result<()> {
+        let mut config = self.config.write().await;
+        *config = new_config;
+        debug!("Health monitor configuration updated");
+        Ok(())
+    }
 }
 
-/// Singleton instance
+/// Khởi tạo singleton instance
 pub static GLOBAL_HEALTH_MONITOR: once_cell::sync::OnceCell<Arc<HealthMonitor>> = once_cell::sync::OnceCell::new();
 
 /// Lấy health monitor global
@@ -663,14 +652,14 @@ pub fn get_health_monitor() -> Arc<HealthMonitor> {
     GLOBAL_HEALTH_MONITOR.get_or_init(|| Arc::new(HealthMonitor::new(HealthMonitorConfig::default())))
 }
 
-/// Các hàm helper để lấy thông tin hệ thống
-/// Trong ứng dụng thực tế, các hàm này sẽ dùng thư viện hệ thống
+/// Các hàm helper để lấy thông tin hệ thống. Trong ứng dụng thực tế, các hàm này sẽ dùng thư viện hệ thống
 /// như sysinfo, psutil, hoặc system_info để lấy thông tin
-
+///
+/// Lấy thông tin CPU usage của hệ thống. Trong phiên bản production, cần sử dụng thư viện OS-specific
+/// như sysinfo, psutil, hoặc system_info để lấy thông tin
 async fn get_system_cpu_usage() -> Result<f64> {
-    // Giả lập lấy CPU usage 
-    // Trong thực tế, sẽ dùng thư viện hệ thống để đo
-    Ok(50.0 + (rand::random::<f64>() * 10.0))
+    // Trả về giá trị giả lập cho mục đích development
+    Ok(rand::random::<f64>() * 100.0)
 }
 
 async fn get_system_memory_usage() -> Result<f64> {

@@ -3,24 +3,24 @@
 //! This module provides functionality for managing MEV opportunities,
 //! including tracking, filtering, and prioritizing opportunities.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
 use chrono::Utc;
-use tracing::{info, warn};
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+use tracing::{info, error, warn};
+use uuid::Uuid;
 
-use crate::analys::token_status::TokenSafety;
 use crate::tradelogic::traits::{
     MempoolAnalysisProvider, 
     TokenAnalysisProvider,
     RiskAnalysisProvider
 };
-use crate::tradelogic::common::types::RiskScore;
 use common::trading_actions::TradeStatus;
 
 // Import MevOpportunity từ types.rs thay vì định nghĩa lại
-use super::types::{MevOpportunity, MevOpportunityType, MevExecutionMethod};
+use super::types::{MevOpportunity, MevOpportunityType, MevExecutionMethod, MevOpportunityStatus};
 
 /// Opportunity retention priority enum for pruning operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

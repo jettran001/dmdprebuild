@@ -1,4 +1,4 @@
-/**
+/*!
  * Token analysis utilities
  * 
  * Provides core functions for token analysis including:
@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 use regex::Regex;
 use anyhow::{Result, Context};
-use tracing::{debug, error, info, warn};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tracing::debug;
 
 use super::types::{ContractInfo, BytecodeAnalysis};
 
@@ -403,7 +403,7 @@ pub async fn check_contract_security_with_metadata(contract_info: &ContractInfo,
 }
 
 /// Check if token has sell restrictions
-pub async fn check_sell_restrictions(contract_info: &ContractInfo, adapter: &dyn ChainAdapter) -> Result<(bool, Option<String>)> {
+pub async fn check_sell_restrictions(contract_info: &ContractInfo, _adapter: &dyn ChainAdapter) -> Result<(bool, Option<String>)> {
     // Simulation is only available with adapter that implements ChainAdapterExt
     // For compatibility, this will return no restrictions detected when using dyn ChainAdapter
     debug!("Checking sell restrictions for token {}", contract_info.address);
@@ -543,16 +543,16 @@ pub async fn check_sell_ability(contract_info: &ContractInfo, adapter: &dyn Chai
 /// Simulate selling a token to check for sell limitations
 ///
 /// # Arguments
+/// * `_adapter` - Chain adapter to use for simulation
 /// * `_token_address` - Token address to sell
 /// * `_amount` - Amount of tokens to sell
-/// * `_adapter` - Chain adapter to use for simulation
 ///
 /// # Returns
 /// * `Result<SellSimulationResult>` - Result of the sell simulation
 pub async fn simulate_sell_token(
+    _adapter: &dyn ChainAdapter,
     _token_address: &str,
-    _amount: &str,
-    _adapter: &dyn ChainAdapter
+    _amount: &str
 ) -> Result<SellSimulationResult> {
     // Implement a default behavior for simulation
     Ok(SellSimulationResult {

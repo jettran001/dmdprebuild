@@ -1,38 +1,119 @@
-//! Type definitions for Smart Trading System
-//!
-//! This module contains all structs, enums, and type aliases needed for the smart trading functionality.
-//! These types are essential for the operation of the trade logic and are used throughout the module.
+//! Định nghĩa các kiểu dữ liệu chính sử dụng trong module smart_trade
 
-// External imports
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use tokio::sync::RwLock;
+use std::collections::{HashMap, HashSet};
+use anyhow::Result;
+use chrono::Utc;
 
-// Internal imports
-use crate::types::{ChainType, TokenPair, TradeParams, TradeType};
+// Internal Imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::mempool::MempoolAnalyzer;
-use crate::analys::risk_analyzer::{
-    RiskAnalyzer, 
-    RiskFactor, 
-    TradeRecommendation, 
-    TradeRiskAnalysis
-};
-use crate::analys::token_status::{
-    AdvancedTokenAnalysis, 
-    ContractInfo, 
-    LiquidityEvent, 
-    LiquidityEventType, 
-    TokenSafety, 
-    TokenStatus
-};
+use crate::types::TradeType;
 
-// Import from common module
-use crate::tradelogic::common::types::{TokenIssue, TraderBehaviorAnalysis, GasBehavior, TradeStatus};
+/// Trạng thái của một giao dịch
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TradeStatus {
+    /// Giao dịch đã được tạo nhưng chưa thực thi
+    Created,
+    /// Đã phê duyệt token (nếu cần)
+    Approved,
+    /// Đang thực thi giao dịch mua
+    Buying,
+    /// Đã mua thành công, đang theo dõi
+    Bought,
+    /// Đang thực thi giao dịch bán
+    Selling,
+    /// Đã bán thành công
+    Sold,
+    /// Giao dịch thất bại
+    Failed,
+    /// Đã hủy bởi người dùng
+    Cancelled,
+    /// Đang chờ xác nhận
+    Pending,
+    /// Đã xác nhận
+    Confirmed,
+}
+
+/// Kết quả của một giao dịch
+#[derive(Debug, Clone)]
+pub struct TradeResult {
+    /// Hash của giao dịch
+    pub tx_hash: Option<String>,
+    /// Trạng thái thành công/thất bại
+    pub success: bool,
+    /// Lỗi nếu có
+    pub error: Option<String>,
+    /// Giá thực thi
+    pub execution_price: Option<f64>,
+    /// Số lượng token nhận được
+    pub token_amount: Option<f64>,
+    /// Chi phí gas
+    pub gas_cost: Option<f64>,
+    /// Thời gian thực thi (ms)
+    pub execution_time_ms: u64,
+    /// Thông tin bổ sung
+    pub additional_info: HashMap<String, String>,
+}
+
+/// Thông tin theo dõi giao dịch
+#[derive(Debug, Clone)]
+pub struct TradeTracker {
+    /// ID giao dịch độc nhất
+    pub trade_id: String,
+    /// Tham số giao dịch
+    pub params: crate::types::TradeParams,
+    /// Trạng thái hiện tại
+    pub status: TradeStatus,
+    /// Thời gian tạo
+    pub created_at: i64,
+    /// Thời gian cập nhật gần nhất
+    pub updated_at: i64,
+    /// Giá mua vào
+    pub buy_price: Option<f64>,
+    /// Giá bán ra
+    pub sell_price: Option<f64>,
+    /// Hash của giao dịch mua
+    pub buy_tx_hash: Option<String>,
+    /// Hash của giao dịch bán
+    pub sell_tx_hash: Option<String>,
+    /// Số tiền đầu tư
+    pub investment_amount: f64,
+    /// Số lượng token đã mua
+    pub token_amount: Option<f64>,
+    /// Lý do bán (nếu đã bán)
+    pub exit_reason: Option<String>,
+    /// Giá cao nhất đạt được
+    pub highest_price: f64,
+    /// Chiến lược giao dịch
+    pub strategy: Option<String>,
+    /// Giá stop-loss
+    pub stop_loss: Option<f64>,
+    /// Giá take-profit
+    pub take_profit: Option<f64>,
+    /// Trailing stop loss (%)
+    pub trailing_stop_percentage: Option<f64>,
+}
+
+/// Chiến lược giao dịch
+#[derive(Debug, Clone)]
+pub enum TradeStrategy {
+    /// Giao dịch thủ công: Chỉ mua bán theo lệnh trực tiếp của người dùng,
+    /// không có chức năng tự động bán.
+    Manual,
+
+    /// Giao dịch nhanh: Mua khi phát hiện lệnh lớn trong mempool, bán nhanh khi 
+    /// đạt lợi nhuận mục tiêu (mặc định 5%) hoặc sau thời gian ngắn (5 phút).
+    /// Thích hợp cho các cơ hội thoáng qua, ít rủi ro.
+    Quick,
+
+    /// Giao dịch thông minh: Sử dụng Trailing Stop Loss (TSL), có thời gian giữ 
+    /// lâu hơn và chiến lược thoát vị thế tinh vi hơn. Thích hợp cho các token
+    /// có tiềm năng tăng trưởng dài hơn.
+    Smart,
+}
 
 /// Cấu trúc chứa các ngưỡng phân tích rủi ro thị trường
-///
+/// 
 /// Sử dụng cho phân tích rủi ro động thay vì dùng các giá trị cứng cố định
 #[derive(Debug, Clone)]
 pub struct MarketRiskThresholds {
@@ -88,250 +169,109 @@ pub struct MarketRiskThresholds {
     pub high_concentration_penalty: u8,
 }
 
-impl Default for MarketRiskThresholds {
-    fn default() -> Self {
-        Self {
-            min_liquidity_usd: 5000.0,        // Tối thiểu $5K
-            low_liquidity_usd: 25000.0,       // Thấp: $25K
-            medium_liquidity_usd: 100000.0,   // Trung bình: $100K
-            low_liquidity_penalty: 30,        // 30 điểm phạt cho thanh khoản thấp
-            
-            low_buy_sell_ratio: 2.0,          // Tỷ lệ mua/bán thấp: 2:1
-            medium_buy_sell_ratio: 3.0,       // Tỷ lệ mua/bán trung bình: 3:1
-            high_buy_sell_ratio: 5.0,         // Tỷ lệ mua/bán cao: 5:1
-            max_buy_sell_ratio: 10.0,         // Tỷ lệ tối đa khi không có lệnh bán
-            high_buy_sell_penalty: 25,        // 25 điểm phạt cho tỷ lệ mua/bán cao
-            
-            low_price_change_pct: 15.0,       // Thay đổi giá thấp: 15%
-            medium_price_change_pct: 30.0,    // Thay đổi giá trung bình: 30%
-            high_price_change_pct: 50.0,      // Thay đổi giá cao: 50%
-            high_volatility_penalty: 30,      // 30 điểm phạt cho biến động cao
-            
-            low_concentration_pct: 40.0,      // Tập trung thấp: top holders nắm 40%
-            medium_concentration_pct: 60.0,   // Tập trung trung bình: top holders nắm 60%
-            high_concentration_pct: 80.0,     // Tập trung cao: top holders nắm 80%
-            high_concentration_penalty: 15,   // 15 điểm phạt cho tập trung cao
-        }
-    }
-}
-
-/// Loại chiến lược giao dịch
-///
-/// Định nghĩa các loại chiến lược giao dịch khác nhau mà SmartTradeExecutor có thể sử dụng.
-/// Mỗi chiến lược có các tham số và hành vi riêng.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TradeStrategy {
-    /// Giao dịch thủ công: Chỉ mua bán theo lệnh trực tiếp của người dùng,
-    /// không có chức năng tự động bán.
-    Manual,
-
-    /// Giao dịch nhanh: Mua khi phát hiện lệnh lớn trong mempool, bán nhanh khi 
-    /// đạt lợi nhuận mục tiêu (mặc định 5%) hoặc sau thời gian ngắn (5 phút).
-    /// Thích hợp cho các cơ hội thoáng qua, ít rủi ro.
-    Quick,
-
-    /// Giao dịch thông minh: Sử dụng Trailing Stop Loss (TSL), có thời gian giữ 
-    /// lâu hơn và chiến lược thoát vị thế tinh vi hơn. Thích hợp cho các token
-    /// có tiềm năng tăng trưởng dài hơn.
-    Smart,
-}
-
-/// Kết quả của một giao dịch đã hoàn thành
-/// 
-/// Chứa thông tin về kết quả của một giao dịch, bao gồm giá mua/bán, lợi nhuận,
-/// thời gian, và lý do kết thúc giao dịch. Dùng để lưu lịch sử và phân tích hiệu suất.
-#[derive(Debug, Clone)]
-pub struct TradeResult {
-    /// ID giao dịch duy nhất
-    pub trade_id: String,
-    
-    /// Giá mua vào (theo đơn vị base token: ETH/BNB)
-    pub entry_price: f64,
-    
-    /// Giá bán ra (theo đơn vị base token: ETH/BNB), None nếu chưa bán
-    pub exit_price: Option<f64>,
-    
-    /// Lợi nhuận theo phần trăm, None nếu chưa bán
-    pub profit_percent: Option<f64>,
-    
-    /// Lợi nhuận quy đổi ra USD, None nếu chưa bán
-    pub profit_usd: Option<f64>,
-    
-    /// Thời gian mua (Unix timestamp, giây)
-    pub entry_time: u64,
-    
-    /// Thời gian bán (Unix timestamp, giây), None nếu chưa bán
-    pub exit_time: Option<u64>,
-    
-    /// Trạng thái hiện tại của giao dịch
-    pub status: TradeStatus,
-    
-    /// Lý do bán/hủy giao dịch, None nếu chưa kết thúc
-    pub exit_reason: Option<String>,
-    
-    /// Tổng chi phí gas đã sử dụng (USD)
-    pub gas_cost_usd: f64,
-}
-
-/// Thông tin theo dõi giao dịch đang diễn ra
-/// 
-/// Đại diện cho một giao dịch đang được theo dõi và quản lý bởi SmartTradeExecutor.
-/// Chứa tất cả thông tin cần thiết để thực hiện các chiến lược tự động như 
-/// trailing stop loss, take profit, và stop loss.
-#[derive(Debug, Clone)]
-pub struct TradeTracker {
-    /// ID giao dịch duy nhất, được tạo khi giao dịch bắt đầu
-    pub trade_id: String,
-    
-    /// Địa chỉ contract của token (0x...)
-    pub token_address: String,
-    
-    /// Chain ID của blockchain (ví dụ: 1 = Ethereum, 56 = BSC)
-    pub chain_id: u32,
-    
-    /// Chiến lược được áp dụng cho giao dịch này
-    pub strategy: TradeStrategy,
-    
-    /// Giá mua vào ban đầu (theo đơn vị base token: ETH/BNB)
-    pub entry_price: f64,
-    
-    /// Số lượng token đã mua (số token thực tế)
-    pub token_amount: f64,
-    
-    /// Số lượng base token (ETH/BNB) đã đầu tư
-    pub invested_amount: f64,
-    
-    /// Giá cao nhất token đã đạt được từ khi mua (cho trailing stop loss)
-    pub highest_price: f64,
-    
-    /// Thời điểm mua (Unix timestamp, giây)
-    pub entry_time: u64,
-    
-    /// Thời điểm tối đa được phép giữ token (Unix timestamp, giây)
-    pub max_hold_time: u64,
-    
-    /// Ngưỡng lợi nhuận mục tiêu để bán (phần trăm, ví dụ: 5.0 = 5%)
-    pub take_profit_percent: f64,
-    
-    /// Ngưỡng lỗ tối đa chấp nhận được (phần trăm, ví dụ: 5.0 = 5%)
-    pub stop_loss_percent: f64,
-    
-    /// Phần trăm trailing stop loss nếu có (ví dụ: 2.0 = 2%)
-    pub trailing_stop_percent: Option<f64>,
-    
-    /// Hash giao dịch mua trên blockchain
-    pub buy_tx_hash: String,
-    
-    /// Hash giao dịch bán trên blockchain (None nếu chưa bán)
-    pub sell_tx_hash: Option<String>,
-    
-    /// Trạng thái hiện tại của giao dịch
-    pub status: TradeStatus,
-    
-    /// Lý do bán/hủy nếu giao dịch đã kết thúc (None nếu chưa kết thúc)
-    pub exit_reason: Option<String>,
-}
-
-/// Cấu hình cho SmartTradeExecutor
-///
-/// Chứa các tham số cấu hình cho module smart trade, bao gồm:
-/// - Các ngưỡng giao dịch (tối thiểu, tối đa)
-/// - Tỉ lệ đầu tư
-/// - Chiến lược mặc định
-/// - Whitelist/blacklist token
-/// - v.v.
+/// Cấu hình SmartTrade
 #[derive(Debug, Clone)]
 pub struct SmartTradeConfig {
-    /// Có bật tính năng Smart Trade hay không (true = bật)
+    /// Bật/tắt module
     pub enabled: bool,
-    
-    /// Cho phép tự động thực hiện giao dịch (true = tự động, false = chỉ phân tích)
+    /// Bật/tắt giao dịch tự động
     pub auto_trade: bool,
-    
-    /// Ngưỡng tối thiểu cho mỗi giao dịch (BNB/ETH), dưới mức này sẽ không giao dịch
+    /// Số tiền giao dịch tối thiểu (USD)
     pub min_trade_amount: f64,
-    
-    /// Ngưỡng tối đa cho mỗi giao dịch (BNB/ETH), tránh rủi ro quá lớn
+    /// Số tiền giao dịch tối đa (USD)
     pub max_trade_amount: f64,
-    
-    /// Tỉ lệ đầu tư trên vốn khả dụng (0.0-1.0), ví dụ: 0.1 = 10% vốn
+    /// Tỷ lệ vốn cho mỗi giao dịch (%)
     pub capital_per_trade_ratio: f64,
-    
-    /// Số lượng giao dịch tối đa được phép thực hiện cùng lúc
+    /// Số lượng giao dịch tối đa cùng lúc
     pub max_concurrent_trades: u32,
-    
     /// Danh sách token được phép giao dịch (whitelist), nếu trống = tất cả token
     pub token_whitelist: HashSet<String>,
-    
     /// Danh sách token cấm giao dịch (blacklist), luôn được áp dụng
     pub token_blacklist: HashSet<String>,
-    
-    /// Chiến lược giao dịch mặc định sẽ áp dụng
+    /// Chiến lược giao dịch mặc định
     pub default_strategy: TradeStrategy,
-    
-    /// Điểm rủi ro tối đa cho phép (0-100), token có điểm rủi ro cao hơn sẽ bị bỏ qua
-    pub max_risk_score: f64,
-    
-    /// Danh sách DEX được phép giao dịch (uniswap, pancakeswap, ...)
+    /// Danh sách DEX được phép giao dịch
     pub allowed_dexes: HashSet<String>,
-    
-    /// Phần trăm risk factor cho position sizing (thay vì hằng số 2%)
-    /// Giá trị từ 0.5 đến 5.0 (tương ứng 0.5% đến 5%)
+    /// Phần trăm risk factor cho position sizing
     pub risk_factor_percent: f64,
-    
-    /// Bật tính năng position sizing động dựa trên biến động thị trường
+    /// Bật position sizing động
     pub dynamic_position_sizing: bool,
-    
-    /// Hệ số biến động thị trường cho mỗi chain (<1.0 = ít biến động, >1.0 = nhiều biến động)
+    /// Hệ số biến động thị trường theo chain
     pub market_volatility_factor: HashMap<u32, f64>,
-    
-    /// Mapping từ chain_id đến ngưỡng tối thiểu cho mỗi giao dịch
+    /// Ngưỡng giao dịch tối thiểu theo chain
     pub min_trade_amount_map: HashMap<u32, f64>,
-    
-    /// Mapping từ chain_id đến ngưỡng tối đa cho mỗi giao dịch
+    /// Ngưỡng giao dịch tối đa theo chain
     pub max_trade_amount_map: HashMap<u32, f64>,
-    
     /// Ngưỡng rủi ro thị trường mặc định
     pub default_market_risk_thresholds: MarketRiskThresholds,
-    
-    /// Mapping từ chain_id đến các ngưỡng rủi ro thị trường tùy chỉnh
+    /// Ngưỡng rủi ro thị trường theo chain
     pub market_risk_thresholds: HashMap<u32, MarketRiskThresholds>,
-    
-    /// Hệ số điều chỉnh rủi ro thị trường cho mỗi chain (>1.0 = tăng điểm rủi ro, <1.0 = giảm điểm rủi ro)
+    /// Hệ số điều chỉnh rủi ro thị trường theo chain
     pub market_risk_factor: HashMap<u32, f64>,
-    
-    /// Có bật auto_trade cho mỗi chain_id
-    pub auto_trade_enabled: bool,
-    
     /// Tần suất kiểm tra giá (giây)
     pub price_check_interval_seconds: u64,
-    
-    /// Mức độ tin cậy tối thiểu để chấp nhận cơ hội ưu tiên thấp
+    /// Khoảng thời gian giữa các lần cập nhật vị thế (giây)
+    pub position_update_interval_seconds: u64,
+    /// Khoảng thời gian giữa các lần kiểm tra cơ hội giao dịch (giây)
+    pub opportunity_check_interval_seconds: u64,
+    /// Mức độ tin cậy tối thiểu cho độ ưu tiên thấp
     pub min_confidence_for_low_priority: u8,
-    
-    /// Mức độ tin cậy tối thiểu để chấp nhận cơ hội ưu tiên trung bình
+    /// Mức độ tin cậy tối thiểu cho độ ưu tiên trung bình
     pub min_confidence_for_medium_priority: u8,
-
     /// Số lần thử lại tối đa khi gặp lỗi mạng
     pub max_retries: u8,
-    
     /// Thời gian chờ ban đầu giữa các lần thử lại (ms)
     pub retry_delay_ms: u64,
-    
     /// Thời gian chờ tối đa giữa các lần thử lại (ms)
     pub max_retry_delay_ms: u64,
-    
     /// Tần suất kiểm tra health check cho các kết nối blockchain (giây)
     pub health_check_interval_seconds: u64,
-    
     /// Timeout cho các cuộc gọi blockchain (ms)
     pub blockchain_call_timeout_ms: u64,
-    
     /// Thời gian giữa các lần tự động kết nối lại khi mất kết nối (giây)
     pub reconnect_interval_seconds: u64,
-    
     /// Thời gian chờ tối đa trước khi hủy giao dịch do lỗi mạng (giây)
     pub network_failure_trade_timeout_seconds: u64,
+    /// Danh sách token theo dõi theo chain
+    pub watched_tokens: HashMap<u32, HashSet<String>>,
+    /// Slippage mặc định (%)
+    pub default_slippage: f64,
+    /// Deadline mặc định (phút)
+    pub default_deadline_minutes: u64,
+    /// Giới hạn gas mặc định
+    pub default_gas_limit: u64,
+    /// Chiến lược trailing stop loss mặc định (%)
+    pub default_trailing_stop_percentage: f64,
+    /// Chiến lược take profit mặc định (%)
+    pub default_take_profit_percentage: f64,
+    /// Chiến lược stop loss mặc định (%)
+    pub default_stop_loss_percentage: f64,
+    /// Tỷ lệ đầu tư trên vốn khả dụng (0.0-1.0), ví dụ: 0.1 = 10% vốn
+    pub capital_per_trade: f64,
+    /// Điểm rủi ro tối đa cho phép (0-100), token có điểm rủi ro cao hơn sẽ bị bỏ qua
+    pub max_risk_score: f64,
+    /// Khoảng thời gian kiểm tra giá (ms)
+    pub price_check_interval_ms: u64,
+    /// Khoảng thời gian kiểm tra sức khỏe mạng (ms)
+    pub health_check_interval_ms: u64,
+    /// Khoảng thời gian kiểm tra thị trường (ms)
+    pub market_monitor_interval_ms: u64,
+    /// Chiến lược retry
+    pub retry_strategy: RetryStrategy,
+    /// Cài đặt cảnh báo
+    pub alert_settings: AlertSettings,
+    /// Danh sách token chính theo chain
+    pub default_base_token: HashMap<u32, String>,
+    /// Chặn token chưa được xác minh hợp đồng
+    pub block_unverified_contracts: bool,
+    /// Chặn token có rủi ro cao
+    pub block_high_risk_tokens: bool,
+    /// Chặn token có rủi ro trung bình
+    pub block_medium_risk_tokens: bool,
+    /// Mức độ tin cậy tối thiểu cho độ ưu tiên cao
+    pub min_confidence_for_high_priority: f64,
+    /// Lợi nhuận tối thiểu để kích hoạt trailing stop
+    pub min_profit_for_trailing_stop: f64,
 }
 
 impl Default for SmartTradeConfig {
@@ -359,8 +299,9 @@ impl Default for SmartTradeConfig {
             default_market_risk_thresholds: MarketRiskThresholds::default(),
             market_risk_thresholds: HashMap::new(),
             market_risk_factor: HashMap::new(),
-            auto_trade_enabled: false,
             price_check_interval_seconds: 5,
+            position_update_interval_seconds: 60,
+            opportunity_check_interval_seconds: 300,
             min_confidence_for_low_priority: 50,
             min_confidence_for_medium_priority: 70,
             max_retries: 3,
@@ -370,6 +311,25 @@ impl Default for SmartTradeConfig {
             blockchain_call_timeout_ms: 15000,
             reconnect_interval_seconds: 30,
             network_failure_trade_timeout_seconds: 300,
+            watched_tokens: HashMap::new(),
+            default_slippage: 0.005,
+            default_deadline_minutes: 5,
+            default_gas_limit: 1000000,
+            default_trailing_stop_percentage: 0.05,
+            default_take_profit_percentage: 0.1,
+            default_stop_loss_percentage: 0.05,
+            capital_per_trade: 0.1,
+            price_check_interval_ms: 5000,
+            health_check_interval_ms: 10000,
+            market_monitor_interval_ms: 300000,
+            retry_strategy: RetryStrategy::default(),
+            alert_settings: AlertSettings::default(),
+            default_base_token: HashMap::new(),
+            block_unverified_contracts: true,
+            block_high_risk_tokens: true,
+            block_medium_risk_tokens: true,
+            min_confidence_for_high_priority: 0.9,
+            min_profit_for_trailing_stop: 0.05,
         }
     }
 }
@@ -412,11 +372,8 @@ impl NonceManager {
         }
     }
     
-    /// Lấy nonce tiếp theo cho wallet và chain cụ thể
-    /// 
-    /// Nếu nonce đã được cache và chưa hết hạn, sử dụng giá trị cache.
-    /// Nếu không, truy vấn blockchain để lấy nonce hiện tại.
-    pub async fn get_next_nonce(&mut self, chain_id: u32, wallet_address: &str, adapter: &Arc<EvmAdapter>) -> Result<u64> {
+    /// Lấy nonce tiếp theo cho transaction. Sẽ tự động đồng bộ nếu cache đã hết hạn.
+    pub async fn get_next_nonce(&mut self, chain_id: u32, wallet_address: &str, adapter: &Arc<EvmAdapter>) -> anyhow::Result<u64> {
         let key = (chain_id, wallet_address.to_string());
         let now = Utc::now().timestamp() as u64;
         
@@ -464,7 +421,7 @@ impl NonceManager {
         }
     }
     
-    /// Đánh dấu giao dịch với nonce cụ thể đã được gửi
+    /// Đánh dấu transaction đã được gửi với nonce tương ứng
     pub fn mark_transaction_sent(&mut self, chain_id: u32, wallet_address: &str, nonce: u64, tx_hash: &str) {
         let key = (chain_id, wallet_address.to_string());
         
@@ -484,7 +441,7 @@ impl NonceManager {
         self.last_update_time.insert(key.clone(), Utc::now().timestamp() as u64);
     }
     
-    /// Đánh dấu giao dịch đã hoàn thành hoặc thất bại
+    /// Đánh dấu transaction đã hoàn tất với nonce tương ứng
     pub fn mark_transaction_completed(&mut self, chain_id: u32, wallet_address: &str, nonce: u64) {
         let key = (chain_id, wallet_address.to_string());
         
@@ -494,47 +451,31 @@ impl NonceManager {
         }
     }
     
-    /// Đồng bộ lại nonce từ blockchain (dùng khi phát hiện sự không nhất quán)
-    pub async fn sync_nonce(&mut self, chain_id: u32, wallet_address: &str, adapter: &Arc<EvmAdapter>) -> Result<u64> {
+    /// Đồng bộ nonce với blockchain
+    pub async fn sync_nonce(&mut self, chain_id: u32, wallet_address: &str, adapter: &Arc<EvmAdapter>) -> anyhow::Result<u64> {
         let key = (chain_id, wallet_address.to_string());
         let nonce = adapter.get_next_nonce(wallet_address).await?;
-        
-        debug!("Syncing nonce for wallet {} on chain {}: new nonce = {}", wallet_address, chain_id, nonce);
-        
-        // Cập nhật cache
         self.current_nonces.insert(key.clone(), nonce);
-        self.last_update_time.insert(key.clone(), Utc::now().timestamp() as u64);
-        
+        self.last_update_time.insert(key, Utc::now().timestamp() as u64);
         Ok(nonce)
     }
     
-    /// Kiểm tra xem giao dịch có nonce cụ thể đã được xác nhận chưa
-    pub async fn check_transaction_confirmed(&self, chain_id: u32, wallet_address: &str, nonce: u64, adapter: &Arc<EvmAdapter>) -> Result<bool> {
-        // Lấy tx_hash cho nonce này
-        if let Some(tx_hash) = self.nonce_to_tx_hash.get(&(chain_id, wallet_address.to_string(), nonce)) {
-            match adapter.get_transaction_status(tx_hash).await {
-                Ok(status) => {
-                    return Ok(status.confirmed);
-                },
-                Err(e) => {
-                    warn!("Failed to check transaction status for tx {}: {}", tx_hash, e);
-                    return Err(anyhow!("Failed to check transaction status: {}", e));
-                }
-            }
-        }
+    /// Kiểm tra xem transaction với nonce đã được xác nhận chưa
+    pub async fn check_transaction_confirmed(&self, chain_id: u32, wallet_address: &str, nonce: u64, adapter: &Arc<EvmAdapter>) -> anyhow::Result<bool> {
+        let key = (chain_id, wallet_address.to_string(), nonce);
         
-        // Nếu không tìm thấy tx_hash, kiểm tra trực tiếp từ blockchain
-        match adapter.is_nonce_used(wallet_address, nonce).await {
-            Ok(used) => Ok(used),
-            Err(e) => {
-                warn!("Failed to check if nonce {} is used for wallet {} on chain {}: {}", nonce, wallet_address, chain_id, e);
-                Err(anyhow!("Failed to check nonce: {}", e))
-            }
+        if let Some(tx_hash) = self.nonce_to_tx_hash.get(&key) {
+            let confirmed = is_transaction_confirmed(tx_hash, adapter).await?;
+            Ok(confirmed)
+        } else {
+            // Nếu không có tx_hash, kiểm tra bằng cách so sánh nonce hiện tại
+            let current_nonce = adapter.get_next_nonce(wallet_address).await?;
+            Ok(current_nonce > nonce) // Nếu nonce hiện tại > nonce cũ, giao dịch đã được xác nhận
         }
     }
     
-    /// Xử lý các giao dịch bị mắc kẹt bằng cách thay thế (replace-by-fee)
-    pub async fn handle_stuck_transaction(&mut self, chain_id: u32, wallet_address: &str, nonce: u64, adapter: &Arc<EvmAdapter>) -> Result<Option<String>> {
+    /// Xử lý transaction bị "mắc kẹt" (stuck)
+    pub async fn handle_stuck_transaction(&mut self, chain_id: u32, wallet_address: &str, nonce: u64, adapter: &Arc<EvmAdapter>) -> anyhow::Result<Option<String>> {
         // Kiểm tra xem giao dịch có trong danh sách pending không
         let key = (chain_id, wallet_address.to_string());
         let is_pending = self.pending_nonces.get(&key).map_or(false, |set| set.contains(&nonce));
@@ -553,47 +494,49 @@ impl NonceManager {
         let status = adapter.get_transaction_status(&original_tx_hash).await?;
         
         // Nếu đã xác nhận, không cần thay thế
-        if status.confirmed {
+        if matches!(status, TransactionStatus::Confirmed(_)) {
             self.mark_transaction_completed(chain_id, wallet_address, nonce);
             return Ok(None);
         }
         
         // Nếu đã chờ quá lâu, thử thay thế bằng giao dịch mới với gas price cao hơn
-        if status.pending_seconds > 300 { // > 5 phút
-            debug!("Transaction {} with nonce {} stuck for {} seconds, attempting replace-by-fee", 
-                original_tx_hash, nonce, status.pending_seconds);
-            
-            // Lấy thông tin giao dịch gốc
-            let tx_data = adapter.get_transaction_data(&original_tx_hash).await?;
-            
-            // Tính gas price mới cao hơn 20%
-            let new_gas_price = (tx_data.gas_price as f64 * 1.2) as u64;
-            
-            // Gửi giao dịch thay thế
-            let new_tx_hash = adapter.replace_transaction(
-                wallet_address,
-                nonce,
-                &tx_data.to,
-                tx_data.value,
-                &tx_data.data,
-                new_gas_price,
-            ).await?;
-            
-            // Cập nhật tx_hash mới
-            self.nonce_to_tx_hash.insert((chain_id, wallet_address.to_string(), nonce), new_tx_hash.clone());
-            
-            info!("Replaced stuck transaction {} with new transaction {} (nonce: {}, higher gas price: {})", 
-                original_tx_hash, new_tx_hash, nonce, new_gas_price);
-            
-            return Ok(Some(new_tx_hash));
+        if let TransactionStatus::Pending(pending_info) = &status {
+            if pending_info.elapsed_seconds > 300 { // > 5 phút
+                debug!("Transaction {} with nonce {} stuck for {} seconds, attempting replace-by-fee", 
+                    original_tx_hash, nonce, pending_info.elapsed_seconds);
+                
+                // Lấy thông tin giao dịch gốc
+                let tx_data = adapter.get_transaction_data(&original_tx_hash).await?;
+                
+                // Tính gas price mới cao hơn 20%
+                let new_gas_price = (tx_data.gas_price as f64 * 1.2) as u64;
+                
+                // Gửi giao dịch thay thế
+                let new_tx_hash = adapter.replace_transaction(
+                    wallet_address,
+                    nonce,
+                    &tx_data.to,
+                    tx_data.value,
+                    &tx_data.data,
+                    new_gas_price,
+                ).await?;
+                
+                // Cập nhật tx_hash mới
+                self.nonce_to_tx_hash.insert((chain_id, wallet_address.to_string(), nonce), new_tx_hash.clone());
+                
+                info!("Replaced stuck transaction {} with new transaction {} (nonce: {}, higher gas price: {})", 
+                    original_tx_hash, new_tx_hash, nonce, new_gas_price);
+                
+                return Ok(Some(new_tx_hash));
+            }
         }
         
         // Giao dịch vẫn đang chờ nhưng chưa cần thay thế
         Ok(None)
     }
     
-    /// Kiểm tra và xử lý tất cả các giao dịch đang chờ xử lý
-    pub async fn check_pending_transactions(&mut self, adapter: &Arc<EvmAdapter>, chain_id: u32, wallet_address: &str) -> Result<()> {
+    /// Kiểm tra và cập nhật trạng thái của tất cả các pending transaction
+    pub async fn check_pending_transactions(&mut self, adapter: &Arc<EvmAdapter>, chain_id: u32, wallet_address: &str) -> anyhow::Result<()> {
         let key = (chain_id, wallet_address.to_string());
         
         // Lấy danh sách các nonce đang chờ xử lý
@@ -624,5 +567,62 @@ impl NonceManager {
         }
         
         Ok(())
+    }
+}
+
+/// Kiểm tra trạng thái giao dịch
+pub async fn check_transaction_status(
+    tx_hash: &str,
+    adapter: &Arc<EvmAdapter>
+) -> Result<TransactionStatus, anyhow::Error> {
+    // Lấy trạng thái giao dịch từ blockchain
+    let status = adapter.get_transaction_status(tx_hash).await?;
+    
+    // Ghi log trạng thái
+    match &status {
+        TransactionStatus::Pending(_) => {
+            info!("Transaction {} is still pending", tx_hash);
+        },
+        TransactionStatus::Confirmed(_) => {
+            info!("Transaction {} has been confirmed", tx_hash);
+        },
+        TransactionStatus::Failed(reason) => {
+            warn!("Transaction {} failed: {}", tx_hash, reason);
+        }
+    }
+    
+    Ok(status)
+}
+
+/// Kiểm tra xem giao dịch đã được xác nhận chưa
+pub async fn is_transaction_confirmed(
+    tx_hash: &str,
+    adapter: &Arc<EvmAdapter>
+) -> Result<bool, anyhow::Error> {
+    let status = check_transaction_status(tx_hash, adapter).await?;
+    Ok(status == TransactionStatus::Confirmed)
+}
+
+/// Kiểm tra xem giao dịch đã thất bại chưa
+pub async fn is_transaction_failed(
+    tx_hash: &str, 
+    adapter: &Arc<EvmAdapter>,
+    timeout_seconds: u64
+) -> Result<bool, anyhow::Error> {
+    let status = check_transaction_status(tx_hash, adapter).await?;
+    
+    match status {
+        TransactionStatus::Failed => Ok(true),
+        TransactionStatus::Confirmed => Ok(false),
+        TransactionStatus::Pending => {
+            // Kiểm tra nếu giao dịch đã chờ quá lâu
+            if let TransactionStatus::Pending(pending_info) = status {
+                if pending_info.waiting_seconds > timeout_seconds {
+                    return Ok(true); // Coi như thất bại nếu chờ quá lâu
+                }
+            }
+            
+            Ok(false)
+        }
     }
 }

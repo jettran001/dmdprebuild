@@ -12,7 +12,6 @@
 /// - `strategy`: Các chiến lược giao dịch
 /// - `utils`: Các tiện ích phụ trợ
 /// - `types`: Các kiểu dữ liệu nội bộ
-
 // Re-export các module con
 pub mod core;
 pub mod types;
@@ -40,7 +39,6 @@ use anyhow::Result;
 use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::tradelogic::traits::TradeCoordinator;
 use super::types::SmartTradeConfig;
-use super::analys_client::SmartTradeAnalysisClient;
 
 /// Tạo SmartTradeExecutor mới với cấu hình mặc định
 pub async fn create_smart_trade_executor(

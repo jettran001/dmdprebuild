@@ -1,15 +1,15 @@
-/// Phân tích giao dịch trong mempool để phát hiện cơ hội và rủi ro.
-///
-/// Module này theo dõi và phân tích các giao dịch chưa được xác nhận (pending)
-/// trong mempool của blockchain để:
-/// - Phát hiện sớm các token mới được tạo
-/// - Phát hiện giao dịch thêm thanh khoản lớn
-/// - Theo dõi và tận dụng cơ hội MEV
-/// - Phát hiện giao dịch đáng ngờ từ ví lớn (whale)
-/// - Cảnh báo rủi ro giao dịch dựa trên pattern
-///
-/// # Flow
-/// `blockchain` -> `snipebot/mempool_analyzer` -> `tradelogic`
+//! Phân tích giao dịch trong mempool để phát hiện cơ hội và rủi ro.
+//!
+//! Module này theo dõi và phân tích các giao dịch chưa được xác nhận (pending)
+//! trong mempool của blockchain để:
+//! - Phát hiện sớm các token mới được tạo
+//! - Phát hiện giao dịch thêm thanh khoản lớn
+//! - Theo dõi và tận dụng cơ hội MEV
+//! - Phát hiện giao dịch đáng ngờ từ ví lớn (whale)
+//! - Cảnh báo rủi ro giao dịch dựa trên pattern
+//!
+//! # Flow
+//! `blockchain` -> `snipebot/mempool_analyzer` -> `tradelogic`
 
 //! Mempool analysis module
 //!

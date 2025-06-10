@@ -1,12 +1,12 @@
-/// Module quản lý và gửi thông báo cho snipebot
-///
-/// Module này cung cấp các công cụ để gửi thông báo qua nhiều kênh khác nhau
-/// như Telegram, Discord, Email, v.v. Các notification được cấu hình và quản lý
-/// thông qua một NotificationManager tập trung.
+//! Module quản lý và gửi thông báo cho snipebot
+//!
+//! Module này cung cấp các công cụ để gửi thông báo qua nhiều kênh khác nhau
+//! như Telegram, Discord, Email, v.v. Các notification được cấu hình và quản lý
+//! thông qua một NotificationManager tập trung.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::{Result, Context, anyhow};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value as JsonValue;
@@ -14,7 +14,6 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use reqwest::Client;
 use std::time::Duration;
-use futures::executor;
 
 /// Các loại thông báo hỗ trợ
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -452,7 +451,7 @@ impl EmailChannel {
     }
     
     /// Tạo nội dung email
-    fn get_email_body(&self, notification_type: &NotificationType, data: &JsonValue) -> String {
+    fn format_email_content(&self, notification_type: &NotificationType, data: &JsonValue) -> String {
         let mut body = String::new();
         
         // Add header
@@ -537,7 +536,7 @@ impl NotificationChannel for EmailChannel {
         // This is a stub implementation that just logs the attempt
         
         let subject = self.get_email_subject(&notification_type, data);
-        let _body = self.get_email_body(&notification_type, data);
+        let _body = self.format_email_content(&notification_type, data);
         
         // Log the email sending attempt
         info!(

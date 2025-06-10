@@ -72,7 +72,7 @@ pub struct AppState {
     
     /// Collection of trade executors implementing different trading strategies
     /// Each executor follows the TradeExecutor trait and can be started/stopped independently
-    pub trade_executors: Vec<Arc<dyn TradeExecutor>>,
+    pub trade_executors: Vec<Arc<dyn TradeExecutor<Config = config::BotConfig, TradeResult = tradelogic::common::types::TradeResult>>>,
     
     /// Channel for sending shutdown signals to gracefully terminate services
     /// Used by the stop() method to initiate shutdown sequence
@@ -213,11 +213,12 @@ impl AppState {
                 // Truy cập an toàn phần tử đầu tiên sử dụng .get(0)
                 if let Some(rpc_url) = chain_config.rpc_urls.get(0) {
                     let adapter_clone = adapter.clone();
+                    // Thay đổi cách cast không an toàn sang tạo wrapper mới
                     let health_check = Arc::new(RpcHealthCheck::new(
                         *chain_id,
                         &chain_config.name,
                         rpc_url,
-                        adapter_clone as Arc<dyn crate::health::RpcAdapter>,
+                        adapter_clone,
                     ));
                     
                     self.health_manager.register(health_check).await;
@@ -239,13 +240,15 @@ impl AppState {
     async fn init_trade_executors(&mut self, config: &BotConfig) -> Result<()> {
         // Initialize manual trader if enabled
         info!("Initializing trade executors");
+        let trade_coordinator = get_global_coordinator().await;
         let manual_executor = ManualTradeExecutor::new(
             self.chain_adapters.clone(),
             config.trading.default_slippage,
             config.trading.default_deadline_minutes,
+            trade_coordinator.clone(),
         );
         
-        let manual_executor = Arc::new(manual_executor) as Arc<dyn TradeExecutor>;
+        let manual_executor = Arc::new(manual_executor) as Arc<dyn TradeExecutor<Config = config::BotConfig, TradeResult = tradelogic::common::types::TradeResult>>;
         self.trade_executors.push(manual_executor);
         
         // Initialize smart trader if enabled
@@ -256,7 +259,7 @@ impl AppState {
                 config.trading.smart_trade.clone(),
             ).await?;
             
-            let smart_executor = Arc::new(smart_executor) as Arc<dyn TradeExecutor>;
+            let smart_executor = Arc::new(smart_executor) as Arc<dyn TradeExecutor<Config = config::BotConfig, TradeResult = tradelogic::common::types::TradeResult>>;
             self.trade_executors.push(smart_executor);
         }
         
@@ -268,7 +271,7 @@ impl AppState {
                 config.trading.mev_trade.clone(),
             ).await?;
             
-            let mev_bot = Arc::new(mev_bot) as Arc<dyn TradeExecutor>;
+            let mev_bot = Arc::new(mev_bot) as Arc<dyn TradeExecutor<Config = config::BotConfig, TradeResult = tradelogic::common::types::TradeResult>>;
             self.trade_executors.push(mev_bot);
         }
         
@@ -300,7 +303,7 @@ impl AppState {
             info!("Shutdown signal received, stopping services");
             
             // Stop all trade executors
-            for executor in trade_executors {
+            for executor in &trade_executors {
                 if let Err(e) = executor.stop().await {
                     error!("Error stopping trade executor: {}", e);
                 }
@@ -320,15 +323,21 @@ impl AppState {
     
     /// Stop all services
     pub async fn stop(&self) -> Result<()> {
-        info!("Stopping SnipeBot services");
+        info!("Stopping SnipeBot application");
         
-        // Send shutdown signal
-        if let Some(shutdown_tx) = &self.shutdown_tx {
-            if let Err(e) = shutdown_tx.send(()) {
-                error!("Error sending shutdown signal: {}", e);
+        // Clone self.shutdown_tx ra ngoài và lấy giá trị inside
+        if let Some(ref tx) = self.shutdown_tx {
+            // Clone tx để tránh việc move out of a shared reference
+            let tx_clone = tx.clone();
+            if let Err(_e) = tx_clone.send(()) {
+                error!("Error sending shutdown signal: already shut down");
             }
         }
         
+        // Wait for a short delay to allow tasks to clean up
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        
+        info!("SnipeBot stopped successfully");
         Ok(())
     }
 }
@@ -399,19 +408,27 @@ pub async fn init_api_server(app_state: Arc<AppState>) -> Result<()> {
     // Clone app_state for warp filters
     let app_state_filter = warp::any().map(move || app_state.clone());
     
-    // Create health check route
-    let health_route = warp::path("health")
-        .and(warp::get())
-        .and_then(health::health_check_handler);
-    
-    // Create API routes collection
-    let mut api_routes: Vec<warp::Filter<(impl warp::Reply,)> + Clone + Send + Sync> = vec![];
+    // Set up routes
+    let mut api_routes = Vec::new();
     
     // Add health check route
-    api_routes.push(health_route);
+    let health_route = warp::path("health")
+        .and(warp::get())
+        .and_then(move || {
+            let health = app_state.health_manager.clone();
+            async move {
+                match health.get_health().await {
+                    health => Ok::<_, warp::Rejection>(warp::reply::json(&health)),
+                }
+            }
+        });
     
-    // Add bugs and analysis routes
-    health::add_bugs_and_analysis_routes(&mut api_routes);
+    api_routes.push(Box::new(health_route) as Box<dyn warp::Filter<Extract = (warp::reply::Json,), Error = warp::Rejection> + Send + Sync>);
+    
+    // Add bugs and analysis routes if health::add_bugs_and_analysis_routes is available
+    if let Ok(()) = health::add_bugs_and_analysis_routes(&mut api_routes) {
+        debug!("Added bugs and analysis routes");
+    }
     
     // Initialize metrics route if enabled
     if config.general.enable_metrics {
@@ -419,7 +436,7 @@ pub async fn init_api_server(app_state: Arc<AppState>) -> Result<()> {
             .and(warp::get())
             .and_then(metric::metrics_handler);
             
-        api_routes.push(metrics_route);
+        api_routes.push(Box::new(metrics_route) as Box<dyn warp::Filter<Extract = (warp::reply::Json,), Error = warp::Rejection> + Send + Sync>);
     }
     
     // Initialize other routes
@@ -428,7 +445,10 @@ pub async fn init_api_server(app_state: Arc<AppState>) -> Result<()> {
     // Combine all routes
     let routes = api_routes.into_iter()
         .fold(
-            warp::any().map(|| warp::reply::with_status("Not Found", warp::http::StatusCode::NOT_FOUND)).boxed(), 
+            warp::any()
+                .map(|| warp::reply::with_status("Not Found", warp::http::StatusCode::NOT_FOUND))
+                .boxed()
+                .map(|reply| reply as warp::reply::Json), 
             |acc, route| acc.or(route).boxed()
         );
     

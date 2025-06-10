@@ -1,25 +1,12 @@
-/**
- * Anti-MEV protection module
- * 
- * Module này cung cấp các chức năng để phát hiện và tránh các MEV attacks như
- * front-running, back-running, sandwich attacks. Nó sử dụng các kỹ thuật để giảm
- * thiểu rủi ro MEV và bảo vệ các giao dịch của người dùng.
- */
-
+/// Anti-MEV Module cho Smart Trade System
+///
+/// Module này triển khai các chiến lược chống MEV để bảo vệ giao dịch
+/// khỏi các tấn công như front-running, sandwich attacks, và time-bandit.
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use anyhow::{Result, Context, bail, anyhow};
-use tracing::{debug, error, info, warn};
+use anyhow::{Result, Context, anyhow};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, HashSet};
-use chrono::{DateTime, Utc, Duration};
-
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::mempool::{MempoolTransaction, TransactionType};
-use crate::tradelogic::common::mev_detection::{
-    MevAttackType, MevAnalysisResult, AntiMevTxParams, 
-    analyze_mempool_for_mev, generate_anti_mev_tx_params
-};
 
 use super::optimizer::GasOptimizer;
 

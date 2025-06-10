@@ -1,19 +1,14 @@
-/// Strategy - Chiến lược giao dịch
-///
-/// Module này chứa các chiến lược giao dịch khác nhau như DCA, grid trading, TWAP,
-/// và các chiến lược tùy chỉnh khác.
+//! Strategy - Chiến lược giao dịch
+//!
+//! Module này chứa các chiến lược giao dịch khác nhau như DCA, grid trading, TWAP,
+//! và các chiến lược tùy chỉnh khác.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use chrono::{Utc, Duration};
+use chrono::Utc;
 use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow, bail};
+use anyhow::{Result, anyhow};
 
 // Internal imports
-use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{TokenPair, TradeParams, TradeType};
-use crate::tradelogic::traits::OpportunityPriority;
+use crate::types::{TradeParams, TradeType};
 use crate::tradelogic::common::ResourcePriority;
 use crate::tradelogic::common::get_resource_manager;
 

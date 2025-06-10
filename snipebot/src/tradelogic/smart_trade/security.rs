@@ -1,39 +1,18 @@
-/// Security implementation for SmartTradeExecutor
-///
-/// This module contains functions related to security checks, risk analysis,
-/// and safety features to protect users from scams and malicious tokens.
-///
-/// # Kiến trúc an toàn dựa trên traits
-/// - Module này sử dụng RiskAnalyzerProvider trait từ analys/api/risk_api.rs
-/// - Tuân theo nguyên tắc trait-based design từ .cursorrc
-/// - Tương tác thông qua chức năng trừu tượng được định nghĩa trong trait
-/// - Các phương thức tại đây là các adapter, tiện ích bổ sung cho phân tích core
-/// 
-/// # Các tính năng chính:
-/// - Áp dụng xử lý lỗi chuẩn với anyhow::Result
-/// - Đảm bảo thread safety trong các phương thức async
-/// - Tối ưu hóa các truy vấn blockchain bằng futures và tokio::join!
-/// - Áp dụng nguyên tắc defensive programming
-/// - Tuân thủ nghiêm ngặt quy tắc từ .cursorrc
+//! Security Module cho Smart Trade System
+//! 
+//! Module này chịu trách nhiệm cho việc kiểm tra bảo mật, phát hiện gian lận
+//! và các biện pháp bảo vệ người dùng trong quá trình giao dịch.
 
 // External imports
-use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::Utc;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
-use anyhow::{Result, Context, anyhow};
-use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use anyhow::Result;
+use tracing::{debug, info, warn};
 
 // Internal imports
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::analys::risk_analyzer::{RiskAnalyzer, RiskFactor, TradeRecommendation, TradeRiskAnalysis};
-use crate::analys::token_status::{ContractInfo, TokenStatus};
 
-// Module imports
-use super::types::{TradeTracker, TradeStatus, TokenIssue};
-use super::constants::*;
-use super::executor::SmartTradeExecutor;
+use super::token_analysis::analyze_token;
 
 /// Cấu hình bảo mật cho trades
 #[derive(Debug, Clone, Serialize, Deserialize)]

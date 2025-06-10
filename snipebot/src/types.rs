@@ -54,6 +54,21 @@ impl ChainType {
             ChainType::Other(id) => format!("Chain ({})", id),
         }
     }
+    
+    /// Get the default base token for this chain
+    pub fn default_base_token(&self) -> String {
+        match self {
+            ChainType::EVM(1) => "ETH".to_string(),
+            ChainType::EVM(56) => "BNB".to_string(),
+            ChainType::EVM(137) => "MATIC".to_string(),
+            ChainType::EVM(42161) => "ETH".to_string(),
+            ChainType::EVM(10) => "ETH".to_string(),
+            ChainType::EVM(43114) => "AVAX".to_string(),
+            ChainType::EVM(_) => "ETH".to_string(),
+            ChainType::Solana => "SOL".to_string(),
+            ChainType::Other(_) => "NATIVE".to_string(),
+        }
+    }
 }
 
 /// Token pair for trading
@@ -104,6 +119,9 @@ pub struct TradeParams {
     
     /// Token address
     pub token_address: String,
+    
+    /// Token pair
+    pub token_pair: TokenPair,
     
     /// Trade amount in base currency
     pub amount: f64,
@@ -163,6 +181,37 @@ impl TradeParams {
     /// Check if this is a sell trade
     pub fn is_sell(&self) -> bool {
         self.trade_type == TradeType::Sell
+    }
+    
+    /// Get the base token for this trade based on chain type
+    pub fn base_token(&self) -> String {
+        self.chain_type.default_base_token()
+    }
+}
+
+impl Default for TradeParams {
+    fn default() -> Self {
+        Self {
+            chain_type: ChainType::EVM(1), // Default to Ethereum
+            token_address: "".to_string(),
+            token_pair: TokenPair {
+                base_token: "".to_string(),
+                quote_token: "".to_string(),
+                chain_id: 0,
+            },
+            amount: 0.0,
+            slippage: 1.0, // 1%
+            trade_type: TradeType::Buy,
+            deadline_minutes: 30,
+            router_address: "".to_string(),
+            gas_limit: None,
+            gas_price: None,
+            strategy: None,
+            stop_loss: None,
+            take_profit: None,
+            max_hold_time: None,
+            custom_params: None,
+        }
     }
 }
 
@@ -300,15 +349,80 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// Transaction status enum
+/// Transaction status
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionStatus {
+    /// Transaction status type
+    pub status: TransactionStatusType,
+    
+    /// Whether the transaction has been confirmed
+    pub confirmed: bool,
+    
+    /// How long the transaction has been pending (in seconds)
+    pub pending_seconds: u64,
+    
+    /// Block number where transaction was included (if confirmed)
+    pub block_number: Option<u64>,
+    
+    /// Gas used by the transaction (if confirmed)
+    pub gas_used: Option<u64>,
+    
+    /// Effective gas price paid (if confirmed)
+    pub effective_gas_price: Option<f64>,
+}
+
+/// Transaction status types
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransactionStatus {
+pub enum TransactionStatusType {
     /// Transaction is pending
     Pending,
-    
-    /// Transaction was successful
-    Success,
-    
-    /// Transaction failed
+    /// Transaction is confirmed
+    Confirmed,
+    /// Transaction has failed
     Failed,
+    /// Transaction not found
+    NotFound,
+}
+
+impl TransactionStatus {
+    /// Check if a transaction has been confirmed on the blockchain
+    pub fn is_transaction_confirmed(&self) -> bool {
+        self.confirmed
+    }
+    
+    /// Create a new pending transaction status
+    pub fn new_pending() -> Self {
+        Self {
+            status: TransactionStatusType::Pending,
+            confirmed: false,
+            pending_seconds: 0,
+            block_number: None,
+            gas_used: None,
+            effective_gas_price: None,
+        }
+    }
+    
+    /// Create a new success transaction status
+    pub fn new_success(block_number: u64, gas_used: u64, effective_gas_price: f64) -> Self {
+        Self {
+            status: TransactionStatusType::Confirmed,
+            confirmed: true,
+            pending_seconds: 0,
+            block_number: Some(block_number),
+            gas_used: Some(gas_used),
+            effective_gas_price: Some(effective_gas_price),
+        }
+    }
+    
+    /// Create a new failed transaction status
+    pub fn new_failed(block_number: u64) -> Self {
+        Self {
+            status: TransactionStatusType::Failed,
+            confirmed: true,
+            pending_seconds: 0,
+            block_number: Some(block_number),
+            gas_used: None,
+            effective_gas_price: None,
+        }
+    }
 }

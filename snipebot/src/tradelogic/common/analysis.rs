@@ -1,7 +1,7 @@
-/// Common analysis functions shared between trade logic modules
-///
-/// This module contains analysis utilities that are used by both smart_trade and mev_logic,
-/// providing consistent analysis methods and reducing code duplication.
+//! Common analysis functions shared between trade logic modules
+//!
+//! This module contains analysis utilities that are used by both smart_trade and mev_logic,
+//! providing consistent analysis methods and reducing code duplication.
 
 // External imports
 use std::collections::HashMap;

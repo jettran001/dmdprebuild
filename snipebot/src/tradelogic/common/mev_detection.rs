@@ -1,18 +1,16 @@
-/// Phát hiện và phòng chống MEV - Module dùng chung
-///
-/// Module này cung cấp các hàm dùng chung để phát hiện và bảo vệ chống lại
-/// các cuộc tấn công MEV như front-running, sandwich attacks, và arbitrage.
-/// Được chia sẻ giữa module tradelogic/smart_trade/anti_mev.rs và mev_logic.
+//! Phát hiện và phòng chống MEV - Module dùng chung
+//!
+//! Module này cung cấp các hàm dùng chung để phát hiện và bảo vệ chống lại
+//! các cuộc tấn công MEV như front-running, sandwich attacks, và arbitrage.
+//! Được chia sẻ giữa module tradelogic/smart_trade/anti_mev.rs và mev_logic.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use anyhow::{Result, Context, anyhow};
-use tracing::{debug, error, info, warn};
-use chrono::{DateTime, Utc, Duration};
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use tracing::{debug, warn};
 
-use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::analys::mempool::{
-    MempoolTransaction, TransactionType, SuspiciousPattern,
+    MempoolTransaction, SuspiciousPattern,
     detect_front_running, detect_sandwich_attack, detect_high_frequency_trading
 };
 

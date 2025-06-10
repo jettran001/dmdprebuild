@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::{Instant, Duration};
 use tokio::sync::{RwLock, Semaphore, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use once_cell::sync::OnceCell;
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -438,7 +438,7 @@ impl TransactionThrottler {
     }
     
     /// Lấy thông tin thống kê của throttler
-    pub fn get_stats(&self) -> ThrottlerStats {
+    pub async fn get_stats(&self) -> ThrottlerStats {
         let mut stats = ThrottlerStats::default();
         
         // Tổng số giao dịch
@@ -459,7 +459,8 @@ impl TransactionThrottler {
         
         // Thống kê theo chain
         let config = self.config.read().await;
-        for (chain_id, info) in self.chain_info.read().await.iter() {
+        let chain_info = self.chain_info.read().await;
+        for (chain_id, info) in chain_info.iter() {
             let max_per_minute = *config.max_tx_per_chain
                 .get(chain_id)
                 .unwrap_or(&config.max_tx_per_minute);
@@ -483,6 +484,27 @@ impl TransactionThrottler {
         stats.current_limits.insert("max_concurrent".to_string(), config.max_concurrent_tx as u32);
         
         stats
+    }
+    
+    /// Reset thống kê của throttler
+    pub async fn reset_stats(&self) {
+        // Reset các atomic counters
+        self.total_transactions.store(0, Ordering::Relaxed);
+        self.executed_transactions.store(0, Ordering::Relaxed);
+        self.rejected_transactions.store(0, Ordering::Relaxed);
+        
+        // Reset các thống kê khác
+        let mut metrics = self.system_metrics.write().await;
+        metrics.cpu_load = 0.0;
+        metrics.ram_usage = 0.0;
+        
+        // Reset thời gian bắt đầu
+        self.start_time.elapsed(); // Chỉ để refresh
+    }
+    
+    /// Đặt trạng thái hoạt động của throttler
+    pub fn set_active(&self, active: bool) {
+        self.active.store(if active { 1 } else { 0 }, Ordering::Relaxed);
     }
 }
 
@@ -516,4 +538,78 @@ where
 {
     let throttler = get_global_throttler();
     throttler.execute_with_throttling(chain_id, f).await
+}
+
+/// Kiểm tra xem một hành động có bị throttle hay không
+pub async fn check_throttle(&self, action_type: &str) -> bool {
+    // Kiểm tra xem throttler có được kích hoạt không
+    if self.active.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+
+    // Kiểm tra tỷ lệ CPU và memory
+    let metrics = self.system_metrics.read().await;
+    if metrics.cpu_load > self.cpu_threshold || metrics.ram_usage > self.memory_threshold {
+        // Tăng bộ đếm giao dịch bị từ chối
+        self.rejected_transactions.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+
+    // Kiểm tra giới hạn tốc độ cho loại hành động cụ thể
+    let now = Instant::now();
+    let mut rate_limits = self.rate_limits.write().await;
+
+    if let Some(limit) = rate_limits.get_mut(action_type) {
+        // Cập nhật thời gian cuối cùng và kiểm tra
+        let elapsed = now.duration_since(limit.last_action).as_millis() as u64;
+        if elapsed < limit.min_interval_ms {
+            // Tăng bộ đếm giao dịch bị từ chối
+            self.rejected_transactions.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        // Cập nhật thời gian cuối cùng
+        limit.last_action = now;
+    } else {
+        // Thêm giới hạn mới với giá trị mặc định
+        rate_limits.insert(action_type.to_string(), RateLimit {
+            last_action: now,
+            min_interval_ms: self.default_interval_ms,
+        });
+    }
+
+    // Tăng bộ đếm tổng số giao dịch
+    self.total_transactions.fetch_add(1, Ordering::Relaxed);
+    // Tăng bộ đếm giao dịch đã thực thi
+    self.executed_transactions.fetch_add(1, Ordering::Relaxed);
+
+    false
+}
+
+/// Kiểm tra xem một hành động có bị throttle hay không mà không cập nhật bất kỳ trạng thái nào
+pub async fn is_throttled(&self, action_type: &str) -> bool {
+    // Kiểm tra xem throttler có được kích hoạt không
+    if self.active.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+
+    // Kiểm tra tỷ lệ CPU và memory
+    let metrics = self.system_metrics.read().await;
+    if metrics.cpu_load > self.cpu_threshold || metrics.ram_usage > self.memory_threshold {
+        return true;
+    }
+
+    // Kiểm tra giới hạn tốc độ cho loại hành động cụ thể
+    let now = Instant::now();
+    let rate_limits = self.rate_limits.read().await;
+
+    if let Some(limit) = rate_limits.get(action_type) {
+        // Kiểm tra thời gian
+        let elapsed = now.duration_since(limit.last_action).as_millis() as u64;
+        if elapsed < limit.min_interval_ms {
+            return true;
+        }
+    }
+
+    false
 } 

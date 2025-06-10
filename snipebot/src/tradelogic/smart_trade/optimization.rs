@@ -1,7 +1,7 @@
-/// Optimization implementation for SmartTradeExecutor
-///
-/// This module contains functions for optimizing trades, selecting optimal pools,
-/// and implementing anti-MEV protection.
+//! Optimization implementation for SmartTradeExecutor
+//!
+//! This module contains functions for optimizing trades, selecting optimal pools,
+//! and implementing anti-MEV protection.
 
 // External imports
 use std::collections::{HashMap, BinaryHeap};
@@ -16,8 +16,7 @@ use crate::chain_adapters::evm_adapter::EvmAdapter;
 use crate::types::{TokenPair, ChainType};
 
 // Module imports
-use super::types::{TradeTracker, TradeStatus};
-use super::constants::*;
+use super::types::TradeStatus;
 use super::executor::SmartTradeExecutor;
 use crate::tradelogic::common::gas::{calculate_optimal_gas_price, GasStrategy};
 
@@ -428,10 +427,10 @@ impl TradeOptimizer {
         // - Safety score cao -> Điểm cao
         
         // Chuẩn hóa các giá trị
-        let liquidity_score = (pool.liquidity_usd / 10000.0).min(10.0); // Max 10 điểm cho $100k+
-        let fee_score = 5.0 * (1.0 - pool.fee_percent / 1.0).max(0.0); // Max 5 điểm cho fee 0%
+        let liquidity_score = (pool.liquidity_usd / 10000.0).min(10.0_f64); // Max 10 điểm cho $100k+
+        let fee_score = 5.0 * (1.0 - pool.fee_percent / 1.0).max(0.0_f64); // Max 5 điểm cho fee 0%
         let volume_score = (pool.volume_24h / 10000.0).min(5.0); // Max 5 điểm cho $50k+
-        let impact_score = 5.0 * (1.0 - pool.estimated_price_impact / 5.0).max(0.0); // Max 5 điểm cho 0% impact
+        let impact_score = 5.0 * (1.0 - pool.estimated_price_impact / 5.0).max(0.0_f64); // Max 5 điểm cho 0% impact
         let safety_score = pool.safety_score as f64 / 20.0; // Max 5 điểm cho safety 100/100
         
         // Tổng điểm (tối đa 30 điểm)

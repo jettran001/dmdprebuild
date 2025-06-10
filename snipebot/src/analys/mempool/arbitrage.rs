@@ -4,10 +4,10 @@
 //! MEV (Miner Extractable Value) in mempool transactions.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::analys::mempool::types::{
-    MempoolTransaction, TransactionType, SuspiciousPattern
+    MempoolTransaction, TransactionType
 };
 
 /// Phát hiện cơ hội arbitrage từ các giao dịch mempool

@@ -5,13 +5,11 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::future::Future;
 
 use anyhow::{Result, anyhow, Context};
 use async_trait::async_trait;
 
 // Import necessary types
-use common::bridge_types::providers::BridgeProvider;
 use common::bridge_types::status::BridgeStatus;
 use common::bridge_types::types::MonitorConfig;
 
@@ -29,7 +27,7 @@ pub trait BridgeProvider: Send + Sync + 'static {
 
 /// Mở rộng trait BridgeProvider với các phương thức async
 #[async_trait]
-pub trait BridgeProviderExt: BridgeProvider {
+pub trait BridgeProviderExt: BridgeProvider + Send + Sync + 'static {
     /// Get estimated bridging cost
     async fn get_bridging_cost_estimate(&self, token_address: &str, amount: f64) -> Result<f64>;
     
@@ -172,10 +170,39 @@ impl<T: BridgeProvider + ?Sized + Send + Sync> BridgeProviderExt for T {
 pub async fn monitor_transaction_with_config(
     provider: &dyn BridgeProvider, 
     tx_hash: &str,
-    config: Option<MonitorConfig>
+    _config: Option<MonitorConfig>
+) -> Result<BridgeStatus> {
+    // Trong trường hợp này, chúng ta chỉ có &dyn BridgeProvider, không thể downcast.
+    // Thay vào đó, chúng ta sẽ cung cấp một triển khai mặc định trả về lỗi hoặc trạng thái mặc định
+    Err(anyhow!("The BridgeProviderExt trait is not implemented for this provider"))
+}
+
+/// Monitor a bridge transaction with a specific BridgeProviderExt implementation
+///
+/// Helper function to monitor a transaction across chains via BridgeProviderExt
+///
+/// # Arguments
+/// * `provider` - BridgeProviderExt trait object reference 
+/// * `tx_hash` - Transaction hash to monitor
+/// * `config` - Optional monitoring configuration
+///
+/// # Returns
+/// The latest bridge status of the transaction
+pub async fn monitor_transaction_with_ext<T: BridgeProviderExt + ?Sized>(
+    provider: &T, 
+    tx_hash: &str,
+    _config: Option<MonitorConfig>
 ) -> Result<BridgeStatus> {
     // Call the provider's get_transaction_status method
-    provider.get_transaction_status(tx_hash)
+    let status = provider.get_transaction_status(tx_hash)
         .await
-        .context("Failed to get transaction status from bridge provider")
+        .context("Failed to get transaction status from bridge provider")?;
+        
+    // Parse status string to BridgeStatus enum
+    match status.as_str() {
+        "pending" => Ok(BridgeStatus::Pending),
+        "completed" => Ok(BridgeStatus::Completed),
+        "failed" => Ok(BridgeStatus::Failed),
+        _ => Ok(BridgeStatus::Unknown)
+    }
 } 

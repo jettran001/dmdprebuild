@@ -1,7 +1,6 @@
 /// MEV analysis utilities
 use std::collections::{HashMap, HashSet};
-use tracing::{info, debug, warn};
-use crate::analys::mempool::{MempoolTransaction, TransactionType, SuspiciousPattern};
+use crate::analys::mempool::{MempoolTransaction, TransactionType};
 use super::types::{TraderBehaviorType, TraderExpertiseLevel, MevOpportunityType};
 use super::constants::*;
 

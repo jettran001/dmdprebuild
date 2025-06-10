@@ -3,30 +3,25 @@
 //! Module này triển khai các chiến lược MEV, phát hiện và tận dụng
 //! các cơ hội MEV từ mempool.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::borrow::Cow;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use futures::future::{self, join_all};
-use async_trait::async_trait;
-use tracing::{debug, error, info, warn};
+use futures::future::join_all;
+use tracing::{error, info};
 
 use crate::analys::mempool::{
-    MempoolAnalyzer, MempoolTransaction, TransactionType, TransactionPriority,
+    MempoolAnalyzer, MempoolTransaction, TransactionType,
     SuspiciousPattern, MempoolAlert, AlertSeverity, NewTokenInfo, create_mempool_analyzer,
     MempoolAlertType,
 };
-use crate::analys::token_status::{TokenStatus, TokenSafety, ContractInfo};
+use crate::analys::token_status::{TokenStatus, ContractInfo};
 use crate::chain_adapters::evm_adapter::EvmAdapter;
-use crate::types::{ChainType, TokenPair};
 
 use super::constants::*;
 use super::types::*;
 use super::traits::MevBot;
-use super::analyzer;
-use super::utils;
 
 /// Chiến lược phát hiện và tận dụng MEV
 pub struct MevStrategy {
@@ -138,7 +133,8 @@ impl MevStrategy {
         let txs_future = analyzer.get_pending_transactions(100);
         let alerts_future = analyzer.get_alerts(Some(AlertSeverity::Medium));
         
-        let (pending_transactions, alerts) = tokio::join!(txs_future, alerts_future);
+        // Chỉ định kiểu dữ liệu để tránh lỗi E0282: type annotations needed
+        let (pending_transactions, alerts): (Vec<MempoolTransaction>, Vec<MempoolAlert>) = tokio::join!(txs_future, alerts_future);
         
         // Phân tích giao dịch
         self.analyze_pending_transactions(chain_id, &pending_transactions).await;
@@ -203,18 +199,9 @@ impl MevStrategy {
                         self_clone.process_whale_transaction(chain_id, alert_clone).await;
                     });
                 },
-                MempoolAlertType::MevOpportunity => {
-                    let alert_clone = alert.clone();
-                    let self_clone = self.clone();
-                    tokio::spawn(async move {
-                        self_clone.analyze_existing_arbitrage(chain_id, alert_clone).await;
-                    });
-                }
+                _ => {}
             }
         }
-        
-        // Thêm phân tích arbitrage
-        self.analyze_arbitrage_opportunities(chain_id, analyzer).await;
     }
     
     /// Phân tích trực tiếp các giao dịch đang chờ trong mempool
@@ -339,14 +326,16 @@ impl MevStrategy {
     }
     
     /// Lấy danh sách cơ hội hiện tại
-    pub async fn get_opportunities(&self) -> Cow<'_, [MevOpportunity]> {
+    pub async fn get_opportunities(&self) -> Vec<MevOpportunity> {
         let opportunities = self.opportunities.read().await;
-        Cow::Borrowed(&opportunities)
+        opportunities.clone()
     }
     
-    /// Lấy cấu hình hiện tại (trả về tham chiếu nếu khách hàng có thể xử lý)
-    pub async fn get_opportunities_ref<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, Vec<MevOpportunity>> {
-        self.opportunities.read().await
+    /// Lấy danh sách cơ hội hiện tại cho client sử dụng
+    /// Đã sửa để trả về Vec được clone thay vì tham chiếu để tránh lỗi lifetime
+    pub async fn get_opportunities_ref(&self) -> Vec<MevOpportunity> {
+        let opportunities = self.opportunities.read().await;
+        opportunities.clone()
     }
     
     /// Lấy cấu hình hiện tại
@@ -374,5 +363,241 @@ impl MevStrategy {
         }
     }
 
-    // Phần 2 của phương thức nằm trong file strategy_implementation.rs
+    /// Đánh giá các cơ hội đã phát hiện
+    async fn evaluate_opportunities(&self) {
+        // Lấy danh sách cơ hội hiện tại
+        let mut opportunities = self.opportunities.write().await;
+
+        // Kiểm tra cơ hội nào đã hết hạn và loại bỏ
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        opportunities.retain(|opp| {
+            // Sử dụng expires_at thay vì expiry
+            now < opp.expires_at
+        });
+
+        // Đánh giá lại các cơ hội còn lại
+        for opp in opportunities.iter_mut() {
+            // Chỉ đánh giá lại các cơ hội chưa được thực hiện
+            if opp.status != MevOpportunityStatus::Detected {
+                continue;
+            }
+
+            // Lấy adapter cho chain tương ứng
+            if let Some(adapter) = self.evm_adapters.get(&opp.chain_id) {
+                // Đánh giá lại lợi nhuận kỳ vọng
+                match opp.opportunity_type {
+                    MevOpportunityType::Backrun => {
+                        // Simulation code for backrun profitability
+                        if let Some(target_tx) = &opp.target_transaction {
+                            // Kiểm tra xem giao dịch gốc đã được thực hiện chưa
+                            match adapter.get_transaction_status(&target_tx.hash).await {
+                                Ok(status) => {
+                                    if let crate::chain_adapters::evm_adapter::TransactionStatus::Success = status {
+                                        // Giao dịch đã được thực hiện, có thể không còn cơ hội
+                                        opp.status = MevOpportunityStatus::Expired;
+                                    }
+                                },
+                                Err(_) => {
+                                    // Lỗi khi kiểm tra, giả định vẫn còn cơ hội
+                                }
+                            }
+                        }
+                    },
+                    MevOpportunityType::Sandwich => {
+                        // Cập nhật profitability dựa trên trạng thái hiện tại của mempool
+                        if let Some(target_tx) = &opp.target_transaction {
+                            if let Some(analyzer) = self.mempool_analyzers.get(&opp.chain_id) {
+                                // Check if transaction is still in mempool
+                                match analyzer.is_transaction_in_mempool(&target_tx.hash).await {
+                                    Ok(in_mempool) => {
+                                        if !in_mempool {
+                                            // Không còn trong mempool, có thể đã được thực hiện hoặc hết hạn
+                                            opp.status = MevOpportunityStatus::Expired;
+                                        }
+                                    },
+                                    Err(_) => {
+                                        // Error when checking
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    // Handle other types...
+                    _ => {}
+                }
+            }
+        }
+
+        // Sắp xếp lại các cơ hội theo lợi nhuận
+        opportunities.sort_by(|a, b| b.expected_profit.partial_cmp(&a.expected_profit).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    
+    /// Thực thi các cơ hội MEV đã được đánh giá
+    async fn execute_opportunities(&self) {
+        // Lấy cấu hình hiện tại
+        let config = self.config.read().await;
+        if !config.auto_execute {
+            return; // Không thực hiện tự động
+        }
+
+        // Kiểm tra tốc độ thực hiện
+        {
+            let mut executions = self.executions_this_minute.write().await;
+            let now = Instant::now();
+            let last_exec = *self.last_execution.read().await;
+            
+            // Reset counter every minute
+            if now.duration_since(last_exec).as_secs() >= 60 {
+                *executions = 0;
+            }
+            
+            // Kiểm tra giới hạn thực hiện
+            if *executions >= config.max_executions_per_minute {
+                return; // Đã đạt giới hạn thực hiện trong phút
+            }
+            
+            *executions += 1;
+            *self.last_execution.write().await = now;
+        }
+
+        // Lấy danh sách cơ hội và chọn cơ hội tốt nhất để thực hiện
+        let mut opportunities = self.opportunities.write().await;
+        
+        // Chỉ xem xét cơ hội đã được phát hiện và chưa thực hiện
+        let executable_opportunities = opportunities.iter_mut()
+            .filter(|opp| opp.status == MevOpportunityStatus::Detected)
+            .filter(|opp| opp.expected_profit >= config.min_profit_threshold)
+            .filter(|opp| self.evm_adapters.contains_key(&opp.chain_id))
+            .take(1) // Chỉ lấy 1 cơ hội tốt nhất để thực hiện
+            .collect::<Vec<_>>();
+        
+        for opportunity in executable_opportunities {
+            let chain_id = opportunity.chain_id;
+            if let Some(adapter) = self.evm_adapters.get(&chain_id) {
+                // Đánh dấu là đang thực hiện
+                opportunity.status = MevOpportunityStatus::Executing;
+                
+                // Clone opportunity để sử dụng trong task
+                let opp_clone = opportunity.clone();
+                let adapter_clone = adapter.clone();
+                let self_clone = self.clone();
+                
+                // Tạo task riêng để thực hiện
+                tokio::spawn(async move {
+                    let result = self_clone.execute_single_opportunity(&opp_clone, &adapter_clone).await;
+                    let mut opportunities = self_clone.opportunities.write().await;
+                    
+                    // Tìm và cập nhật trạng thái cơ hội trong danh sách
+                    if let Some(opportunity) = opportunities.iter_mut().find(|o| o.id == opp_clone.id) {
+                        match result {
+                            Ok(profit) => {
+                                opportunity.status = MevOpportunityStatus::Executed;
+                                opportunity.actual_profit = Some(profit);
+                                info!("Successfully executed MEV opportunity {}, profit: {} ETH", opportunity.id, profit);
+                            },
+                            Err(error) => {
+                                opportunity.status = MevOpportunityStatus::Failed;
+                                error!("Failed to execute MEV opportunity {}: {}", opportunity.id, error);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+    
+    /// Thực hiện một cơ hội MEV
+    async fn execute_single_opportunity(&self, opportunity: &MevOpportunity, adapter: &Arc<EvmAdapter>) -> Result<f64, String> {
+        // Thực hiện giao dịch MEV dựa trên loại cơ hội
+        match opportunity.opportunity_type {
+            MevOpportunityType::Backrun => {
+                // Implement backrun execution logic
+                if let Some(tx_data) = &opportunity.bundle_data {
+                    // Send the backrun transaction
+                    let tx_hash = adapter.send_raw_transaction(tx_data).await
+                        .map_err(|e| format!("Failed to send backrun transaction: {}", e))?;
+                    
+                    // Wait for confirmation
+                    self.wait_for_transaction_confirmation(adapter, &tx_hash).await
+                        .map_err(|e| format!("Transaction failed: {}", e))?;
+                    
+                    // Calculate actual profit
+                    let profit = self.calculate_transaction_profit(adapter, &tx_hash).await
+                        .unwrap_or(0.0);
+                    
+                    return Ok(profit);
+                }
+            },
+            MevOpportunityType::Sandwich => {
+                // Implement sandwich execution logic
+                if let (Some(first_tx), Some(second_tx)) = (&opportunity.first_transaction, &opportunity.second_transaction) {
+                    // Send first transaction (front-run)
+                    let first_hash = adapter.send_raw_transaction(first_tx).await
+                        .map_err(|e| format!("Failed to send front-run transaction: {}", e))?;
+                    
+                    // Wait for target transaction to be included
+                    if let Some(target_tx) = &opportunity.target_transaction {
+                        self.wait_for_transaction_inclusion(adapter, &target_tx.hash).await
+                            .map_err(|e| format!("Target transaction failed: {}", e))?;
+                    }
+                    
+                    // Send second transaction (back-run)
+                    let second_hash = adapter.send_raw_transaction(second_tx).await
+                        .map_err(|e| format!("Failed to send back-run transaction: {}", e))?;
+                    
+                    // Calculate total profit
+                    let profit1 = self.calculate_transaction_profit(adapter, &first_hash).await
+                        .unwrap_or(0.0);
+                    let profit2 = self.calculate_transaction_profit(adapter, &second_hash).await
+                        .unwrap_or(0.0);
+                    
+                    return Ok(profit1 + profit2);
+                }
+            },
+            _ => {
+                return Err(format!("Unsupported opportunity type: {:?}", opportunity.opportunity_type));
+            }
+        }
+        
+        Err("Failed to execute opportunity: insufficient transaction data".to_string())
+    }
+    
+    /// Phân tích cơ hội MEV nâng cao từ mempool
+    async fn analyze_advanced_mempool_opportunities(&self, chain_id: u32, analyzer: &Arc<MempoolAnalyzer>) {
+        // Lấy adapter cho chain
+        let adapter = match self.evm_adapters.get(&chain_id) {
+            Some(adapter) => adapter,
+            None => return,
+        };
+        
+        // Chạy các phân tích chuyên biệt song song
+        let jit_future = self.analyze_jit_liquidity_opportunities(chain_id, analyzer, adapter);
+        let cross_domain_future = self.analyze_cross_domain_opportunities(chain_id, analyzer, adapter);
+        let backrunning_future = self.analyze_backrunning_opportunities(chain_id, analyzer, adapter);
+        
+        // Chạy tất cả phân tích đồng thời
+        let (_jit_result, _cross_domain_result, _backrunning_result): ((), (), ()) = tokio::join!(
+            jit_future, 
+            cross_domain_future,
+            backrunning_future
+        );
+    }
+    
+    /// Phân tích cơ hội JIT Liquidity
+    async fn analyze_jit_liquidity_opportunities(&self, _chain_id: u32, _analyzer: &Arc<MempoolAnalyzer>, _adapter: &Arc<EvmAdapter>) {
+        // Phân tích JIT Liquidity sẽ được triển khai trong tương lai
+        // Đây là placeholder cho chức năng này
+    }
+    
+    /// Phân tích cơ hội Cross-domain
+    async fn analyze_cross_domain_opportunities(&self, _chain_id: u32, _analyzer: &Arc<MempoolAnalyzer>, _adapter: &Arc<EvmAdapter>) {
+        // Phân tích Cross-domain sẽ được triển khai trong tương lai
+        // Đây là placeholder cho chức năng này
+    }
+    
+    /// Phân tích cơ hội Backrunning
+    async fn analyze_backrunning_opportunities(&self, _chain_id: u32, _analyzer: &Arc<MempoolAnalyzer>, _adapter: &Arc<EvmAdapter>) {
+        // Phân tích Backrunning sẽ được triển khai trong tương lai
+        // Đây là placeholder cho chức năng này
+    }
 } 
