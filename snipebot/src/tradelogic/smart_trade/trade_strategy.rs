@@ -1,0 +1,999 @@
+//! Trade strategy implementation for SmartTradeExecutor
+//!
+//! This module contains advanced trading strategies like dynamic trailing stop,
+//! dynamic take profit/stop loss, and automatic reaction to market conditions.
+
+// External imports
+use std::sync::Arc;
+use std::collections::HashMap;
+use anyhow::Result;
+use tracing::{debug, error, info, warn};
+
+// Internal imports
+use crate::chain_adapters::evm_adapter::EvmAdapter;
+use crate::types::TradeType;
+
+use super::executor::SmartTradeExecutor;
+use super::types::{TradeTracker};
+use super::constants::*;
+
+/// Cấu trúc lưu trữ dữ liệu thị trường để điều chỉnh TSL
+pub struct MarketData {
+    /// Biến động giá trung bình 24h (%)
+    pub volatility_24h: f64,
+    /// Tổng khối lượng giao dịch 24h
+    pub volume_24h: f64,
+    /// Loại thị trường (tăng/giảm/đi ngang)
+    pub market_trend: MarketTrend,
+    /// Thời gian giao dịch trung bình cho token này
+    pub avg_trade_duration: u64,
+    /// Biến động giá trung bình theo giờ (%)
+    pub hourly_volatility: Vec<f64>,
+}
+
+/// Loại xu hướng thị trường
+pub enum MarketTrend {
+    /// Thị trường tăng
+    Bullish,
+    /// Thị trường giảm
+    Bearish,
+    /// Thị trường đi ngang
+    Sideways,
+}
+
+/// Chiến lược Trailing Stop Loss thích ứng
+pub struct AdaptiveTSL {
+    /// Phần trăm TSL cơ bản
+    pub base_percentage: f64,
+    /// Điều chỉnh dựa trên biến động
+    pub volatility_adjustment: f64,
+    /// Điều chỉnh dựa trên khối lượng giao dịch
+    pub volume_adjustment: f64,
+    /// Điều chỉnh dựa trên thời gian giữ
+    pub time_adjustment: f64,
+    /// Điều chỉnh dựa trên tỷ lệ lợi nhuận hiện tại
+    pub profit_adjustment: f64,
+    /// Phần trăm TSL tối thiểu
+    pub min_percentage: f64,
+    /// Phần trăm TSL tối đa
+    pub max_percentage: f64,
+}
+
+impl AdaptiveTSL {
+    /// Tạo mới một AdaptiveTSL với các tham số mặc định
+    pub fn new() -> Self {
+        Self {
+            base_percentage: SMART_TRADE_TSL_PERCENT,
+            volatility_adjustment: 0.0,
+            volume_adjustment: 0.0,
+            time_adjustment: 0.0,
+            profit_adjustment: 0.0,
+            min_percentage: 1.0, // Tối thiểu 1%
+            max_percentage: 10.0, // Tối đa 10%
+        }
+    }
+    
+    /// Cập nhật điều chỉnh dựa trên biến động thị trường
+    pub fn adjust_for_volatility(&mut self, volatility_24h: f64) {
+        // Điều chỉnh phần trăm TSL dựa trên biến động
+        // Thị trường biến động cao -> tăng TSL để bảo vệ lợi nhuận nhanh hơn
+        const BASE_VOLATILITY: f64 = 5.0; // 5% là biến động cơ bản
+        
+        if volatility_24h > BASE_VOLATILITY {
+            // Tăng TSL khi biến động cao
+            self.volatility_adjustment = (volatility_24h - BASE_VOLATILITY) * 0.1;
+        } else {
+            // Giảm TSL khi biến động thấp
+            self.volatility_adjustment = (volatility_24h - BASE_VOLATILITY) * 0.05;
+        }
+    }
+    
+    /// Cập nhật điều chỉnh dựa trên khối lượng giao dịch
+    pub fn adjust_for_volume(&mut self, volume_24h: f64, avg_volume_24h: f64) {
+        // Điều chỉnh phần trăm TSL dựa trên khối lượng giao dịch
+        // Khối lượng cao hơn trung bình -> tăng TSL do khả năng biến động cao
+        if volume_24h > avg_volume_24h {
+            let volume_ratio = volume_24h / avg_volume_24h;
+            self.volume_adjustment = (volume_ratio - 1.0) * 0.5;
+            
+            // Giới hạn điều chỉnh tối đa
+            if self.volume_adjustment > 2.0 {
+                self.volume_adjustment = 2.0;
+            }
+        } else {
+            self.volume_adjustment = 0.0;
+        }
+    }
+    
+    /// Cập nhật điều chỉnh dựa trên thời gian giữ
+    pub fn adjust_for_hold_time(&mut self, current_hold_time: u64, optimal_hold_time: u64) {
+        // Điều chỉnh phần trăm TSL dựa trên thời gian giữ
+        // Thời gian càng dài -> TSL càng thấp để tối ưu lợi nhuận
+        if current_hold_time < optimal_hold_time {
+            // Mới giữ -> TSL cao hơn để bảo vệ
+            let time_ratio = current_hold_time as f64 / optimal_hold_time as f64;
+            self.time_adjustment = (1.0 - time_ratio) * 1.0;
+        } else {
+            // Đã giữ đủ lâu -> giảm TSL để tối ưu lợi nhuận
+            let time_ratio = current_hold_time as f64 / optimal_hold_time as f64;
+            self.time_adjustment = -((time_ratio - 1.0) * 0.5);
+            
+            // Giới hạn điều chỉnh tối đa
+            if self.time_adjustment < -2.0 {
+                self.time_adjustment = -2.0;
+            }
+        }
+    }
+    
+    /// Cập nhật điều chỉnh dựa trên lợi nhuận hiện tại
+    pub fn adjust_for_profit(&mut self, current_profit_percent: f64) {
+        // Điều chỉnh phần trăm TSL dựa trên lợi nhuận hiện tại
+        // Lợi nhuận càng cao -> TSL càng cao để bảo vệ
+        if current_profit_percent > 20.0 {
+            // Lợi nhuận lớn -> tăng TSL mạnh để bảo vệ
+            self.profit_adjustment = (current_profit_percent - 20.0) * 0.05;
+            
+            // Giới hạn điều chỉnh tối đa
+            if self.profit_adjustment > 3.0 {
+                self.profit_adjustment = 3.0;
+            }
+        } else if current_profit_percent > 10.0 {
+            // Lợi nhuận khá -> tăng TSL vừa phải
+            self.profit_adjustment = (current_profit_percent - 10.0) * 0.03;
+        } else {
+            self.profit_adjustment = 0.0;
+        }
+    }
+    
+    /// Điều chỉnh dựa trên xu hướng thị trường
+    pub fn adjust_for_market_trend(&mut self, trend: &MarketTrend) {
+        match trend {
+            MarketTrend::Bullish => {
+                // Thị trường tăng -> giảm TSL để tối ưu lợi nhuận
+                self.adjust_base_percentage(-0.5);
+            },
+            MarketTrend::Bearish => {
+                // Thị trường giảm -> tăng TSL để bảo vệ nhanh
+                self.adjust_base_percentage(1.0);
+            },
+            MarketTrend::Sideways => {
+                // Thị trường đi ngang -> giữ nguyên TSL
+            }
+        }
+    }
+    
+    /// Điều chỉnh phần trăm cơ bản
+    fn adjust_base_percentage(&mut self, amount: f64) {
+        self.base_percentage += amount;
+    }
+    
+    /// Tính toán phần trăm TSL cuối cùng sau khi áp dụng tất cả điều chỉnh
+    pub fn calculate_final_percentage(&self) -> f64 {
+        // Tổng hợp tất cả điều chỉnh
+        let adjusted_percentage = self.base_percentage 
+            + self.volatility_adjustment 
+            + self.volume_adjustment 
+            + self.time_adjustment 
+            + self.profit_adjustment;
+        
+        // Giới hạn trong khoảng min-max
+        if adjusted_percentage < self.min_percentage {
+            return self.min_percentage;
+        } else if adjusted_percentage > self.max_percentage {
+            return self.max_percentage;
+        }
+        
+        adjusted_percentage
+    }
+}
+
+/// Phân tích và quản lý chiến lược giao dịch
+pub struct TradeStrategyManager {
+    /// Dữ liệu thị trường để điều chỉnh chiến lược
+    market_data: HashMap<u32, HashMap<String, MarketData>>,
+    /// Chiến lược TSL thích ứng
+    adaptive_tsl: AdaptiveTSL,
+}
+
+impl TradeStrategyManager {
+    /// Tạo mới một TradeStrategyManager
+    pub fn new() -> Self {
+        Self {
+            market_data: HashMap::new(),
+            adaptive_tsl: AdaptiveTSL::new(),
+        }
+    }
+    
+    /// Cập nhật dữ liệu thị trường cho một token
+    pub fn update_market_data(&mut self, chain_id: u32, token_address: &str, data: MarketData) {
+        if !self.market_data.contains_key(&chain_id) {
+            self.market_data.insert(chain_id, HashMap::new());
+        }
+        
+        if let Some(chain_data) = self.market_data.get_mut(&chain_id) {
+            chain_data.insert(token_address.to_string(), data);
+        }
+    }
+    
+    /// Lấy dữ liệu thị trường cho một token
+    pub fn get_market_data(&self, chain_id: u32, token_address: &str) -> Option<&MarketData> {
+        if let Some(chain_data) = self.market_data.get(&chain_id) {
+            return chain_data.get(token_address);
+        }
+        None
+    }
+    
+    /// Tính toán phần trăm TSL cho một giao dịch dựa trên dữ liệu thị trường
+    pub fn calculate_tsl_percentage(&mut self, trade: &TradeTracker) -> f64 {
+        if let Some(market_data) = self.get_market_data(trade.chain_id, &trade.token_address) {
+            // Reset adaptive TSL
+            self.adaptive_tsl = AdaptiveTSL::new();
+            
+            // Tính thời gian giữ hiện tại
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs();
+            let hold_time = current_time - trade.entry_time;
+            
+            // Tính lợi nhuận hiện tại
+            let current_profit = if trade.entry_price > 0.0 {
+                (trade.highest_price - trade.entry_price) / trade.entry_price * 100.0
+            } else {
+                0.0
+            };
+            
+            // Điều chỉnh TSL dựa trên các yếu tố thị trường
+            self.adaptive_tsl.adjust_for_volatility(market_data.volatility_24h);
+            self.adaptive_tsl.adjust_for_market_trend(&market_data.market_trend);
+            self.adaptive_tsl.adjust_for_hold_time(hold_time, market_data.avg_trade_duration);
+            self.adaptive_tsl.adjust_for_profit(current_profit);
+            
+            // Tính toán TSL cuối cùng
+            return self.adaptive_tsl.calculate_final_percentage();
+        }
+        
+        // Nếu không có dữ liệu thị trường, trả về giá trị mặc định
+        SMART_TRADE_TSL_PERCENT
+    }
+    
+    /// Tính toán giá kích hoạt stop loss dựa trên giá cao nhất và phần trăm TSL
+    pub fn calculate_stop_price(&self, highest_price: f64, tsl_percentage: f64) -> f64 {
+        highest_price * (1.0 - tsl_percentage / 100.0)
+    }
+    
+    /// Xác định thời điểm tối ưu để bán dựa trên dữ liệu thị trường và lợi nhuận hiện tại
+    pub fn should_take_profit(&self, trade: &TradeTracker, current_price: f64) -> bool {
+        if let Some(market_data) = self.get_market_data(trade.chain_id, &trade.token_address) {
+            // Tính lợi nhuận hiện tại
+            let current_profit = if trade.entry_price > 0.0 {
+                (current_price - trade.entry_price) / trade.entry_price * 100.0
+            } else {
+                0.0
+            };
+            
+            // Tính thời gian giữ hiện tại
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs();
+            let hold_time = current_time - trade.entry_time;
+            
+            // Các quyết định dựa trên xu hướng thị trường và thời gian giữ
+            match market_data.market_trend {
+                MarketTrend::Bullish => {
+                    // Thị trường tăng, giữ lâu hơn nếu lợi nhuận tốt
+                    if current_profit >= trade.take_profit_percent * 1.5 {
+                        return true;
+                    }
+                    
+                    // Nếu giữ đủ lâu và có lời
+                    if hold_time >= SMART_TRADE_MAX_HOLD_TIME && current_profit > 0.0 {
+                        return true;
+                    }
+                },
+                MarketTrend::Bearish => {
+                    // Thị trường giảm, bán sớm hơn nếu có lời
+                    if current_profit >= trade.take_profit_percent * 0.8 {
+                        return true;
+                    }
+                    
+                    // Nếu giữ quá nửa thời gian tối đa và có lời
+                    if hold_time >= SMART_TRADE_MAX_HOLD_TIME / 2 && current_profit > 0.0 {
+                        return true;
+                    }
+                },
+                MarketTrend::Sideways => {
+                    // Thị trường đi ngang, bán khi đạt mục tiêu
+                    if current_profit >= trade.take_profit_percent {
+                        return true;
+                    }
+                }
+            }
+            
+            // Bán nếu đã giữ quá thời gian tối đa
+            if hold_time >= SMART_TRADE_MAX_HOLD_TIME {
+                return true;
+            }
+        } else {
+            // Nếu không có dữ liệu thị trường, áp dụng chiến lược mặc định
+            // Tính lợi nhuận hiện tại
+            let current_profit = if trade.entry_price > 0.0 {
+                (current_price - trade.entry_price) / trade.entry_price * 100.0
+            } else {
+                0.0
+            };
+            
+            // Tính thời gian giữ hiện tại
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs();
+            let hold_time = current_time - trade.entry_time;
+            
+            // Bán nếu đạt mục tiêu lợi nhuận
+            if current_profit >= trade.take_profit_percent {
+                return true;
+            }
+            
+            // Bán nếu đã giữ quá thời gian tối đa
+            if hold_time >= SMART_TRADE_MAX_HOLD_TIME {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Xác định thời điểm tối ưu để cắt lỗ dựa trên dữ liệu thị trường và lỗ hiện tại
+    pub fn should_stop_loss(&self, trade: &TradeTracker, current_price: f64) -> bool {
+        // Tính lỗ hiện tại
+        let current_loss = if trade.entry_price > 0.0 {
+            (trade.entry_price - current_price) / trade.entry_price * 100.0
+        } else {
+            0.0
+        };
+        
+        // Nếu lỗ vượt ngưỡng cắt lỗ
+        if current_loss >= trade.stop_loss_percent {
+            return true;
+        }
+        
+        false
+    }
+    
+    /// Kiểm tra nếu giá hiện tại kích hoạt trailing stop loss
+    pub fn is_tsl_triggered(&self, trade: &TradeTracker, current_price: f64, tsl_percentage: f64) -> bool {
+        if trade.highest_price > 0.0 {
+            let stop_price = self.calculate_stop_price(trade.highest_price, tsl_percentage);
+            return current_price <= stop_price;
+        }
+        
+        false
+    }
+    
+    /// Xác định chiến lược giao dịch tốt nhất dựa trên phân tích token và thị trường
+    pub fn determine_best_strategy(&self, token_address: &str, chain_id: u32) -> TradeStrategy {
+        if let Some(market_data) = self.get_market_data(chain_id, token_address) {
+            match market_data.market_trend {
+                MarketTrend::Bullish => {
+                    // Thị trường tăng, ưu tiên chiến lược thông minh
+                    TradeStrategy::Smart
+                },
+                MarketTrend::Bearish => {
+                    // Thị trường giảm, ưu tiên chiến lược nhanh
+                    TradeStrategy::Quick
+                },
+                MarketTrend::Sideways => {
+                    // Thị trường đi ngang, tùy thuộc vào biến động
+                    if market_data.volatility_24h > 10.0 {
+                        // Biến động cao, sử dụng chiến lược thông minh
+                        TradeStrategy::Smart
+                    } else {
+                        // Biến động thấp, sử dụng chiến lược nhanh
+                        TradeStrategy::Quick
+                    }
+                }
+            }
+        } else {
+            // Nếu không có dữ liệu thị trường, sử dụng chiến lược mặc định
+            TradeStrategy::Smart
+        }
+    }
+}
+
+/// Cấu trúc lưu trữ dữ liệu giá
+pub struct PriceData {
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+impl PriceData {
+    pub fn new(high: f64, low: f64, close: f64, volume: f64) -> Self {
+        Self {
+            high,
+            low,
+            close,
+            volume,
+        }
+    }
+}
+
+impl SmartTradeExecutor {
+    /// Xác định chiến lược giao dịch phù hợp
+    pub(crate) fn determine_trading_strategy(&self, token_status: &TokenStatus, trade_risk: &TradeRiskAnalysis) -> TradeStrategy {
+        // Nếu token an toàn và rủi ro thấp, dùng Smart
+        if token_status.evaluate_safety() == TokenSafety::Safe && trade_risk.risk_score < 30.0 {
+            TradeStrategy::Smart
+        } else {
+            // Nếu token vừa phải hoặc rủi ro trung bình, dùng Quick
+            TradeStrategy::Quick
+        }
+    }
+    
+    /// Tạo trailing stop động dựa trên volatility
+    /// 
+    /// Điều chỉnh trailing stop theo độ biến động của giá
+    /// 
+    /// # Parameters
+    /// - `trade`: Thông tin trade đang theo dõi
+    /// - `base_tsl_percent`: Phần trăm TSL cơ bản
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `f64`: Phần trăm TSL đã điều chỉnh
+    pub async fn dynamic_trailing_stop(&self, trade: &TradeTracker, base_tsl_percent: f64, adapter: &Arc<EvmAdapter>) -> Result<f64> {
+        let chain_id = trade.params.chain_id();
+        let token_address = &trade.params.token_address;
+        
+        // Lấy dữ liệu giá từ adapter
+        let price_data = adapter.get_token_price_history(token_address, chain_id).await?;
+        
+        // Chuyển đổi dữ liệu giá thành PriceData
+        let mut price_data_structs = Vec::new();
+        for chunk in price_data.chunks(4) {
+            if chunk.len() == 4 {
+                let high = chunk.iter().fold(0.0_f64, |a, &b| a.max(b));
+                let low = chunk.iter().fold(f64::MAX, |a, &b| if b > 0.0 { a.min(b) } else { a });
+                let close = *chunk.last().unwrap_or(&0.0);
+                let volume = chunk.iter().sum::<f64>() / chunk.len() as f64;
+                
+                price_data_structs.push(PriceData::new(high, low, close, volume));
+            }
+        }
+
+        // Tính toán ATR
+        let mut atr = 0.0;
+        for i in 1..price_data_structs.len() {
+            let high = price_data_structs[i].high;
+            let low = price_data_structs[i].low;
+            let prev_close = price_data_structs[i-1].close;
+            
+            // True Range = max(high - low, |high - prev_close|, |low - prev_close|)
+            let tr = (high - low).max((high - prev_close).abs()).max((low - prev_close).abs());
+            atr += tr;
+        }
+        atr /= price_data_structs.len() as f64;
+
+        // Tính toán biến động giá
+        let closes: Vec<f64> = price_data_structs.iter().map(|candle| candle.close).collect();
+        let mean_price: f64 = closes.iter().sum::<f64>() / closes.len() as f64;
+        
+        let sum_squared_diff: f64 = closes.iter()
+            .map(|&price| (price - mean_price).powi(2))
+            .sum();
+        let std_dev = (sum_squared_diff / closes.len() as f64).sqrt();
+        
+        // Tính toán xu hướng
+        let recent_prices: Vec<f64> = closes.iter().rev().take(5).cloned().collect();
+        let trend = if recent_prices.len() >= 2 {
+            let first = recent_prices.last().unwrap();
+            let last = recent_prices.first().unwrap();
+            (last - first) / first * 100.0
+        } else {
+            0.0
+        };
+
+        // Tính toán TSL dựa trên các chỉ số
+        let mut tsl_percent = base_tsl_percent;
+        
+        // Điều chỉnh theo ATR
+        if atr > 0.0 {
+            tsl_percent += atr * 0.5;
+        }
+        
+        // Điều chỉnh theo biến động
+        if std_dev > 0.0 {
+            tsl_percent += std_dev * 0.3;
+        }
+        
+        // Điều chỉnh theo xu hướng
+        if trend > 0.0 {
+            tsl_percent -= trend * 0.1; // Giảm TSL khi xu hướng tăng
+        } else {
+            tsl_percent += trend.abs() * 0.1; // Tăng TSL khi xu hướng giảm
+        }
+        
+        // Giới hạn TSL trong khoảng hợp lý
+        tsl_percent = tsl_percent.max(1.0).min(10.0);
+        
+        Ok(tsl_percent)
+    }
+
+    /// Điều chỉnh take profit và stop loss tự động
+    ///
+    /// Phương thức này sẽ điều chỉnh TP/SL dựa trên:
+    /// - Xu hướng thị trường
+    /// - Biến động giá gần đây
+    /// - Volume giao dịch
+    /// - Sự kiện on-chain (lệnh lớn, whale movement)
+    ///
+    /// # Parameters
+    /// - `trade`: Thông tin trade đang theo dõi
+    /// - `base_tp_percent`: % TP cơ bản
+    /// - `base_sl_percent`: % SL cơ bản
+    /// - `adapter`: EVM adapter
+    ///
+    /// # Returns
+    /// - (take_profit_percent, stop_loss_percent) - Cặp giá trị TP/SL đã điều chỉnh
+    pub async fn dynamic_tp_sl(&self, trade: &TradeTracker, base_tp_percent: f64, base_sl_percent: f64, adapter: &Arc<EvmAdapter>) -> (f64, f64) {
+        let chain_id = trade.params.chain_id();
+        let token_address = &trade.params.token_address;
+        
+        // Lấy dữ liệu giá 24h
+        let price_data = match adapter.get_price_history(token_address, 24).await {
+            Ok(data) => data,
+            Err(_) => {
+                warn!("Không thể lấy lịch sử giá cho token {}, sử dụng TP/SL cơ bản", token_address);
+                return (base_tp_percent, base_sl_percent);
+            }
+        };
+        
+        if price_data.len() < 10 {
+            warn!("Không đủ dữ liệu giá để điều chỉnh TP/SL cho token {}", token_address);
+            return (base_tp_percent, base_sl_percent);
+        }
+        
+        // Kiểm tra token đã vào sổ đen bởi các API bên ngoài không
+        let external_blacklisted = match self.fetch_external_token_data(token_address, &format!("{}", chain_id)).await {
+            Some(data) => data.get("is_blacklisted").map_or(false, |val| val == "true"),
+            None => false,
+        };
+        
+        // Vì price_data là mảng các giá trị f64, ta cần tính các giá trị high, low, close, volume từ dữ liệu giá
+        // Giả định price_data là mảng giá theo thời gian, thì:
+        let closes = price_data.clone(); // Dùng toàn bộ mảng giá làm closes
+        
+        // Tính giá cao nhất và thấp nhất trong từng khoảng thời gian (giả định mỗi 4 giá trị là 1 giờ)
+        let mut highs = Vec::new();
+        let mut lows = Vec::new();
+        
+        for chunk in price_data.chunks(4).filter(|c| !c.is_empty()) {
+            let high = chunk.iter().fold(0.0_f64, |a, &b| a.max(b));
+            let low = chunk.iter().fold(f64::MAX, |a, &b| if b > 0.0 { a.min(b) } else { a });
+            highs.push(high);
+            lows.push(if low == f64::MAX { *chunk.first().unwrap_or(&0.0) } else { low });
+        }
+        
+        // Giả lập volume data - trong thực tế cần lấy từ API riêng
+        let volumes: Vec<f64> = (0..closes.len()).map(|i| {
+            // Tạo volume giả lập dựa trên chỉ số
+            1000.0 + (((i as f64) * 0.1).sin() * 500.0)
+        }).collect();
+        
+        // Tính giá trung bình và biến động
+        let avg_price: f64 = closes.iter().sum::<f64>() / closes.len() as f64;
+        let current_price = *closes.last().unwrap_or(&avg_price);
+        
+        // Tính ATR (Average True Range)
+        let mut true_ranges = Vec::new();
+        for i in 1..highs.len().min(lows.len()) {
+            let high = highs[i];
+            let low = lows[i];
+            let prev_close = closes.get((i-1) * 4 + 3).unwrap_or(&closes[(i-1) * 4]);
+            
+            let tr = (high - low).max((high - prev_close).abs()).max((low - prev_close).abs());
+            true_ranges.push(tr);
+        }
+        
+        let atr_period = 14.min(true_ranges.len());
+        let atr: f64 = true_ranges.iter().take(atr_period).sum::<f64>() / atr_period as f64;
+        
+        // Tính biến động giá 24h
+        let highest_price = highs.iter().fold(0.0_f64, |a, &b| a.max(b));
+        let lowest_price = lows.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let price_range_percent = (highest_price - lowest_price) / lowest_price * 100.0;
+        
+        // Phân tích xu hướng
+        let recent_prices: Vec<f64> = closes.iter().rev().take(10).cloned().collect();
+        let is_uptrend = recent_prices.windows(2).filter(|w| w[0] > w[1]).count() > 7;
+        let is_downtrend = recent_prices.windows(2).filter(|w| w[0] < w[1]).count() > 7;
+        
+        // Phân tích volume
+        let recent_volumes: Vec<f64> = volumes.iter().rev().take(5).cloned().collect();
+        let avg_recent_volume: f64 = recent_volumes.iter().sum::<f64>() / recent_volumes.len() as f64;
+        let avg_volume: f64 = volumes.iter().sum::<f64>() / volumes.len() as f64;
+        let volume_ratio = avg_recent_volume / avg_volume;
+        
+        // Kiểm tra mempool để phát hiện swap lớn
+        let have_large_pending_sell = match self.mempool_analyzers.get(&chain_id) {
+            Some(_) => {
+                // Sử dụng phương thức từ EvmAdapter thay vì MempoolAnalyzer
+                match adapter.detect_large_pending_sells(token_address, 5.0).await {
+                    Ok((detected, _)) => detected,
+                    Err(_) => false
+                }
+            },
+            None => false,
+        };
+        
+        // Lấy dữ liệu on-chain (ví whale)
+        let (whale_activity, _) = self.whale_tracker(chain_id, token_address, WHALE_THRESHOLD_PERCENT, adapter).await;
+        
+        // Kiểm tra trạng thái token
+        let (has_risk, _, _) = self.comprehensive_analysis(chain_id, token_address, adapter).await;
+        
+        // Điều chỉnh TP/SL dựa trên phân tích
+        let mut adjusted_tp = base_tp_percent;
+        let mut adjusted_sl = base_sl_percent;
+        
+        // 1. Kiểm tra các yếu tố rủi ro cao, nếu có thì giảm TP và tăng SL (bán sớm)
+        if external_blacklisted || have_large_pending_sell || whale_activity || has_risk {
+            adjusted_tp *= 0.7; // Giảm mục tiêu lợi nhuận
+            adjusted_sl *= 0.6; // Giảm ngưỡng chịu lỗ (bán sớm hơn)
+            
+            debug!(
+                "Token {} - Phát hiện rủi ro: blacklisted={}, large_sells={}, whale_activity={}, token_risk={}",
+                token_address, external_blacklisted, have_large_pending_sell, whale_activity, has_risk
+            );
+        }
+        
+        // 2. Điều chỉnh theo ATR (biến động)
+        let atr_percent = atr / avg_price * 100.0;
+        
+        if atr_percent > 5.0 {
+            // Biến động lớn, tăng TP/SL theo tỷ lệ
+            let volatility_factor = (atr_percent / 5.0).min(3.0);
+            adjusted_tp *= volatility_factor;
+            adjusted_sl *= 0.9; // Giảm SL khi biến động cao
+            
+            debug!("Token {} - Biến động cao: ATR={}%, điều chỉnh TP x{}", 
+                   token_address, atr_percent, volatility_factor);
+        }
+        
+        // 3. Điều chỉnh theo xu hướng thị trường
+        if is_uptrend {
+            // Xu hướng tăng, tăng TP và giảm SL
+            adjusted_tp *= 1.3;
+            adjusted_sl *= 0.9;
+            debug!("Token {} - Xu hướng tăng, tăng TP", token_address);
+        } else if is_downtrend {
+            // Xu hướng giảm, giảm TP và tăng SL
+            adjusted_tp *= 0.7;
+            adjusted_sl *= 0.7; // Bán sớm khi giảm
+            debug!("Token {} - Xu hướng giảm, giảm TP & SL", token_address);
+        }
+        
+        // 4. Điều chỉnh theo volume
+        if volume_ratio > 2.0 {
+            // Volume tăng mạnh, có thể là pump
+            adjusted_tp *= 1.2; // Tăng TP để tận dụng
+            debug!("Token {} - Volume tăng mạnh: {}x trung bình", token_address, volume_ratio);
+        } else if volume_ratio < 0.5 {
+            // Volume thấp, không nhiều người quan tâm
+            adjusted_tp *= 0.8;
+            adjusted_sl *= 0.8; // Bảo thủ hơn
+            debug!("Token {} - Volume thấp: {}x trung bình", token_address, volume_ratio);
+        }
+        
+        // 5. Điều chỉnh dựa trên biến động giá 24h
+        if price_range_percent > 50.0 {
+            // Giá dao động mạnh, tăng TP (cơ hội lớn hơn)
+            adjusted_tp *= 1.5;
+            debug!("Token {} - Biến động giá lớn: {}% trong 24h", token_address, price_range_percent);
+        }
+        
+        // Giới hạn kết quả
+        let min_tp = base_tp_percent * 0.5;
+        let max_tp = base_tp_percent * 3.0;
+        let min_sl = base_sl_percent * 0.5;
+        let max_sl = base_sl_percent * 1.5;
+        
+        adjusted_tp = adjusted_tp.max(min_tp).min(max_tp);
+        adjusted_sl = adjusted_sl.max(min_sl).min(max_sl);
+        
+        info!(
+            "Token {} - TP/SL động: TP={:.2}% -> {:.2}%, SL={:.2}% -> {:.2}%", 
+            token_address, base_tp_percent, adjusted_tp, base_sl_percent, adjusted_sl
+        );
+        
+        (adjusted_tp, adjusted_sl)
+    }
+    
+    /// Auto-sell khi phát hiện bất thường
+    /// 
+    /// # Parameters
+    /// - `trade`: Thông tin trade đang theo dõi
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu phát hiện bất thường và tiến hành bán
+    /// - `String`: Lý do bán (nếu có)
+    pub async fn auto_sell_on_alert(&self, trade: &TradeTracker, adapter: &Arc<EvmAdapter>) -> (bool, String) {
+        let chain_id = trade.params.chain_id();
+        let token_address = &trade.params.token_address;
+        
+        let mut should_sell = false;
+        let mut reason = String::new();
+        
+        // Kiểm tra tax thay đổi
+        let (tax_changed, buy_tax, sell_tax) = self.detect_dynamic_tax(chain_id, token_address, adapter).await;
+        if tax_changed && sell_tax > MAX_SAFE_SELL_TAX {
+            should_sell = true;
+            reason = format!("Phát hiện sell tax tăng đột biến: {}%", sell_tax);
+        }
+        
+        // Kiểm tra liquidity
+        let (liquidity_risk, liquidity_reason) = self.detect_liquidity_risk(chain_id, token_address, adapter).await;
+        if liquidity_risk {
+            should_sell = true;
+            reason = format!("Rủi ro thanh khoản: {}", liquidity_reason);
+        }
+        
+        // Kiểm tra owner privilege
+        let (has_dangerous_privilege, privileges) = self.detect_owner_privilege(chain_id, token_address, adapter).await;
+        if has_dangerous_privilege && !privileges.is_empty() {
+            // Chỉ bán nếu phát hiện các privilege nguy hiểm nhất định
+            for privilege in &privileges {
+                if privilege.contains("mint") || privilege.contains("pause") || privilege.contains("blacklist") {
+                    should_sell = true;
+                    reason = format!("Phát hiện owner sử dụng quyền nguy hiểm: {}", privilege);
+                    break;
+                }
+            }
+        }
+        
+        // Kiểm tra blacklist
+        let is_blacklisted = self.detect_blacklist(chain_id, token_address, adapter).await;
+        if is_blacklisted {
+            should_sell = true;
+            reason = "Địa chỉ ví đã bị blacklist hoặc có nguy cơ bị blacklist".to_string();
+        }
+        
+        // Nếu cần bán, gọi hàm bán token
+        if should_sell {
+            self.log_trade_decision(
+                &trade.trade_id, 
+                token_address, 
+                super::types::TradeStatus::Pending, 
+                &format!("Auto sell triggered: {}", reason),
+                chain_id
+            ).await;
+            
+            // Lấy giá hiện tại
+            if let Ok(current_price) = adapter.get_token_price(token_address).await {
+                // Thực hiện bán token
+                self.sell_token(trade.clone(), reason.clone(), current_price).await;
+            }
+            
+            return (true, reason);
+        }
+        
+        (false, "No alerts detected".to_string())
+    }
+    
+    /// Theo dõi các ví lớn của token
+    /// 
+    /// # Parameters
+    /// - `chain_id`: ID của blockchain
+    /// - `token_address`: Địa chỉ token
+    /// - `whale_threshold`: Ngưỡng xác định whale (%)
+    /// - `adapter`: EVM adapter
+    /// 
+    /// # Returns
+    /// - `bool`: True nếu phát hiện whale bán
+    /// - `String`: Chi tiết về hoạt động của whale
+    pub async fn whale_tracker(&self, chain_id: u32, token_address: &str, whale_threshold: f64, adapter: &Arc<EvmAdapter>) -> (bool, String) {
+        let mut whale_selling = false;
+        let mut details = String::new();
+        
+        // Sử dụng EvmAdapter để lấy dữ liệu thay vì mempool analyzer
+        // Lấy tổng supply của token
+        if let Ok(total_supply) = adapter.get_token_total_supply(token_address).await {
+            // Lấy các giao dịch gần đây nhất từ adapter
+            if let Ok(transactions) = adapter.get_token_transactions(token_address, 20).await {
+                // Theo dõi các ví lớn bán token
+                for tx in transactions {
+                    // Kiểm tra xem là giao dịch bán không
+                    if tx.tx_type == crate::analys::mempool::TransactionType::Swap {
+                        // Lấy số dư của địa chỉ
+                        if let Ok(balance) = adapter.get_token_balance(token_address, &tx.from_address).await {
+                            // Tính phần trăm so với tổng supply
+                            let balance_percent = (balance / total_supply) * 100.0;
+                            
+                            // Nếu là whale (sở hữu >3% total supply)
+                            if balance_percent > whale_threshold {
+                                whale_selling = true;
+                                details = format!(
+                                    "Phát hiện whale {} bán {} token ({}% của total supply)",
+                                    tx.from_address, tx.token_amount.unwrap_or(0.0), balance_percent
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (whale_selling, details)
+    }
+    
+    /// Kiểm tra các bất thường của token đang trade và tự động bán nếu cần
+    pub async fn monitor_token_safety(&self) {
+        // Clone các giao dịch đang mở để xử lý bên ngoài lock
+        let active_trades: Vec<TradeTracker> = {
+            let trades = self.active_trades.read().await;
+            trades.clone()
+        };
+        
+        // Kiểm tra từng giao dịch đang mở
+        for trade in active_trades {
+            if trade.status != super::types::TradeStatus::Open {
+                continue;
+            }
+            
+            if let Some(adapter) = self.evm_adapters.get(&trade.chain_id) {
+                // 1. Kiểm tra honeypot
+                let is_honeypot = self.detect_honeypot(trade.chain_id, &trade.token_address, adapter).await;
+                if is_honeypot {
+                    self.auto_sell_on_alert(&trade, adapter).await;
+                    continue;
+                }
+                
+                // 2. Kiểm tra tax
+                let (is_dynamic_tax, buy_tax, sell_tax) = self.detect_dynamic_tax(trade.chain_id, &trade.token_address, adapter).await;
+                if is_dynamic_tax {
+                    self.auto_sell_on_alert(&trade, adapter).await;
+                    continue;
+                }
+                
+                // 3. Kiểm tra thanh khoản
+                let (liquidity_risk, details) = self.detect_liquidity_risk(trade.chain_id, &trade.token_address, adapter).await;
+                if liquidity_risk {
+                    self.auto_sell_on_alert(&trade, adapter).await;
+                    continue;
+                }
+                
+                // 4. Kiểm tra quyền owner
+                let (has_dangerous_privileges, privileges) = self.detect_owner_privilege(trade.chain_id, &trade.token_address, adapter).await;
+                if has_dangerous_privileges {
+                    self.auto_sell_on_alert(&trade, adapter).await;
+                    continue;
+                }
+                
+                // 5. Kiểm tra blacklist
+                let has_blacklist = self.detect_blacklist(trade.chain_id, &trade.token_address, adapter).await;
+                if has_blacklist {
+                    self.auto_sell_on_alert(&trade, adapter).await;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Bán token dựa trên các thông tin giao dịch
+    /// 
+    /// # Parameters
+    /// - `trade`: Thông tin giao dịch cần bán
+    /// - `reason`: Lý do bán token
+    /// - `current_price`: Giá token hiện tại
+    /// 
+    /// # Returns
+    /// - `Result<(), anyhow::Error>`: Kết quả thực hiện
+    pub async fn sell_token(&self, trade: TradeTracker, reason: String, current_price: f64) -> Result<(), anyhow::Error> {
+        info!("Bắt đầu bán token {} với lý do: {}", trade.token_address, reason);
+        
+        // Lấy adapter cho chain tương ứng
+        let adapter = match self.evm_adapters.get(&trade.chain_id) {
+            Some(adapter) => adapter,
+            None => return Err(anyhow::anyhow!("Không tìm thấy adapter cho chain {}", trade.chain_id)),
+        };
+        
+        // Tạo tham số giao dịch
+        let params = crate::types::TradeParams {
+            chain_id: trade.chain_id,
+            token_address: trade.token_address.clone(),
+            amount: trade.token_amount,
+            trade_type: crate::types::TradeType::Sell,
+            slippage: Some(2.0), // Slippage 2% mặc định cho lệnh bán khẩn cấp
+            gas_price: None,     // Sử dụng giá gas mặc định
+            deadline: None,      // Sử dụng deadline mặc định
+            custom_params: Default::default(),
+        };
+        
+        // Thực hiện giao dịch bán
+        match adapter.execute_sell_token(&trade.token_address, trade.token_amount, 2.0).await {
+            Ok(result) => {
+                // Cập nhật trạng thái giao dịch
+                self.update_trade_status(
+                    &trade.trade_id,
+                    super::types::TradeStatus::Completed,
+                    Some(result.tx_receipt.as_ref().map_or("unknown".to_string(), |r| r.transaction_hash.clone())),
+                    Some(reason),
+                    Some(current_price),
+                ).await;
+                
+                // Thêm vào lịch sử giao dịch
+                let profit_percent = if trade.entry_price > 0.0 {
+                    ((current_price - trade.entry_price) / trade.entry_price) * 100.0
+                } else {
+                    0.0
+                };
+                
+                let trade_result = super::types::TradeResult {
+                    trade_id: trade.trade_id.clone(),
+                    entry_price: trade.entry_price,
+                    exit_price: Some(current_price),
+                    profit_percent: Some(profit_percent),
+                    profit_usd: Some(profit_percent * trade.invested_amount / 100.0),
+                    entry_time: trade.entry_time,
+                    exit_time: Some(chrono::Utc::now().timestamp() as u64),
+                    status: super::types::TradeStatus::Completed,
+                    exit_reason: Some(reason),
+                    gas_cost_usd: result.gas_cost_usd,
+                };
+                
+                let mut history = self.trade_history.write().await;
+                history.push(trade_result);
+                
+                Ok(())
+            },
+            Err(e) => {
+                error!("Không thể bán token {}: {}", trade.token_address, e);
+                
+                // Cập nhật trạng thái giao dịch thành thất bại
+                self.update_trade_status(
+                    &trade.trade_id,
+                    super::types::TradeStatus::Failed,
+                    None,
+                    Some(format!("Lỗi bán token: {}", e)),
+                    Some(current_price),
+                ).await;
+                
+                Err(anyhow::anyhow!("Không thể bán token: {}", e))
+            }
+        }
+    }
+    
+    /// Cập nhật trạng thái giao dịch
+    async fn update_trade_status(
+        &self, 
+        trade_id: &str, 
+        status: super::types::TradeStatus,
+        tx_hash: Option<String>,
+        reason: Option<String>,
+        price: Option<f64>,
+    ) {
+        let mut trades = self.active_trades.write().await;
+        if let Some(pos) = trades.iter().position(|t| t.trade_id == trade_id) {
+            let mut trade = trades[pos].clone();
+            trade.status = status;
+            
+            if let Some(hash) = tx_hash {
+                trade.sell_tx_hash = Some(hash);
+            }
+            
+            if let Some(exit_price) = price {
+                trade.highest_price = exit_price.max(trade.highest_price);
+            }
+            
+            trade.exit_reason = reason;
+            
+            // Cập nhật lại vào danh sách
+            trades[pos] = trade;
+        }
+    }
+}

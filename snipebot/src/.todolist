@@ -1,0 +1,40 @@
+# SnipeBot TradeLogic Professional Upgrade Roadmap
+
+## 1. Modular Architecture & Trait-based Design
+- [ ] Refactor all trading logic into clear modules: smart_trade, mev_logic, manual_trade, common/types
+- [ ] Ensure all strategies implement trait-based interfaces (MevBot, TradeExecutor, CrossDomainBridge...)
+- [ ] Separate config, types, and execution logic for each strategy
+
+## 2. MEV & Advanced Strategies
+- [ ] Expand MEV logic: Arbitrage, Sandwich, JIT Liquidity, Cross-domain, Liquidation, Order Flow Auction
+- [ ] Implement JIT Liquidity detection and execution (Uniswap V3, Balancer...)
+- [ ] Add cross-domain arbitrage (multi-chain price, bridge cost/time, risk)
+- [ ] Integrate liquidation detection for lending protocols (Aave, Compound...)
+- [ ] Add order flow auction and backrunning pipeline
+
+## 3. Risk Management & Behavior Analysis
+- [ ] Standardize risk_score calculation for all opportunities (profit, liquidity, time, bridging, incentive...)
+- [ ] Add config for max risk, min profit, capital allocation, whitelist/blacklist
+- [ ] Integrate trader behavior analysis (MEV, whale, arbitrageur, retail...)
+- [ ] Predict and avoid front-run, sandwich, and high-risk patterns
+
+## 4. Config, Async, Logging, Testing
+- [ ] Refactor all configs to have Default, clear doc, and easy extension
+- [ ] Ensure all state is thread-safe (tokio::sync::RwLock/Mutex, Send+Sync+'static)
+- [ ] Add detailed logging for all error paths, no unwrap/expect
+- [ ] Add unit/integration tests for all critical logic
+
+## 5. Documentation & Code Quality
+- [ ] Add/complete doc comment for all public trait/struct/function (English)
+- [ ] Follow import/type annotation/order conventions strictly
+- [ ] Regularly run clippy, fmt, and static analysis
+
+## 6. Extensibility & User Customization
+- [ ] Allow user to enable/disable each strategy via config
+- [ ] Design plugin system for custom strategies
+- [ ] Document how to add new strategy module
+
+## 7. References & Inspiration
+- [ ] Study and adapt ideas from: Flashbots, Rook, CowSwap, Hummingbot, open-source DeFi bots
+
+# End of Roadmap

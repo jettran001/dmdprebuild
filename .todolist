@@ -1,0 +1,170 @@
+# - Unibot: https://unibot.ai/
+# - Maestro: https://maestro.ai/
+# - BananaGun: https://bananagun.io/
+# - MEV bots: https://github.com/flashbots/mev-inspect
+
+# Kế hoạch cải tiến logic smart_trade.rs (SnipeBot)
+# Tham khảo: TokenSniffer, GoPlus, StaySafu, RugDoc, DYOR, Unibot, Maestro, BananaGun, MEV bots
+
+## 1. Phân tích token nâng cao trước khi trade
+- [x] **Honeypot detection** (Hoàn thành: 2024-09-23)
+  - Mô tả: Kiểm tra khả năng bán token (simulate sell, check transfer restriction)
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status/utils.rs, smart_trade/executor.rs (hàm detect_honeypot)
+  - Ghi chú: Đã thêm simulate_sell_token vào EvmAdapter và ChainAdapter trait
+- [x] **Tax/fee detection** (Hoàn thành: 2024-09-23)
+  - Mô tả: Phát hiện tax ẩn, tax dynamic, tax tăng bất thường
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status/tax.rs, smart_trade/executor.rs (hàm detect_dynamic_tax)
+  - Ghi chú: Cải thiện phương thức detect_dynamic_tax và detect_hidden_fees
+- [x] **Blacklist/anti-bot/anti-whale** (Hoàn thành: 2024-09-24)
+  - Mô tả: Phát hiện contract có blacklist, anti-bot, anti-whale, max tx, max wallet
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status/blacklist.rs, smart_trade/executor.rs (hàm detect_blacklist, detect_anti_bot)
+  - Ghi chú: Đã thêm detect_blacklist và detect_anti_bot để phát hiện các giới hạn giao dịch
+- [x] **Proxy/upgradeable detection** (Hoàn thành: 2024-09-23)
+  - Mô tả: Phát hiện contract có thể upgrade, owner có quyền upgrade
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status/owner.rs, smart_trade/executor.rs (hàm detect_owner_privilege)
+  - Ghi chú: Tích hợp vào phương thức detect_owner_privilege để phát hiện proxy contract
+- [x] **Liquidity event risk** (Hoàn thành: 2024-09-23)
+  - Mô tả: Theo dõi pool lock/unlock, phát hiện pool bị rút thanh khoản
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status/liquidity.rs, smart_trade/executor.rs (hàm detect_liquidity_risk)
+  - Ghi chú: Cải thiện phương thức abnormal_liquidity_events và check_liquidity_lock
+- [x] **Owner privilege analysis** (Hoàn thành: 2024-09-23)
+  - Mô tả: Phát hiện owner có quyền mint, blacklist, set fee, disable trading
+  - Ưu tiên: Cao
+  - Module/hàm: analys/token_status/owner.rs, smart_trade/executor.rs (hàm detect_owner_privilege)
+  - Ghi chú: Mở rộng analyze_owner_privileges để kiểm tra quyền mint, burn, pause
+- [x] **External call detection** (Hoàn thành: 2024-09-23)
+  - Mô tả: Phát hiện contract gọi external contract (có thể bị rug)
+  - Ưu tiên: Trung bình
+  - Module/hàm: analys/token_status/utils.rs, smart_trade.rs (hàm detect_external_call)
+  - Ghi chú: Thêm hàm detect_external_call và detect_delegatecall để phát hiện các cuộc gọi bên ngoài
+
+## 2. Tối ưu hóa chiến lược giao dịch
+- [x] **Trailing stop động** (Hoàn thành: 2024-09-24)
+  - Mô tả: Điều chỉnh trailing stop theo volatility (ATR, Bollinger Band)
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/executor.rs (hàm dynamic_trailing_stop)
+  - Ghi chú: Đã thêm hàm dynamic_trailing_stop sử dụng ATR, Bollinger Bands và market data
+- [x] **Dynamic take profit/stop loss** (Hoàn thành: 2024-09-24)
+  - Mô tả: Tự động điều chỉnh TP/SL theo biến động giá, volume, on-chain event
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/executor.rs (hàm dynamic_tp_sl)
+  - Ghi chú: Đã thêm dynamic_tp_sl để tự động điều chỉnh TP/SL dựa trên nhiều yếu tố thị trường
+- [x] **Auto sell khi phát hiện bất thường** (Hoàn thành: 2024-09-23)
+  - Mô tả: Nếu phát hiện pool unlock, owner đổi, tax tăng, v.v. thì auto sell ngay lập tức
+  - Ưu tiên: Cao
+  - Module/hàm: smart_trade/executor.rs (hàm auto_sell_on_alert)
+  - Ghi chú: Đã thêm auto_sell_on_alert để kích hoạt bán khi phát hiện vấn đề
+- [x] **Whale tracking** (Hoàn thành: 2024-09-24)
+  - Mô tả: Theo dõi ví lớn, nếu phát hiện whale bán mạnh thì auto sell
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/executor.rs (hàm whale_tracker)
+  - Ghi chú: Đã thêm whale_tracker để theo dõi hoạt động của ví lớn và đưa ra quyết định bán
+- [x] **Batch transaction** (Hoàn thành: 2024-09-24)
+  - Mô tả: Gom nhiều lệnh nhỏ thành 1 lệnh lớn để tiết kiệm gas
+  - Ưu tiên: Thấp
+  - Module/hàm: smart_trade/executor.rs (hàm batch_trade)
+  - Ghi chú: Đã thêm batch_trade và optimize_trade_order để gom và tối ưu thứ tự các giao dịch
+
+## 3. Cảnh báo & logging nâng cao
+- [x] **Alert real-time** (Hoàn thành: 2024-09-24)
+  - Mô tả: Gửi cảnh báo khi phát hiện bất thường (Telegram, Discord, Email)
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/executor.rs (hàm send_realtime_alert, analyze_and_alert)
+  - Ghi chú: Đã triển khai hệ thống cảnh báo thời gian thực với tích hợp Telegram, Discord và Email
+- [x] **Logging chi tiết** (Hoàn thành: 2024-09-23)
+  - Mô tả: Log lại toàn bộ quá trình phân tích, quyết định, lý do mua/bán/hủy
+  - Ưu tiên: Cao
+  - Module/hàm: smart_trade/executor.rs (đã thêm logging chi tiết)
+  - Ghi chú: Đã cải thiện logging cho tất cả các hàm phân tích mới thêm vào
+
+## 4. Tối ưu hóa hiệu suất & bảo mật
+- [x] **Async concurrency** (Hoàn thành: 2024-09-24)
+  - Mô tả: Tối ưu hóa các tác vụ async, tránh block thread
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/executor.rs (hàm run_concurrent_tasks, concurrent_token_analysis)
+  - Ghi chú: Đã triển khai các phương thức để chạy nhiều tác vụ đồng thời, tối ưu thời gian phân tích
+- [x] **Gas optimization** (Hoàn thành: 2024-09-24)
+  - Mô tả: Ưu tiên các pool có gas thấp, tránh pool congested
+  - Ưu tiên: Thấp
+  - Module/hàm: smart_trade/optimizer.rs (GasOptimizer, select_optimal_pool)
+  - Ghi chú: Đã triển khai module optimizer mới với chức năng tối ưu hóa gas và lựa chọn pool tối ưu
+- [x] **Anti-MEV** (Hoàn thành: 2024-09-24)
+  - Mô tả: Phát hiện và tránh các giao dịch có khả năng bị front-run/back-run
+  - Ưu tiên: Trung bình
+  - Module/hàm: smart_trade/anti_mev.rs (AntiMevProtection, analyze_mempool_for_mev)
+  - Ghi chú: Đã triển khai hệ thống phát hiện và chống lại các MEV attacks như front-running và sandwich attack
+
+# Ghi chú:
+# - Ưu tiên thực hiện các đầu việc có priority "Cao" trước.
+# - Mỗi đầu việc nên có unit test và doc comment rõ ràng.
+# - Không trùng lặp logic giữa các module, chỉ tái sử dụng qua trait/service.
+
+# TODO: Kế hoạch giải quyết triệt để các lỗi PENDING về bridge cross-domain (2024-09-22)
+
+# === KẾ HOẠCH PHÂN TÍCH & ĐỀ XUẤT MODULE CHUNG BRIDGE CROSS-DOMAIN (2024-09-24) ===
+# (Bổ sung chi tiết cho mục TODO bridge cross-domain, tuân thủ .cursorrc)
+
+## Mục tiêu
+- Loại bỏ hoàn toàn trùng lặp enum, struct, trait, logic bridge giữa blockchain/src và snipebot/src
+- Chuẩn hóa kiểu dữ liệu (amount, token_id, ...)
+- Đảm bảo mọi thay đổi tuân thủ .cursorrc, không tạo file/module mới khi chưa xác nhận
+- Đảm bảo đồng bộ manifest, doc, test, CI/CD
+
+## Giai đoạn 1: Phân tích & Đề xuất module chung
+- Liệt kê các định nghĩa trùng lặp giữa blockchain/src/processor/bridge_orchestrator.rs và snipebot/src/chain_adapters/bridge_adapter.rs:
+  - enum Chain, BridgeStatus
+  - struct FeeEstimate, BridgeTransaction, MonitorConfig
+  - Logic chuyển đổi chain ID, monitor giao dịch, trait BridgeProvider
+  - BridgeClient (API client), các hàm estimate_fee, get_transaction_status, retry_relay
+- Đánh giá khác biệt kiểu dữ liệu:
+  - amount: U256 (blockchain) <-> String (snipebot) ⇒ Đề xuất dùng String
+  - token_id: u64 (blockchain) <-> String (snipebot) ⇒ Đề xuất dùng String
+- Đề xuất tạo module chung: common/src/bridge_types/
+  - chain.rs: enum Chain + methods
+  - status.rs: enum BridgeStatus
+  - types.rs: FeeEstimate, MonitorConfig
+  - transaction.rs: BridgeTransaction
+  - providers.rs: trait BridgeProvider, BridgeClient, BridgeMonitor
+  - monitor.rs: logic monitor giao dịch chung
+- Đề xuất API interface chuẩn (trait):
+  - BridgeProvider, BridgeClient, BridgeMonitor (async_trait, Result<T, anyhow::Error>)
+- Mapping kiểu dữ liệu chuẩn hóa:
+  | Trường         | Kiểu dữ liệu đề xuất |
+  |---------------|----------------------|
+  | amount        | String               |
+  | token_id      | String               |
+- Lưu ý: Chỉ thực hiện khi được xác nhận tạo file/module mới. Khi được phép, di chuyển toàn bộ định nghĩa trùng lặp vào module chung, cập nhật import, chuẩn hóa API, validate, doc, test, manifest.
+
+## Giai đoạn 2: Thực thi module chung (chỉ khi được xác nhận)
+- Tạo module chung theo thiết kế đã duyệt (ví dụ: common/bridge_types)
+- Di chuyển toàn bộ enum, struct, trait, function trùng lặp vào module chung
+- Refactor blockchain/src/processor/bridge_orchestrator.rs và snipebot/src/chain_adapters/bridge_adapter.rs để chỉ sử dụng từ module chung
+- Xóa toàn bộ định nghĩa trùng lặp ở các file cũ
+- Đảm bảo không còn bất kỳ logic bridge, enum, struct, trait nào bị lặp lại ở hai domain
+- Cập nhật manifest.rs, doc comment, tài liệu kỹ thuật
+- Viết lại/đồng bộ unit test, integration test cho module chung
+- Chạy lại toàn bộ test, clippy, static analysis, CI/CD
+
+## Giai đoạn 3: Chuẩn hóa API, kiểu dữ liệu, bảo mật
+- Chuẩn hóa toàn bộ API interface, kiểu dữ liệu (amount: String/U256, token_id: String/u64, ...)
+- Đảm bảo mọi API đều validate input/output, log lỗi đúng chuẩn
+- Thêm middleware bảo mật (auth, rate limit) cho các API bridge nếu cần
+- Cập nhật tài liệu API, ví dụ sử dụng, flow cross-domain
+- Đảm bảo backward compatibility nếu có client cũ
+
+## Giai đoạn 4: Kiểm thử, đồng bộ hóa, hoàn thiện
+- Viết lại toàn bộ test cho các flow cross-domain (unit, integration, e2e)
+- Đảm bảo đồng bộ manifest, doc, test, CI/CD
+- Review code, checklist lại toàn bộ quy tắc .cursorrc
+- Lập báo cáo hoàn thành, cập nhật lại .bugs, .todolist, manifest
+
+## Lưu ý
+- Không được tự ý tạo file/module mới khi chưa xác nhận
+- Mọi thay đổi phải cập nhật manifest, doc, test, CI/CD
+- Ưu tiên refactor từng bước nhỏ, test liên tục
+- Nếu phát hiện vấn đề mới, cập nhật lại .bugs và .todolist

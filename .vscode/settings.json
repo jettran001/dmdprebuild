@@ -1,0 +1,16 @@
+{
+    "terminal.integrated.sendKeybindingsToShell": true,
+    "terminal.integrated.scrollback": 5000,
+    "terminal.integrated.shellIntegration.history": 0,
+    "cursor.composer.shouldQueueWhenGenerating": false,
+    "editor.cursorBlinking": "blink",
+    "diffEditor.renderSideBySideInlineBreakpoint": 2000,
+    "editor.quickSuggestionsDelay": 100,
+    "workbench.commandPalette.history": 500,
+    "workbench.commandPalette.preserveInput": true,
+    "workbench.editorLargeFileConfirmation": 10240,
+    "workbench.hover.delay": 25000,
+    "workbench.localHistory.maxFileEntries": 500,
+    "workbench.localHistory.maxFileSize": 2560,
+    "workbench.localHistory.mergeWindow": 100
+}

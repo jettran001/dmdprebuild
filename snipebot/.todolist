@@ -1,0 +1,112 @@
+# Kế hoạch phân tách src/tradelogic/smart_trade/executor.rs
+
+## Mục tiêu
+- Phân tách file lớn `src/tradelogic/smart_trade/executor.rs` (17500+ dòng) thành thư mục `src/tradelogic/smart_trade/executor` với nhiều module nhỏ chuyên biệt
+- Giảm độ phức tạp code và tăng khả năng bảo trì
+- Tuân thủ quy tắc trait-based design từ `.cursorrc`
+
+## Cấu trúc thư mục mới
+```
+src/tradelogic/smart_trade/executor/
+├── mod.rs              # Re-export và khởi tạo executor
+├── core.rs             # Struct chính SmartTradeExecutor và TradeExecutor trait implementation
+├── trade_handler.rs    # Logic xử lý giao dịch cụ thể (mua, bán, swap)
+├── market_monitor.rs   # Logic giám sát thị trường và giá cả
+├── risk_manager.rs     # Logic quản lý rủi ro và đánh giá an toàn
+├── position_manager.rs # Logic quản lý vị thế giao dịch
+├── strategy.rs         # Các chiến lược giao dịch
+├── utils.rs            # Các tiện ích phụ trợ
+└── types.rs            # Các kiểu dữ liệu nội bộ
+```
+
+## Phân tách chi tiết
+
+### 1. mod.rs (200 dòng)
+- Re-export tất cả các module con
+- Các hàm factory để tạo và cấu hình executor
+
+### 2. core.rs (800 dòng)
+- Định nghĩa struct `SmartTradeExecutor`
+- Triển khai trait `TradeExecutor`
+- Các hàm khởi tạo và lifecycle (new, start, stop)
+- Đăng ký với coordinator
+
+### 3. trade_handler.rs (2000 dòng)
+- Logic xử lý các giao dịch
+- Các hàm execute_trade, create_trade_tracker
+- Các hàm simulate_trade, verify_trade
+- Tất cả các phương thức liên quan đến việc thực hiện giao dịch
+
+### 4. market_monitor.rs (1500 dòng)
+- Logic giám sát thị trường
+- Vòng lặp monitor_loop
+- Phát hiện cơ hội thị trường
+- Tracking giá cả và biến động
+
+### 5. risk_manager.rs (2500 dòng)
+- Đánh giá rủi ro token
+- Phân tích token và contract
+- Phát hiện scam và honeypot
+- Đánh giá an toàn của giao dịch
+- Đề xuất giao dịch dựa trên phân tích rủi ro
+
+### 6. position_manager.rs (1000 dòng)
+- Quản lý vị thế giao dịch
+- Trailing stop loss và take profit
+- Tính toán profit/loss
+- Quản lý vị thế đang mở
+
+### 7. strategy.rs (1500 dòng)
+- Triển khai các chiến lược giao dịch
+- Logic DCA, grid trading, TWAP
+- Các thuật toán tối ưu timing và entry/exit
+
+### 8. utils.rs (700 dòng)
+- Các hàm tiện ích cho executor
+- Xử lý sự kiện blockchain
+- Format và parsing dữ liệu
+- Các tiện ích phụ trợ khác
+
+### 9. types.rs (300 dòng)
+- Struct và enum cho executor
+- Các type alias và kiểu dữ liệu nội bộ
+- Không bao gồm các kiểu được định nghĩa bên ngoài module
+
+## Kế hoạch triển khai
+
+### Bước 1: Chuẩn bị
+- [ ] Tạo thư mục `src/tradelogic/smart_trade/executor`
+- [ ] Tạo file `mod.rs` với các re-export cần thiết
+- [ ] Phân tích cấu trúc file hiện tại để xác định ranh giới module
+
+### Bước 2: Tạo framework
+- [ ] Tạo 9 file trong thư mục theo cấu trúc đã nêu
+- [ ] Định nghĩa struct và trait chính trong các file
+- [ ] Đảm bảo code biên dịch được
+
+### Bước 3: Di chuyển code
+- [ ] Di chuyển struct `SmartTradeExecutor` và trait implementations vào `core.rs` 
+- [ ] Di chuyển logic giao dịch vào `trade_handler.rs`
+- [ ] Di chuyển logic giám sát thị trường vào `market_monitor.rs`
+- [ ] Di chuyển logic quản lý rủi ro vào `risk_manager.rs`
+- [ ] Di chuyển quản lý vị thế vào `position_manager.rs`
+- [ ] Di chuyển các chiến lược giao dịch vào `strategy.rs`
+- [ ] Di chuyển các tiện ích vào `utils.rs`
+- [ ] Di chuyển các kiểu dữ liệu vào `types.rs`
+
+### Bước 4: Kết nối
+- [ ] Sửa đổi các tham chiếu xuyên module
+- [ ] Cập nhật import paths
+- [ ] Xác định và make public các API cần thiết
+- [ ] Sử dụng dependency injection cho các module
+
+### Bước 5: Kiểm tra và tối ưu hóa
+- [ ] Kiểm tra code biên dịch
+- [ ] Kiểm tra các lỗi logic
+- [ ] Kiểm tra các rò rỉ bộ nhớ hoặc deadlock tiềm ẩn
+- [ ] Tối ưu hóa các dependency giữa các module
+
+### Bước 6: Cập nhật tài liệu
+- [ ] Cập nhật doc-comments cho mỗi module
+- [ ] Mô tả quy tắc và trách nhiệm của từng module
+- [ ] Cập nhật manifest.rs để phản ánh cấu trúc mới
