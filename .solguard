@@ -1,0 +1,333 @@
+<<<<<<< HEAD
+// SolGuard - Quy tắc chuẩn hóa & bảo mật cho smart contract DiamondChain (phiên bản LayerZero)
+// Version: 2.0.0
+// Ngày cập nhật: 2024-07-20
+
+/**
+ * =======================================================
+ * I. NGUYÊN TẮC TÍCH HỢP LAYERZERO (BẮT BUỘC)
+ * =======================================================
+ * - KHÔNG tự code lại các logic đã được LayerZero enforce: trustedRemote validation, endpoint validation, replay protection, message routing, message ordering, endpoint ownership, cross-chain security.
+ * - Chỉ sử dụng các API, endpoint, trustedRemote, và message flow đúng chuẩn LayerZero.
+ * - Không override hoặc can thiệp vào các cơ chế bảo mật của LayerZero.
+ * - Không yêu cầu dev tự code lại replay protection, trustedRemote check, endpoint check, message delivery, v.v.
+ * - Mọi logic bảo mật cross-chain đã được LayerZero đảm bảo ở tầng protocol.
+ */
+
+/**
+ * =======================================================
+ * II. QUY TẮC BỔ SUNG CHO LOGIC BRIDGE (BẮT BUỘC)
+ * =======================================================
+ */
+
+1. LIMIT, FEE, RATE:
+   - Chuẩn hóa cấu trúc lưu trữ limit, fee, rate (BridgeConfig hoặc tương đương).
+   - Mọi giao dịch bridge phải kiểm tra limit/fee/rate ở tầng logic bridge (không phụ thuộc vào LayerZero).
+   - Có event khi thay đổi limit/fee/rate.
+
+2. EVENT LOGIC:
+   - Chuẩn hóa event cho các thao tác logic: bridge, unwrap, rescue, emergency, failed, retry.
+   - Event phải có bridgeId, sender, receiver, amount, timestamp, status.
+   - Không cần emit lại event cho các thao tác đã được LayerZero emit.
+
+3. MULTI-SIG & TIMELOCK:
+   - Bắt buộc cho các thao tác ngoài phạm vi LayerZero: rút tiền, rescue, cập nhật fee/limit.
+   - Multi-sig: yêu cầu >=2 admin xác nhận.
+   - Timelock: delay tối thiểu 24h cho các thao tác nhạy cảm.
+   - Emit event khi bắt đầu và hoàn thành thao tác.
+
+4. RESCUE, STUCK, EMERGENCY (NỘI BỘ):
+   - Chỉ áp dụng cho các trường hợp token stuck do logic nội bộ (không áp dụng cho message stuck ở LayerZero).
+   - Có timeout, limit, quyền kiểm soát rõ ràng.
+   - Emit event cho mọi thao tác rescue, stuck, emergency.
+
+5. TESTING & AUDIT:
+   - Đảm bảo test coverage và audit cho phần logic bridge (limit, fee, event, multi-sig, rescue, v.v.).
+   - Không cần test lại các tính năng đã được LayerZero audit.
+
+6. DOCUMENTATION:
+   - Mọi thay đổi logic bridge phải cập nhật vào tài liệu kỹ thuật, .solguard, .bugs.
+   - Ghi rõ phạm vi trách nhiệm giữa LayerZero (protocol) và logic bridge (application).
+
+/**
+ * =======================================================
+ * III. GHI CHÚ VỀ PHẠM VI TRÁCH NHIỆM
+ * =======================================================
+ * - LayerZero chịu trách nhiệm bảo mật, xác thực, relay, replay protection, message routing, endpoint, cross-chain security.
+ * - Logic bridge chỉ chịu trách nhiệm về limit, fee, event, multi-sig, rescue, và các thao tác nội bộ không thuộc phạm vi LayerZero.
+ * - Nếu có thay đổi lớn ở LayerZero, phải review lại toàn bộ logic bridge để đảm bảo tương thích.
+ */
+=======
+// SolGuard - Quy tắc chuẩn hóa và bảo mật cho smart contract DiamondChain
+// Version: 1.0.0
+// Ngày cập nhật: 2024-07-15
+>>>>>>> 9885b0ca0cc72ab80191a810cbab6f59610c4c39
+
+/**
+ * =======================================================
+ * I. QUY TẮC CHUẨN HÓA CHUNG
+ * =======================================================
+ */
+
+1. PHIÊN BẢN SOLIDITY:
+   - Bắt buộc sử dụng phiên bản Solidity 0.8.20 cho tất cả contract.
+   - Luôn ghi rõ phiên bản cụ thể (pragma solidity 0.8.20;), không sử dụng phạm vi (pragma solidity ^0.8.0;).
+   - Không import từ các thư viện có phiên bản Solidity khác với 0.8.20.
+
+2. THƯ VIỆN TIÊU CHUẨN:
+   - Sử dụng OpenZeppelin Contracts phiên bản 5.0.0.
+   - Sử dụng LayerZero phiên bản 0.8.0.
+   - Sử dụng Wormhole phiên bản 0.9.0.
+   - Không được thêm thư viện bên ngoài khác nếu chưa được kiểm tra an ninh.
+
+3. CẤU TRÚC THƯ MỤC & FILE:
+   - Đặt các interface vào thư mục riêng (./interfaces/ hoặc subdirectory tương ứng).
+   - Đặt các library vào thư mục riêng (./libraries/).
+   - Tên file phải khớp với tên contract chính trong file.
+   - Các contract liên quan phải được tổ chức trong cùng một thư mục.
+
+4. ĐẶT TÊN & PHONG CÁCH CODE:
+   - Sử dụng tiếng anh cho tất cả smartcontract, bao gồm comment.
+   - Contract: PascalCase (VD: BridgeAdapter)
+   - Functions: camelCase (VD: bridgeTo)
+   - Biến số: camelCase (VD: tokenAmount)
+   - Constants: UPPER_CASE_WITH_UNDERSCORES (VD: MAX_SUPPLY)
+   - Events: PascalCase (VD: TokenBridged)
+   - Modifiers: camelCase (VD: onlyAdmin)
+   - Enums: PascalCase (VD: BridgeStatus)
+   - Struct: PascalCase (VD: TokenInfo)
+   
+5. TỔ CHỨC FILE:
+   - Thứ tự: SPDX License, Pragma, Imports, Interfaces, Libraries, Errors, Contract
+   - Trong Contract: State variables, Events, Constructor, External, Public, Internal, Private
+   - Comment chức năng và tham số cho mỗi function.
+   - Các đoạn code liên quan nên được nhóm lại với nhau.
+
+/**
+ * =======================================================
+ * II. BẢO MẬT
+ * =======================================================
+ */
+
+1. KIỂM SOÁT QUYỀN TRUY CẬP:
+   - Luôn sử dụng AccessControl hoặc Ownable cho các hàm quan trọng.
+   - Với các hàm rút tiền/token, bắt buộc dùng đa chữ ký (multi-sig) hoặc timelock.
+   - Sử dụng enumerableSet để quản lý danh sách các địa chỉ được phép.
+   - Không sử dụng tx.origin cho kiểm soát quyền.
+   - Thêm cooldown giữa các lần rút tiền.
+
+2. TRÁNH FRONT-RUNNING & REENTRANCY:
+   - Bắt buộc sử dụng ReentrancyGuard cho tất cả hàm chuyển tiền/token.
+   - Tuân thủ quy tắc CEI (Check-Effects-Interactions).
+   - Sử dụng pattern pull payment thay vì push payment.
+   - Với bridgeProxy, không dùng approve + call trong cùng một hàm.
+
+3. KIỂM TRA ĐẦU VÀO:
+   - Kiểm tra zero address trước khi lưu trữ hoặc chuyển token.
+   - Kiểm tra số lượng và confirm số lượng đủ trước khi chuyển.
+   - Với bridgeTo và autoBridge, kiểm tra destination không rỗng.
+   - Kiểm tra feeCollector không phải zero address trước khi chuyển phí.
+
+<<<<<<< HEAD
+=======
+4. XÁCH THỰC MESSAGE & TRUSTED REMOTE:
+   - Với LayerZero, bắt buộc kiểm tra trustedRemote trước khi gửi và nhận.
+   - Với Wormhole, bắt buộc thiết lập emitter và kiểm tra.
+   - Lưu trữ mapping trustedRemotes trong storage và có hàm setter chỉ cho admin.
+   - Phải kiểm tra nguồn gốc message với trusted source (require đúng endpoint address).
+
+5. XỬ LÝ STUCK TOKEN & EMERGENCY:
+   - Thêm hàm emergencyWithdraw với cơ chế timelock.
+   - Thêm hàm pause/unpause cho các adapter và bridge interface.
+   - Có cơ chế cứu token bị kẹt nếu bridge không hoàn thành.
+   - Các hàm khẩn cấp phải được hạn chế bởi cả role và timelock.
+
+6. GIỚI HẠN BRIDGE:
+   - Thiết lập limitPerTx: Số lượng tối đa mỗi giao dịch.
+   - Thiết lập limitPerPeriod: Số lượng tối đa mỗi khoảng thời gian.
+   - Thiết lập limitPerAddress: Số lượng tối đa mỗi địa chỉ trong một khoảng thời gian.
+   - Có cơ chế tự động dừng bridge nếu phát hiện hoạt động bất thường.
+
+>>>>>>> 9885b0ca0cc72ab80191a810cbab6f59610c4c39
+/**
+ * =======================================================
+ * III. BRIDGE ADAPTER
+ * =======================================================
+ */
+
+1. CHUẨN HÓA INTERFACE:
+   - Tất cả adapter phải triển khai IBridgeAdapter chuẩn.
+   - IBridgeAdapter chỉ được định nghĩa một lần duy nhất ở bridge_adapter/IBridgeAdapter.sol.
+   - Không import nội tuyến IBridgeAdapter trong bridge_interface.sol.
+   - Phải có hàm getChainName(uint16 chainId) view returns (string memory).
+
+2. MAPPING CHAIN:
+   - Phải có mapping chainId to chainName chuẩn.
+   - Phải có mapping chainId to adapterSupported.
+   - Phải có hàm public để convert chainId <-> chainName.
+   - Phải có check chain supported trước khi bridge.
+
+3. KIỂM SOÁT PHÍ:
+   - Phải có phương thức cập nhật phí với giới hạn tối đa (fee cap).
+   - Phải emit event khi thay đổi phí.
+   - Phải lưu lịch sử thay đổi phí.
+   - Nên có cơ chế dynamic fee dựa trên thị trường.
+
+4. XỬ LÝ LỖI & LOGGING:
+   - Bắt buộc emit event với đầy đủ thông tin khi bridge thành công.
+   - Bắt buộc emit event BridgeFailed khi bridge thất bại với mã lỗi cụ thể.
+   - Phân loại cụ thể các mã lỗi (enum BridgeErrorCodes).
+   - Lưu transaction hash khi gửi/nhận bridge.
+
+/**
+ * =======================================================
+ * IV. BRIDGE INTERFACE
+ * =======================================================
+ */
+
+1. OVERRIDE FUNCTIONS:
+   - Hàm getTokenAddress() phải bắt buộc override ở contract con.
+   - Contract gốc phải revert với thông báo rõ ràng nếu hàm này được gọi.
+
+2. AUTO BRIDGE:
+   - Function autoBridge phải kiểm tra tất cả adapter trước khi chọn.
+   - Nếu không có adapter nào thỏa mãn, phải revert với thông báo rõ ràng.
+
+3. QUẢN LÝ ADAPTER:
+   - Khi registerBridge, phải kiểm tra adapter có triển khai đúng IBridgeAdapter không.
+   - Khi removeBridge, phải có cơ chế an toàn cho các giao dịch đang xử lý.
+   - Lưu lịch sử đăng ký/hủy adapter với timestamps.
+
+4. RÚT TIỀN:
+   - Các hàm withdrawETH và withdrawToken phải có timelock và đa chữ ký.
+   - Nên đặt limit cho việc rút tiền.
+   - Luôn emit event khi rút tiền với thông tin đầy đủ.
+
+/**
+ * =======================================================
+ * V. WRAPPED TOKEN
+ * =======================================================
+ */
+
+1. ERC20 WRAPPED DMD:
+   - Phải có các kiểm tra chặt chẽ cho mintWrapped và burnWrapped.
+   - Chỉ cho phép DMD token và bridgeProxy gọi các hàm này.
+   - Phải có kiểm tra số dư trước khi burn.
+   - Nên thêm role BRIDGE_ROLE thay vì hardcode địa chỉ bridge.
+
+2. ERC1155 WRAPPER:
+   - Phải lưu trữ token trong contract an toàn.
+   - Phải sử dụng ERC1155Holder để nhận token.
+   - Phải có kiểm tra số dư trước khi wrap và unwrap.
+   - Phải có hàm emergencyUnwrap cho user khi bridge bị tắt.
+
+/**
+ * =======================================================
+ * VI. TESTING & DEPLOYMENT
+ * =======================================================
+ */
+
+1. YÊU CẦU TESTING:
+   - Bắt buộc test tất cả các hàm với coverage 100%.
+   - Bắt buộc test các trường hợp biên (edge cases).
+   - Bắt buộc test các kịch bản tấn công.
+   - Bắt buộc test các tương tác giữa các contract.
+
+2. DEPLOYMENT:
+   - Phải sử dụng BridgeDeployer để deploy hệ thống.
+   - Phải kiểm tra kết quả deployment sau mỗi bước.
+   - Phải chuyển quyền sở hữu của tất cả các contract về admin sau khi deploy.
+   - Nên triển khai proxy pattern cho contract có thể nâng cấp.
+
+/**
+ * =======================================================
+ * VII. QUY TẮC CODE CỤ THỂ
+ * =======================================================
+ */
+
+1. REVERT MESSAGE:
+   - Bắt buộc có thông báo lỗi cụ thể cho mỗi revert.
+   - Thông báo nên theo format: "BridgeInterface: <lỗi cụ thể>".
+   - Nên sử dụng custom errors thay vì string trong Solidity 0.8.20.
+
+2. GAS OPTIMIZATION:
+   - Sử dụng biến immutable khi có thể.
+   - Gom các biến cùng kích thước để tiết kiệm storage slot.
+   - Sử dụng mapping thay vì array khi cần tìm kiếm.
+   - Tránh lặp qua arrays lớn trong các hàm view.
+
+3. SỬ DỤNG TÀI NGUYÊN:
+   - Giới hạn kích thước payload để tránh OOG (Out of Gas).
+   - Kiểm tra kỹ msg.value với phí ước tính.
+   - Trả lại phí dư thừa cho user.
+   - Lưu ý về các giới hạn byte của các bridge protocol.
+
+4. ERROR HANDLING:
+   - Sử dụng try/catch cho các external calls.
+   - Lưu log chi tiết khi gặp lỗi từ external calls.
+   - Tách các trường hợp lỗi khác nhau với revert riêng biệt.
+
+/**
+ * =======================================================
+ * VIII. BẮT BUỘC SỬA CÁC LỖI ĐÃ BIẾT
+ * =======================================================
+ */
+
+1. BRIDGE_INTERFACE.SOL:
+   - Sửa lỗi trùng lặp định nghĩa IBridgeAdapter.
+   - Sửa lỗi hàm getTokenAddress() trả về address(0).
+   - Sửa lỗi kiểm tra feeCollector khi tính phí.
+   - Thêm multi-sig cho rút tiền (withdrawETH, withdrawToken).
+
+2. WORMHOLE_ADAPTER.SOL:
+   - Thêm modifier onlyOwner cho updateWormholeAddress và updateConsistencyLevel.
+   - Thêm kiểm tra trusted remote khi gửi/nhận message.
+
+3. LAYER_ZERO_ADAPTER.SOL:
+   - Thêm kiểm tra trusted remote khi gửi message.
+   - Cải thiện kiểm tra trusted remote trong _nonblockingLzReceive.
+
+4. ERC1155_BRIDGE_ADAPTER.SOL:
+   - Cho phép owner cập nhật mapping supportedChains động.
+   - Thêm hàm emergency withdraw cho token bị kẹt.
+
+5. ERC20_WRAPPEDDMD.SOL:
+   - Sửa hàm bridgeToNear để tránh front-running và reentrancy.
+
+6. ERC1155_WRAPPER.SOL:
+   - Thêm ReentrancyGuard cho hàm unwrap.
+
+7. CUSTOM_ADAPTER_TEMPLATE.SOL:
+   - Thêm mapping chainId → tên chain chuẩn hóa.
+   - Thêm hướng dẫn về kiểm soát quyền admin/owner.
+   - Thêm hướng dẫn về kiểm soát phí.
+
+8. ERC1155_UNWRAPPER_NEAR.RS:
+   - Thêm cơ chế rollback khi unwrap thất bại hoặc payload lỗi.
+   - Thêm kiểm tra và log chi tiết khi unwrap.
+
+/**
+ * =======================================================
+ * IX. QUY TẮC CHO NGƯỜI REVIEW CODE
+ * =======================================================
+ */
+
+1. CHECKLIST REVIEW:
+   - Kiểm tra tuân thủ tất cả quy tắc trong tài liệu này.
+   - Kiểm tra khả năng bị tấn công reentrancy.
+   - Kiểm tra các lỗi về kiểm soát truy cập.
+   - Kiểm tra xác thực trusted remote.
+   - Kiểm tra xử lý lỗi và log.
+   - Kiểm tra giới hạn bridge và kiểm soát phí.
+   - Kiểm tra khả năng mở rộng và tương thích.
+
+2. WORKFLOW REVIEW:
+   - Phải review code trước khi merge vào nhánh chính.
+   - Phải có ít nhất 2 người review mỗi PR.
+   - Phải chạy static analyzer (Slither, Mythril) trước khi approve.
+   - Phải fix tất cả các warning từ analyzer.
+
+3. DOCUMENTATION:
+   - Mọi thay đổi phải được cập nhật vào tài liệu kỹ thuật.
+   - Mọi lỗi đã fix phải được cập nhật vào .bugs.
+   - Mọi quy tắc mới phải được cập nhật vào .solguard.

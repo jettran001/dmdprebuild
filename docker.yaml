@@ -1,0 +1,14 @@
+services:
+  snipebot:
+    image: diamond/snipebot:latest
+    environment:
+      COMMON_API_URL: https://common.diamondchain.net
+      NODE_ROLE: "executor"
+    restart: always
+
+  wallet:
+    image: diamond/wallet:latest
+    environment:
+      COMMON_API_URL: https://common.diamondchain.net
+      NODE_ROLE: "signer"
+    restart: always

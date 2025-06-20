@@ -1,0 +1,123 @@
+# Cấu hình mạng
+core:
+  node_id: "node-001"
+  node_type: "Master"
+  network_id: "network-main"
+  host: "127.0.0.1"
+  port: 8080
+  listen_address: "0.0.0.0:9000"
+  bootstrap_nodes:
+    - "/ip4/127.0.0.1/tcp/9001/p2p/QmNodeId1"
+    - "/ip4/127.0.0.1/tcp/9002/p2p/QmNodeId2"
+  max_peers: 50
+  max_connections: 100
+  workers: 4
+  debug: true
+  enable_discovery: true
+  enable_metrics: true
+  connection_timeout: 30000
+  protocols:
+    - "LibP2P"
+    - "WebSocket"
+    - "GRpc"
+  capabilities:
+    - "Storage"
+    - "Compute"
+    - "Routing"
+  discovery:
+    enable_mdns: true
+    enable_kademlia: true
+    max_peers: 20
+    discovery_interval:
+      secs: 300
+      nanos: 0
+    bootstrap_nodes:
+      - "/ip4/127.0.0.1/tcp/9001/p2p/QmNodeId1"
+      - "/ip4/127.0.0.1/tcp/9002/p2p/QmNodeId2"
+  security:
+    enable_encryption: true
+    enable_authentication: true
+    enable_authorization: true
+    trusted_peers:
+      - "QmNodeId1"
+      - "QmNodeId2"
+    allowed_peers:
+      - "QmNodeId1"
+      - "QmNodeId2"
+      - "QmNodeId3"
+    blocked_peers:
+      - "QmBlockedId1"
+      - "QmBlockedId2"
+
+plugins:
+  redis:
+    url: "redis://127.0.0.1:6379"
+    timeout_ms: 5000
+    enable_tls: false
+    pool_size: 10
+    enable_exporter: true
+    max_retries: 3
+    retry_delay_ms: 1000
+  ipfs:
+    url: "http://127.0.0.1:5001"
+    gateway: "http://127.0.0.1:8080"
+    enable_tls: false
+    private_network: true
+    swarm_key_path: "./configs/swarm.key"
+    enable_exporter: true
+    run_local_node: false
+  grpc:
+    port: 8090
+    max_message_size: 16777216
+    keep_alive_interval: 20000
+  libp2p:
+    port: 4001
+    protocol_version: "ipfs/1.0.0"
+    dht_enabled: true
+    bootstrap_nodes:
+      - "/ip4/127.0.0.1/tcp/9001/p2p/QmNodeId1"
+      - "/ip4/127.0.0.1/tcp/9002/p2p/QmNodeId2"
+    
+security:
+  auth:
+    jwt_secret: "development-secret-key-do-not-use-in-production"
+    token_management:
+      rotation_enabled: true
+      token_store: "redis"
+      blacklist_expired: true
+      blacklist_check: true
+      token_cache_ttl_seconds: 300
+      clean_expired_interval_minutes: 60
+      max_tokens_per_user: 5
+      allow_multiple_logins: true
+    methods:
+      jwt:
+        enabled: true
+        algorithm: "HS256"
+        secret: "development-secret-key-do-not-use-in-production"
+        expires_in: 86400
+        issuer: "diamondchain"
+        audience: "diamondchain-api"
+        token_expiry_minutes: 1440
+        refresh_token_expiry_days: 30
+      api_key:
+        enabled: true
+        header_name: "X-API-Key"
+        prefix: "dmd-api-"
+        key_length: 32
+        keys:
+          - "test-key-1"
+          - "test-key-2"
+      simple_token:
+        enabled: true
+        header_name: "Authorization"
+        prefix: "Bearer "
+        token_length: 64
+        check_ip: false
+        token_expiry_minutes: 1440
+        tokens:
+          - "test-token-1"
+          - "test-token-2"
+  rate_limit:
+    enabled: true
+    global_rate: 100 

@@ -1,0 +1,8 @@
+# Danh sách lỗi đã phát hiện và sửa trong dự án
+
+## Cần sửa
+- [ ] snipebot/src/tradelogic/smart_trade/executor/risk_manager.rs - Cần triển khai phương thức calculate_risk_score
+
+## Cần hợp nhất (file trùng lặp)
+- [x] constants.rs: Đã hợp nhất các file constants.rs trong thư mục tradelogic vào common/constants.rs. Các file cũ đã xóa và module đã được cập nhật.
+ 

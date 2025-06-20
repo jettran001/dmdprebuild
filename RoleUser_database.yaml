@@ -1,0 +1,17 @@
+# =========================
+# RoleUser_database.yaml - Cấu hình kết nối database cho các role user
+# =========================
+
+mongodb:
+  uri: "mongodb://user:password@localhost:27017/diamondchain"
+  database: "diamondchain"
+  collections:
+    free_user: "free_users"
+    premium_user: "premium_users"
+    vip_user: "vip_users"
+    admin: "admins"
+
+# Có thể mở rộng thêm các loại database khác nếu cần
+# postgres:
+#   uri: "postgres://user:password@localhost:5432/diamondchain"
+#   ... 

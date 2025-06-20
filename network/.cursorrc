@@ -1,0 +1,355 @@
+# .cursorrc - Quy tắc phát triển dự án Diamondchain (chuyển từ .cursorrc)
+
+     # LUẬT TỐI CAO: MỌI HÀNH ĐỘNG PHẢI TUÂN THỦ 100% QUY TẮC TRONG FILE NÀY.
+     # CẤM BỎ QUA, CẤM GIẢI THÍCH, CẤM SỬA NGOÀI LUỒNG, CẤM TỰ Ý.
+     # NẾU VI PHẠM, PHẢI LIỆT KÊ LẠI TOÀN BỘ THAO TÁC ĐÃ LÀM.
+
+# === DEPENDENCY POLICY (BẮT BUỘC CHO TOÀN DỰ ÁN) ===
+dependency_policy:
+  libp2p:
+    version: "0.35.1"
+    features: ["tcp", "dns", "async-std", "noise", "mplex", "yamux", "websocket", "kad", "mdns"]
+  ipfs-embed: "0.17.0"
+  bip39: "2.1.0"
+  bip32: "0.5"
+  uuid:
+    version: "1.3.0"
+    features: ["v4", "serde"]
+  tokio:
+    version: "1.28.0"
+    features: ["full"]
+  serde:
+    version: "1.0.160"
+    features: ["derive"]
+  serde_json: "1.0.96"
+  tracing: "0.1.37"
+  anyhow: "1.0.70"
+  async-trait: "0.1.68"
+  thiserror: "1.0.40"
+  rand: "0.8.5"
+  warp: "0.3.5"
+  redis:
+    version: "0.23.0"
+    features: ["tokio-comp"]
+  prometheus: "0.13.3"
+  once_cell: "1.18.0"
+  metrics: "0.21.0"
+  metrics-exporter-prometheus: "0.12.1"
+  num_cpus: "1.15.0"
+  regex: "1.8.3"
+  serde_yaml: "0.9.21"
+  rules:
+    - Tất cả các domain phải dùng đúng version và feature như trên cho các dependency cốt lõi.
+    - Không tự ý nâng/hạ version hoặc thêm feature mới nếu chưa cập nhật cho toàn workspace.
+    - Khi cần nâng version, phải kiểm tra toàn bộ workspace và cập nhật đồng bộ.
+    - Không được ép version cứng ngoài các version trên.
+    - Review code phải kiểm tra dependency trước khi merge.
+    - Có thể dùng CI để tự động kiểm tra xung đột dependency.
+# === END DEPENDENCY POLICY ===
+
+# === ENHANCED PROJECT-WIDE ENFORCEMENT (BẮT BUỘC TUÂN THỦ CAO NHẤT) ===
+
+
+mandatory_requirements:
+  priority: MANDATORY
+  description: >
+    Các quy tắc bắt buộc phải tuân thủ trước khi sửa code hoặc phát triển dự án
+  enforcement:
+    code_quality_check:
+      priority: HIGHEST
+      description: BẮT BUỘC kiểm tra chất lượng code theo từng bước phát triển
+      rules:
+        - Bắt buộc không tự ý sửa .cursorrc và BĂT BUỘC tuân thủ các quy tắc trong .cursorrc
+        - Bắt buộc Sau khi tạo xong 1 hàm, check lại syntax mới qua hàm kế tiếp
+        - Bắt buộc cần xác nhận từ người dùng trước khi tự thêm file mới
+        - Bắt buộc Sau khi tạo xong 1 file, quét lại có vi phạm nguyên tắc không, nếu có thì sửa lại cho phù hợp
+        - Nếu không tìm thấy file cần tìm, quay lại quét manifest của domain hiện tại
+        - Bắt buộc phải đọc doc comment trước khi sửa code
+    read_manifest:
+      priority: HIGHEST
+      description: BẮT BUỘC đọc kỹ ./manifest.rs trước khi sửa code
+      rules:
+        - Đọc toàn bộ manifest.rs của domain hiện tại để hiểu tổ chức module
+        - Hiểu rõ thứ tự ưu tiên module: api, services, traits, utils
+        - Tham khảo manifest.rs để biết tương tác giữa các domain
+    scan_structure:
+      priority: HIGHEST
+      description: BẮT BUỘC ưu tiên quét manifest.rs của module khi quét cấu trúc dữ liệu
+      rules:
+        - Mỗi khi yêu cầu quét cấu trúc dữ liệu, LUÔN đọc manifest.rs đầu tiên
+        - Khi tìm kiếm file ngoài luồng, tham khảo manifest.rs sau đó quét .map để xác định vị trí chính xác
+        - Dùng thông tin trong manifest.rs để hiểu mối quan hệ giữa các file trước khi tìm kiếm
+        - Khi được yêu cầu quét cấu trúc và tìm lỗi, các lỗi tìm thấy sẽ được cập nhật nội dung có kèm path file và dòng lỗi vào file .bugs
+    project_entry:
+      priority: HIGHEST
+      description: BẮT BUỘC kiểm tra và điều hướng dự án dựa trên manifest.rs trước khi sửa code
+      entry_points:
+        - ./manifest.rs
+      module_resolver:
+        type: rust
+        manifest_file: ./manifest.rs
+        priority_order:
+          - api
+          - services
+          - traits
+          - utils
+      rules:
+        - Kiểm tra cấu trúc module và dependencies dựa trên manifest.rs
+        - Xác định quy tắc về import order, thread safety, async patterns, error handling, type handling, caching, testing
+        - Không vi phạm bất kỳ quy tắc nào trong .cursorrc
+        - Duy trì thứ tự ưu tiên module như trong manifest.rs
+    doc_mode:
+      priority: MANDATORY
+      comment: AI bắt buộc đọc doc comment trước khi phân tích code.
+      rules:
+        - Không sửa code nếu chưa đọc doc comment
+        - Ưu tiên sửa theo doc nếu mâu thuẫn giữa code và comment
+    during_edit:
+      priority: MANDATORY
+      description: BẮT BUỘC tuân thủ khi chỉnh sửa code
+      rules:
+        - Duy trì cấu trúc module như trong manifest.rs
+        - Tuân thủ các mẫu thiết kế đã thiết lập
+        - Đọc comment trước khi sửa code
+        - Khi tạo các folder hoặc file mới, luôn dùng các command cho powershell để tạo
+        - Khi được yêu cầu sửa lỗi, chỉ tập trung sửa các lỗi liên quan đến thư mục hoặc file được yêu cầu, không sửa lung tung ra các khu vực khác
+        - Chỉ thông báo đến người dùng các lỗi nghiêm trọng ngoài luồng cần sửa tiếp theo
+        - Kiểm tra các lỗi chưa sửa trong file .bugs có liên quan đến file đang sửa không, nếu có thì sửa lại cho phù hợp
+        - Khi sửa lỗi phải đảm bảo hoàn thiện code, xong 1 phạm vi mới qua phạm vi tiếp theo
+    post_check:
+      priority: HIGH
+      description: BẮT BUỘC kiểm tra sau khi chỉnh sửa
+      rules:
+        - Kiểm tra tính toàn vẹn module sau khi chỉnh sửa
+        - Cập nhật tài liệu khi thay đổi chức năng
+        - Sau khi sửa lỗi, xóa đi các lỗi đã được sửa trong file .bugs
+        - Cập nhật lại các thay đổi vào file manifest.rs của domain hiện tại
+        - Khi cập nhật manifest.rs quét định dạng trước và  chỉ cập nhật các thay đổi theo định dạng mặc định có sẵn
+    module_synchronization:
+      priority: HIGH
+      description: BẮT BUỘC đảm bảo đồng bộ giữa các module
+      rules:
+        - Cập nhật tài liệu khi thay đổi module, tham khảo manifest.rs
+        - Đảm bảo trait definitions thống nhất giữa các module
+        - Cập nhật module phụ thuộc khi thay đổi interface
+        - Đảm bảo event handlers đăng ký đầy đủ
+        - Đảm bảo thread safety khi truy cập shared state
+
+enhanced_enforcement:
+  priority: HIGHEST
+  description: >
+    Tất cả thành viên và AI phải tuân thủ tuyệt đối các quy tắc sau để đảm bảo code đồng bộ, liên kết, giảm lỗi thực tế tối đa.
+  rules:
+    - Mọi function, struct, trait public phải có doc comment rõ ràng, cập nhật khi sửa code.
+    - Tất cả error phải dùng Result<T, E> với error type rõ ràng (không dùng String cho error), ưu tiên anyhow/thiserror.
+    - Không unwrap/expect trừ khi test, nếu dùng phải log lý do rõ ràng.
+    - Tất cả error phải có log ở nơi catch cuối cùng.
+    - Chỉ dùng tokio::sync::Mutex/RwLock trong async context, không dùng std::sync::Mutex cho async.
+    - Trait object async phải có Send + Sync + 'static, kiểm tra Send/Sync khi spawn task hoặc truyền object qua thread.
+    - Tất cả collection (HashMap, Vec, Option, Result...) phải có type annotation rõ ràng.
+    - Khi dùng generic, luôn chỉ định trait bound (T: Clone + Send + Sync + 'static nếu cần).
+    - Không dùng 'static tràn lan, chỉ dùng khi thực sự cần.
+    - Import đúng thứ tự: external -> std -> internal -> third-party. Không lặp lại trait/service ở nhiều nơi, chỉ export từ 1 module gốc.
+    - Tất cả mod.rs phải khai báo đủ module con, không để thừa hoặc thiếu. Không để code thừa, service mock không còn dùng phải xoá khỏi mod.
+    - Tất cả struct dùng cho config, API, validation phải derive Serialize, Deserialize, Default. Struct config phải có Default và validate rõ ràng.
+    - Không hardcode giá trị nhạy cảm, luôn dùng env/config.
+    - Chỉ dùng đúng version, feature như quy định trong dependency_policy. Không tự ý thêm/xoá dependency, mọi thay đổi phải review toàn workspace.
+    - Tất cả input phải validate qua macro hoặc function chuẩn hoá. Không dùng regex tự do, phải dùng constant pattern và macro error.
+    - Bắt buộc chạy cargo clippy -- -D warnings, cargo test, và static analysis trước khi merge. Tích hợp CI/CD reject build nếu vi phạm bất kỳ quy tắc nào ở trên.
+    - Review code phải check đủ: error handling, async/thread safety, type, trait, doc, import, config, security. Refactor phải đồng bộ cả mod.rs, manifest, doc, test.
+    - Sau mỗi lần sửa lỗi lớn, cập nhật lại checklist và bổ sung quy tắc mới vào .cursorrc nếu cần.
+    - Không ai được phép bypass các quy tắc này, mọi vi phạm phải log lại và sửa ngay.
+# === END ENHANCED ENFORCEMENT ===
+
+project:
+  name: Diamondchain - SnipeBot DeFi
+  description: Bot giao dịch DeFi thông minh hỗ trợ đa blockchain với các tính năng cao cấp
+  version: 0.1.0
+  authors:
+    - Diamond Chain Team
+  license: MIT
+  year: 2023
+
+rust:
+  toolchain: stable-1.76.0
+
+clippy:
+  warns:
+    - all
+  denies:
+    - unsafe_code
+    - unwrap_used
+    - expect_used
+    - missing_docs
+    - unused_must_use
+
+format:
+  enable: true
+  onSave: true
+  indentation: 4
+  line_length: 100
+  trailing_comma: true
+
+hooks:
+  pre-commit:
+    - cargo fmt -- --check
+    - cargo clippy -- -D warnings
+    - cargo test
+
+workspace:
+  autoDiscover: true
+  ignore:
+    - target/
+    - node_modules/
+    - dist/
+    - .git/
+    - logs/
+  modules:
+    common:
+      description: Thư viện chung và utilities
+    blockchain:
+      description: Tương tác với blockchain, Quản lý EIP-2535
+    wallet:
+      description: Quản lý ví an toàn
+    snipebot:
+      description: Core logic của bot
+    network/wasm:
+      description: WebAssembly cho giao tiếp mạng
+    diamond_manager:
+      description: Quản trị hệ thống
+    frontend:
+      description: Giao diện người dùng web
+    ai_modules:
+      description: Các module AI cho phân tích và tối ưu hóa giao dịch
+
+editor:
+  tab_size: 4
+  ruler: 100
+  formatOnSave: true
+  match_extensions:
+    - .rs
+    - .toml
+  ignored_folders:
+    - target/
+    - node_modules/
+    - dist/
+    - .git/
+    - logs/
+
+hints:
+  explain_module_structure: true
+  preferred_entry_comment: >
+    🧭 BẮT BUỘC đọc src/registry/manifest.rs trước khi sửa code. Đây là bản đồ nhỏ cho từng domain, giúp hiểu tổ chức module và tương tác trong dự án.
+
+file_discovery:
+  priority: HIGH
+  description: Hướng dẫn tìm kiếm file trong cấu trúc dự án
+  rules:
+    - Luôn bắt đầu từ manifest.rs của module khi quét cấu trúc hoặc tìm kiếm file
+    - Ưu tiên tìm kiếm file thông qua thông tin trong manifest.rs trước khi dùng tìm kiếm tổng quát
+    - Khi cần xác định vị trí của một module hoặc file cụ thể, tham khảo manifest.rs của domain tương ứng
+  module_manifest_paths:
+    wallet: wallet/manifest.rs
+    snipebot: snipebot/manifest.rs
+    blockchain: blockchain/manifest.rs
+    network: network/manifest.rs
+    common: common/manifest.rs
+
+development_workflow:
+  code_review:
+    checklist:
+      - Kiểm tra quy tắc đặt tên
+      - Kiểm tra thread safety
+      - Kiểm tra error handling
+      - Kiểm tra async patterns
+      - Kiểm tra documentation
+  testing:
+    unit_tests: Viết unit test cho hàm quan trọng
+    integration_tests: Viết integration test cho module
+    benchmarks: Thêm benchmarks cho hàm performance-critical
+  documentation:
+    code_comments: Cập nhật tài liệu dựa trên cấu trúc trong manifest.rs
+
+file_protection:
+  priority: HIGHEST
+  description: >
+    CẤM XOÁ FILE BẤT KỲ NẾU CHƯA ĐƯỢC NGƯỜI DÙNG XÁC NHẬN RÕ RÀNG BẰNG VĂN BẢN.
+    TRƯỚC KHI XOÁ, BẮT BUỘC PHẢI ĐỌC KỸ NỘI DUNG FILE VÀ XÁC NHẬN LẠI VỚI NGƯỜI DÙNG.
+  rules:
+    - Không được xoá file hoặc folder nào nếu chưa được người dùng xác nhận rõ ràng.
+    - Trước khi xoá, phải đọc toàn bộ nội dung file và log lại nội dung.
+    - Nếu file chứa nhiều trait/service, chỉ được xoá phần liên quan, không xoá toàn bộ file.
+    - Nếu lỡ xoá, phải khôi phục lại ngay lập tức hoặc báo cáo cho người dùng.
+    - Khi hợp nhất và trước khi xoá file trùng lặp, cần hợp nhất nội dung trước, chỉ được xoá file trùng lặp sau khi đã hợp nhất xong.
+
+commands:
+  cargo:
+    clippy: cd {directory}; cargo clippy --package {package} --lib -- -D warnings
+    clippy_all: cargo clippy -- -D warnings
+    build: cd {directory}; cargo build
+    test: cd {directory}; cargo test
+    run: cd {directory}; cargo run
+    check: cd {directory}; cargo check
+    fmt: cd {directory}; cargo fmt
+    fix: cd {directory}; cargo fix --allow-dirty
+
+patterns:
+  naming:
+    variables: snake_case
+    functions: snake_case
+    types: PascalCase
+    constants: SCREAMING_SNAKE_CASE
+    modules: snake_case
+    context_flow:
+      enabled: true
+      comment: Dữ liệu và flow giữa các module nên được annotate rõ ràng bằng doc-comment + macro marker.
+      rules:
+        - Luôn thêm #[flow_from(...)] trên các trait/fn nhận dữ liệu từ module khác
+        - Annotate luồng giữa các domain bằng doc comment dạng: /// Flow từ snipebot -> wallet -> blockchain
+  imports:
+    order:
+      - // External imports
+      - use ethers::{...};
+      - ""
+      - // Standard library imports
+      - use std::{...};
+      - ""
+      - // Internal imports
+      - use crate::{...};
+      - ""
+      - // Third party imports
+      - use anyhow::{...};
+      - use tracing::{...};
+  error_handling:
+    unwrap: Tránh dùng .unwrap(), .expect() trừ khi có lý do chính đáng
+    result_type: Sử dụng anyhow::Result và ? operator
+    context: Sử dụng context() hoặc with_context() cho lỗi
+  async:
+    thread_safety:
+      trait_bounds: Thêm Send + Sync + 'static cho trait objects trong async
+      rwlock_usage: Sử dụng tokio::sync::RwLock trong async context
+  feature_flags:
+    rules:
+      - Sử dụng feature flags trong Cargo.toml để bật/tắt tính năng
+      - Sử dụng #[cfg(feature = "...")] cho conditional compilation
+      - Cung cấp lỗi rõ ràng khi tính năng bị vô hiệu hóa
+
+types:
+  blockchain:
+    - Address - ethers::types::Address
+    - U256 - ethers::types::U256
+    - H256 - ethers::types::H256
+  custom:
+    - ChainConfig - Cấu hình cho blockchain
+    - WalletConfig - Cấu hình ví
+    - ApiResponse<T> - Cấu trúc chung cho API Response
+
+authentication_standardization:
+  priority: HIGHEST
+  description: >
+    Chuẩn hóa xác thực/phân quyền: Các định nghĩa AuthService, UserRole, Claims, AuthInfo, AuthType, AuthError, Auth trait chỉ được định nghĩa và sử dụng từ network/security/auth_middleware.rs. Không được định nghĩa lại ở bất kỳ file nào khác. Khi cần xác thực hoặc phân quyền, luôn import từ auth_middleware.rs.
+  rules:
+    - Không được định nghĩa lại AuthService, UserRole, Claims, AuthInfo, AuthType, AuthError, Auth trait ở bất kỳ file nào ngoài network/security/auth_middleware.rs
+    - Khi cần xác thực hoặc phân quyền, luôn import từ auth_middleware.rs
+    - Nếu phát hiện trùng lặp, phải hợp nhất về auth_middleware.rs và xóa các bản định nghĩa cũ
+
